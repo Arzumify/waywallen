@@ -216,6 +216,7 @@ static int probe_caps(ww_pool_t *pool, uint32_t width, uint32_t height) {
         gbm_bo_destroy(probe_bo);
 
         /* Per-modifier probe — every modifier GBM can produce. */
+        bool has_linear = false;
         for (size_t i = 0; i < bag.n; ++i) {
             uint32_t planes = 1;
             if (gbm_probe_one_modifier(st->gbm, fourcc, mod_buf[i],
@@ -227,6 +228,30 @@ static int probe_caps(ww_pool_t *pool, uint32_t width, uint32_t height) {
             entries[n].modifier    = mod_buf[i];
             entries[n].plane_count = planes;
             n += 1;
+            if (mod_buf[i] == DRM_FORMAT_MOD_LINEAR) has_linear = true;
+        }
+
+        /* Cross-vendor escape hatch: ensure LINEAR is advertised for
+         * every probed fourcc. NVIDIA's eglQueryDmaBufModifiersEXT
+         * returns its proprietary tile set without LINEAR, but the
+         * driver imports LINEAR fine via the no-modifier EGLImage
+         * path (used by alloc_slot's CompatLinear branch). Without
+         * this, an NVIDIA producer ↔ AMD consumer pair has zero
+         * intersection on every fourcc and pick_format returns
+         * NoFormatIntersection. Probe LINEAR allocability via GBM
+         * and append on success — same trust level as the global
+         * 0-entry LINEAR_ONLY fallback below. */
+        if (!has_linear && n < cap) {
+            struct gbm_bo *lin_bo = gbm_bo_create(
+                st->gbm, width, height, fourcc,
+                GBM_BO_USE_LINEAR | GBM_BO_USE_RENDERING);
+            if (lin_bo) {
+                gbm_bo_destroy(lin_bo);
+                entries[n].fourcc      = fourcc;
+                entries[n].modifier    = DRM_FORMAT_MOD_LINEAR;
+                entries[n].plane_count = 1;
+                n += 1;
+            }
         }
     }
 
