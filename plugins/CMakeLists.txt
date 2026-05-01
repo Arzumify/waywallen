@@ -9,6 +9,7 @@ project(waywallen-plugins
 # OFF if its native deps (libmpv, ffmpeg, Vulkan, ...) aren't available.
 option(WAYWALLEN_BUILD_MPV_PLUGIN   "Build the libmpv video plugin" ON)
 option(WAYWALLEN_BUILD_IMAGE_PLUGIN "Build the ffmpeg+Vulkan image plugin" ON)
+option(WAYWALLEN_BUILD_VIDEO_PLUGIN "Build the ffmpeg+Vulkan video plugin (mpv replacement; coexists at lower priority)" ON)
 
 # Resolve waywallen-bridge once so every plugin in this tree shares the same
 # target instead of rebuilding it per-subdir. Plugins that also stand alone
@@ -23,4 +24,8 @@ endif()
 
 if(WAYWALLEN_BUILD_IMAGE_PLUGIN)
     add_subdirectory(image)
+endif()
+
+if(WAYWALLEN_BUILD_VIDEO_PLUGIN)
+    add_subdirectory(video)
 endif()
