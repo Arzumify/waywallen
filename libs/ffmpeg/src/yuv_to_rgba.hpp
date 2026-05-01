@@ -122,6 +122,10 @@ public:
         uint32_t*       uv_qf_in_out;
         uint32_t        src_w;
         uint32_t        src_h;
+        // 8 → R8 / R8G8 image views (NV12). 16 → R16 / R16G16 (P010 /
+        // P016). The shader samples normalized [0,1] regardless of
+        // depth, so no further changes are needed for HDR-grade SDR.
+        uint32_t        bit_depth;
     };
     int convert_av_vk_frame(const VkFrameImports& imports,
                             VkImage             dst,

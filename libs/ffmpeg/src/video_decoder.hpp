@@ -72,8 +72,12 @@ struct VkFrameView {
     uint32_t       width;
     uint32_t       height;
     double         pts_seconds;
-    uint32_t       colorspace { 0 };
+    uint32_t       colorspace  { 0 };
     uint32_t       color_range { 0 };
+    // 8 (NV12) or 16 (P010 / P016). Drives the VkFormat YuvToRgba uses
+    // for the per-call Y/UV imageviews. Stream is tagged 10-bit when
+    // the codec set bits_per_raw_sample >= 10 in get_format.
+    uint32_t       bit_depth   { 8 };
 };
 
 class VideoDecoder {

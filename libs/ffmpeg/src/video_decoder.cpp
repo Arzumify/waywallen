@@ -103,7 +103,13 @@ AVPixelFormat get_format_prefer_vulkan(AVCodecContext* cctx,
     if (!fr) return avcodec_default_get_format(cctx, fmts);
     auto* fc  = reinterpret_cast<AVHWFramesContext*>(fr->data);
     fc->format    = AV_PIX_FMT_VULKAN;
-    fc->sw_format = AV_PIX_FMT_NV12;
+    /* Pick 8-bit NV12 by default; promote to 10-bit P010 when the
+     * codec context advertises >=10-bit per raw sample (h264 high10,
+     * hevc main10, AV1 10-bit, etc.). On AVHWFramesContext init failure
+     * we fall through to sw decode below. */
+    fc->sw_format = (cctx->bits_per_raw_sample >= 10)
+        ? AV_PIX_FMT_P010
+        : AV_PIX_FMT_NV12;
     fc->width     = cctx->coded_width  > 0 ? cctx->coded_width  : cctx->width;
     fc->height    = cctx->coded_height > 0 ? cctx->coded_height : cctx->height;
     auto* vfc = reinterpret_cast<AVVulkanFramesContext*>(fc->hwctx);
@@ -397,6 +403,18 @@ FrameStatus VideoDecoder::next_vk_frame(VkFrameView& out, DecodeError* err) {
             out.height       = static_cast<uint32_t>(st.src_frame->height);
             out.colorspace   = map_colorspace(st.src_frame->colorspace);
             out.color_range  = map_range(st.src_frame->color_range);
+            /* Look up the AVHWFramesContext's sw_format to know whether
+             * the GPU images we're about to sample are 8-bit (NV12) or
+             * 10-bit (P010). Both are 2-image disjoint formats here. */
+            out.bit_depth = 8;
+            if (st.src_frame->hw_frames_ctx) {
+                auto* hwfc = reinterpret_cast<AVHWFramesContext*>(
+                    st.src_frame->hw_frames_ctx->data);
+                if (hwfc->sw_format == AV_PIX_FMT_P010
+                    || hwfc->sw_format == AV_PIX_FMT_P016) {
+                    out.bit_depth = 16;
+                }
+            }
             const int64_t pts = (st.src_frame->best_effort_timestamp != AV_NOPTS_VALUE)
                 ? st.src_frame->best_effort_timestamp
                 : st.src_frame->pts;

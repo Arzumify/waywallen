@@ -743,15 +743,19 @@ int YuvToRgba::convert_av_vk_frame(const VkFrameImports& im,
         vci.components       = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                                  VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
 
+        const VkFormat y_fmt  = (im.bit_depth >= 16)
+            ? VK_FORMAT_R16_UNORM   : VK_FORMAT_R8_UNORM;
+        const VkFormat uv_fmt = (im.bit_depth >= 16)
+            ? VK_FORMAT_R16G16_UNORM : VK_FORMAT_R8G8_UNORM;
         vci.image  = im.y_image;
-        vci.format = VK_FORMAT_R8_UNORM;
+        vci.format = y_fmt;
         if (VkResult r = vkCreateImageView(device_, &vci, nullptr, &y_view);
             r != VK_SUCCESS) {
             fail(err, std::string("vkCreateImageView(Y, AVVkFrame): ") + vk_result_str(r));
             cleanup_views(); return -1;
         }
         vci.image  = im.uv_image;
-        vci.format = VK_FORMAT_R8G8_UNORM;
+        vci.format = uv_fmt;
         if (VkResult r = vkCreateImageView(device_, &vci, nullptr, &uv_view);
             r != VK_SUCCESS) {
             fail(err, std::string("vkCreateImageView(UV, AVVkFrame): ") + vk_result_str(r));

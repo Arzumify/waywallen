@@ -453,6 +453,7 @@ int main(int argc, char** argv) {
                                                        : &vkv.queue_family[0];
             im.src_w            = vkv.width;
             im.src_h            = vkv.height;
+            im.bit_depth        = vkv.bit_depth;
             sync_fd = yuv->convert_av_vk_frame(
                 im, reinterpret_cast<VkImage>(s.vk_image),
                 s.width, s.height, color_matrix, &yerr);
