@@ -475,10 +475,14 @@ static int backend_init(ww_pool_t *pool, const void *init_data) {
     st->device       = (VkDevice)init->device;
     st->queue        = (VkQueue)init->queue;
     st->queue_family = init->queue_family_index;
-    st->image_usage  = init->image_usage_flags
-                           ? init->image_usage_flags
-                           : (VK_IMAGE_USAGE_TRANSFER_DST_BIT
-                              | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
+    /* Default to TRANSFER_DST when caller passed 0; force TRANSFER_SRC
+     * unconditionally because the consumer (waywallen-display) imports
+     * the dma-buf as TRANSFER_SRC-only and the modifier sub-layout must
+     * match on both sides. */
+    st->image_usage  = (init->image_usage_flags
+                            ? init->image_usage_flags
+                            : VK_IMAGE_USAGE_TRANSFER_DST_BIT)
+                       | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
 
     /* See pool_egl_gbm: function-pointer-vs-object-pointer trick. */
     union {

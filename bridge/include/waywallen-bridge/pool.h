@@ -152,10 +152,19 @@ typedef struct ww_pool_vulkan_init {
     /* VkImageUsageFlags for the slot images bridge allocates. The
      * producer is responsible for ensuring the negotiated DRM modifier's
      * tiling-features cover these usages — when alloc fails, bridge
-     * emits bind_failed and the daemon re-picks. Pass 0 to use the
-     * default (TRANSFER_DST | TRANSFER_SRC), which matches the "transfer
-     * only producer + transfer-only consumer shadow" setup that all
-     * existing producers use. */
+     * emits bind_failed and the daemon re-picks.
+     *
+     * Bridge always OR-s VK_IMAGE_USAGE_TRANSFER_SRC_BIT into whatever
+     * the producer requests, because the consumer (display side) imports
+     * the dma-buf as TRANSFER_SRC-only and needs the modifier sub-layout
+     * to match. Producers therefore only need to pass the *write* usage
+     * they require (e.g. TRANSFER_DST_BIT for blit producers,
+     * COLOR_ATTACHMENT_BIT for direct-render producers).
+     *
+     * Pass 0 to use the default TRANSFER_DST_BIT (the SRC bit is added
+     * unconditionally regardless), which matches the "transfer-only
+     * producer + transfer-only consumer shadow" setup that all existing
+     * producers use. */
     uint32_t image_usage_flags;
 } ww_pool_vulkan_init_t;
 
