@@ -1,4 +1,4 @@
-#include "av_video.hpp"
+#include "video_decoder.hpp"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -11,7 +11,7 @@ extern "C" {
 #include <cstdio>
 #include <cstring>
 
-namespace ww_video {
+namespace waywallen::ffvk {
 
 namespace {
 
@@ -61,20 +61,17 @@ std::string av_err_str(int rc) {
 } // namespace
 
 struct VideoDecoder::State {
-    FmtCtxPtr   fmt;
-    CodecCtxPtr cctx;
-    PacketPtr   pkt;
-    FramePtr    src_frame;
-    SwsPtr      sws;
+    FmtCtxPtr     fmt;
+    CodecCtxPtr   cctx;
+    PacketPtr     pkt;
+    FramePtr      src_frame;
+    SwsPtr        sws;
     AVPixelFormat sws_src_fmt { AV_PIX_FMT_NONE };
-    int         sws_src_w     { 0 };
-    int         sws_src_h     { 0 };
-    int         video_idx     { -1 };
-    AVRational  stream_tb     { 0, 1 };
-    // Decoder is in flush-mode: we sent a NULL packet and are draining
-    // remaining frames. Once `avcodec_receive_frame` returns AVERROR_EOF,
-    // either loop (seek + flush_buffers) or report eof.
-    bool        flushing      { false };
+    int           sws_src_w   { 0 };
+    int           sws_src_h   { 0 };
+    int           video_idx   { -1 };
+    AVRational    stream_tb   { 0, 1 };
+    bool          flushing    { false };
 };
 
 namespace {
@@ -85,10 +82,11 @@ bool ensure_sws(VideoDecoder::State& st, int src_w, int src_h, AVPixelFormat src
         && st.sws_src_fmt == src_fmt) {
         return true;
     }
+    /* Always emit NV12 — that's what YuvToRgba consumes. */
     st.sws.reset(sws_getContext(src_w, src_h, src_fmt,
                                 static_cast<int>(target_w),
                                 static_cast<int>(target_h),
-                                AV_PIX_FMT_RGBA,
+                                AV_PIX_FMT_NV12,
                                 SWS_BICUBIC, nullptr, nullptr, nullptr));
     if (!st.sws) return false;
     st.sws_src_w = src_w;
@@ -119,6 +117,10 @@ VideoDecoder::open(const std::string& path,
         fail(err, "target dimensions must be non-zero");
         return nullptr;
     }
+    /* NV12 chroma is half-resolution → both dims must be even. */
+    if (target_w & 1u) ++target_w;
+    if (target_h & 1u) ++target_h;
+
     auto self = std::unique_ptr<VideoDecoder>(new VideoDecoder());
     self->target_w_ = target_w;
     self->target_h_ = target_h;
@@ -140,10 +142,7 @@ VideoDecoder::open(const std::string& path,
 
     int idx = av_find_best_stream(self->st_->fmt.get(),
                                   AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-    if (idx < 0) {
-        fail(err, "no video stream in file");
-        return nullptr;
-    }
+    if (idx < 0) { fail(err, "no video stream in file"); return nullptr; }
     self->st_->video_idx = idx;
     AVStream*           st  = self->st_->fmt->streams[idx];
     AVCodecParameters*  par = st->codecpar;
@@ -151,15 +150,11 @@ VideoDecoder::open(const std::string& path,
 
     const AVCodec* dec = avcodec_find_decoder(par->codec_id);
     if (!dec) {
-        fail(err, std::string("no decoder for codec ") +
-                  avcodec_get_name(par->codec_id));
+        fail(err, std::string("no decoder for codec ") + avcodec_get_name(par->codec_id));
         return nullptr;
     }
     self->st_->cctx.reset(avcodec_alloc_context3(dec));
-    if (!self->st_->cctx) {
-        fail(err, "avcodec_alloc_context3 failed");
-        return nullptr;
-    }
+    if (!self->st_->cctx) { fail(err, "avcodec_alloc_context3 failed"); return nullptr; }
     if (int rc = avcodec_parameters_to_context(self->st_->cctx.get(), par); rc < 0) {
         fail(err, "avcodec_parameters_to_context: " + av_err_str(rc));
         return nullptr;
@@ -175,28 +170,22 @@ VideoDecoder::open(const std::string& path,
         fail(err, "av_packet_alloc / av_frame_alloc failed");
         return nullptr;
     }
-
     return self;
 }
 
-FrameStatus VideoDecoder::next_frame(RgbaFrame& out, DecodeError* err) {
+FrameStatus VideoDecoder::next_frame(Nv12Frame& out, DecodeError* err) {
     State& st = *st_;
 
-    // Resize the output buffer once per (target_w, target_h) lifetime.
-    const uint32_t stride = target_w_ * 4u;
-    if (out.width != target_w_ || out.height != target_h_
-        || out.data.size() != static_cast<size_t>(stride) * target_h_) {
+    /* Resize output buffer to NV12 size on first call (and on extent
+     * change, but the extent is fixed for VideoDecoder lifetime). */
+    const size_t want = size_t(target_w_) * target_h_ * 3 / 2;
+    if (out.width != target_w_ || out.height != target_h_ || out.data.size() != want) {
         out.width  = target_w_;
         out.height = target_h_;
-        out.stride = stride;
-        out.data.assign(static_cast<size_t>(stride) * target_h_, 0u);
+        out.data.assign(want, 0u);
     }
 
-    // Pull packets until the decoder yields one frame. On EOF, either
-    // seek to start and continue (loop) or return eof to the caller.
     while (true) {
-        // Try to drain the decoder first — it may have a frame queued
-        // from the last submission.
         int rc = avcodec_receive_frame(st.cctx.get(), st.src_frame.get());
         if (rc == 0) {
             const auto src_fmt = static_cast<AVPixelFormat>(st.src_frame->format);
@@ -211,8 +200,12 @@ FrameStatus VideoDecoder::next_frame(RgbaFrame& out, DecodeError* err) {
                           av_get_pix_fmt_name(src_fmt) + ")");
                 return FrameStatus::error;
             }
-            uint8_t* dst_planes[4]  = { out.data.data(), nullptr, nullptr, nullptr };
-            int      dst_strides[4] = { static_cast<int>(stride), 0, 0, 0 };
+            uint8_t* y_dst  = out.data.data();
+            uint8_t* uv_dst = out.data.data() + size_t(target_w_) * target_h_;
+            uint8_t* dst_planes[4]  = { y_dst, uv_dst, nullptr, nullptr };
+            int      dst_strides[4] = { static_cast<int>(target_w_),
+                                        static_cast<int>(target_w_),  /* NV12 UV pitch == width */
+                                        0, 0 };
             int scaled = sws_scale(st.sws.get(),
                                    st.src_frame->data, st.src_frame->linesize,
                                    0, src_h, dst_planes, dst_strides);
@@ -230,7 +223,6 @@ FrameStatus VideoDecoder::next_frame(RgbaFrame& out, DecodeError* err) {
             return FrameStatus::ok;
         }
         if (rc == AVERROR_EOF) {
-            // Decoder fully drained.
             if (loop_) {
                 if (!seek_to_start(st)) {
                     fail(err, "loop seek-to-zero failed");
@@ -245,12 +237,7 @@ FrameStatus VideoDecoder::next_frame(RgbaFrame& out, DecodeError* err) {
             return FrameStatus::error;
         }
 
-        // EAGAIN — feed another packet.
-        if (st.flushing) {
-            // We've already sent the NULL packet; just keep draining until
-            // EOF arrives on the next receive call.
-            continue;
-        }
+        if (st.flushing) continue;
 
         rc = av_read_frame(st.fmt.get(), st.pkt.get());
         if (rc == AVERROR_EOF) {
@@ -272,8 +259,7 @@ FrameStatus VideoDecoder::next_frame(RgbaFrame& out, DecodeError* err) {
             fail(err, "avcodec_send_packet: " + av_err_str(rc));
             return FrameStatus::error;
         }
-        // Loop back to receive_frame.
     }
 }
 
-} // namespace ww_video
+} // namespace waywallen::ffvk

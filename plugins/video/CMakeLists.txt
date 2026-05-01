@@ -10,16 +10,11 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # ---------------------------------------------------------------------------
-# Dependencies — same set as the image plugin since Iter 0 reuses its
-# staging-upload pattern. Iter 1 hoists VkProducer into libs/ffmpeg and
-# both plugins link the same shared lib instead of duplicating the code.
+# Dependencies — Iter 2: libav* + sw scale come transitively through
+# waywallen::ffmpeg_vk (which owns the streaming decoder and GPU YUV→RGB
+# pipeline). The plugin only needs Vulkan + threads directly.
 # ---------------------------------------------------------------------------
 
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(AVFORMAT REQUIRED IMPORTED_TARGET libavformat>=58)
-pkg_check_modules(AVCODEC  REQUIRED IMPORTED_TARGET libavcodec>=58)
-pkg_check_modules(AVUTIL   REQUIRED IMPORTED_TARGET libavutil>=56)
-pkg_check_modules(SWSCALE  REQUIRED IMPORTED_TARGET libswscale>=5)
 find_package(Vulkan REQUIRED)
 find_package(Threads REQUIRED)
 
@@ -47,7 +42,6 @@ endif()
 
 add_executable(waywallen-video-renderer
     src/main.cpp
-    src/av_video.cpp
 )
 
 target_compile_features(waywallen-video-renderer PRIVATE cxx_std_20)
@@ -56,7 +50,8 @@ target_compile_options(waywallen-video-renderer PRIVATE
     -Wno-missing-field-initializers
 )
 
-# waywallen::ffmpeg_vk supplies waywallen::ffvk::Producer (Iter 1).
+# waywallen::ffmpeg_vk supplies the shared Vulkan device, streaming
+# video decoder, and GPU NV12→RGBA compute pipeline.
 if(NOT TARGET waywallen::ffmpeg_vk)
     add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../libs/ffmpeg
                      waywallen-ffmpeg-build EXCLUDE_FROM_ALL)
@@ -66,10 +61,6 @@ target_link_libraries(waywallen-video-renderer
     PRIVATE
         waywallen::bridge
         waywallen::ffmpeg_vk
-        PkgConfig::AVFORMAT
-        PkgConfig::AVCODEC
-        PkgConfig::AVUTIL
-        PkgConfig::SWSCALE
         Vulkan::Vulkan
         Threads::Threads
 )
