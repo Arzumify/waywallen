@@ -656,15 +656,18 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
                 .resolve(&entry.wp_type)
                 .map(|def| def.name.clone());
 
-            let mut plugin_kv = plugin_name
+            let plugin_kv = plugin_name
                 .as_deref()
                 .and_then(|n| state.settings.plugin(n))
                 .unwrap_or_default();
-            // Promote `fps` out of the plugin kv into the typed spawn
-            // field so it ends up as `--fps N` instead of getting
-            // double-passed via metadata.
+            // Read the typed `fps` spawn field out of plugin kv if
+            // present, defaulting to 30. Step 4 of the renderer-Init
+            // refactor removed the legacy argv block, so fps now only
+            // travels on `Init.fps` — no double-pass risk, no need to
+            // `remove` the key from `plugin_kv` first. The schema
+            // validator filters unknown plugin-kv keys downstream.
             let fps: u32 = plugin_kv
-                .remove("fps")
+                .get("fps")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30);
 

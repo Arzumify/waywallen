@@ -753,6 +753,16 @@ int main(int argc, char** argv) {
     if (const char* v = kv_get(init.settings, "hwdec")) {
         opt.hwdec = !(std::strcmp(v, "no") == 0);
     }
+    // render_node is identity-tagged in the manifest — a change forces
+    // a respawn, so init_egl below picks up the right GPU on each spawn.
+    // CLI `--render-node` wins over the Init-supplied value (dev escape
+    // hatch for standalone debug runs).
+    if (opt.render_node.empty()) {
+        if (const char* v = kv_get(init.settings, "render_node");
+            v && *v) {
+            opt.render_node = v;
+        }
+    }
     ww_bridge_init_free(&init);
 
     if (opt.video_path.empty())

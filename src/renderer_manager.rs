@@ -524,23 +524,16 @@ impl RendererManager {
 
         let mut cmd = Command::new(&renderer_def.bin);
         cmd.arg("--ipc").arg(&sock_path);
-        // Legacy argv — kept until wescene migrates off in OWE follow-up.
-        // Image and mpv renderers in this repo now consume Init only and
-        // ignore these flags. wescene-renderer (in open-wallpaper-engine)
-        // still parses argv via argparse, so the daemon double-sends:
-        // typed Init handshake above + the legacy `--<k> <v>` argv below.
-        cmd.arg("--width")
-            .arg(req.width.to_string())
-            .arg("--height")
-            .arg(req.height.to_string())
-            .arg("--fps")
-            .arg(req.fps.to_string());
-        for (key, value) in &req.metadata {
-            cmd.arg(format!("--{key}")).arg(value);
-        }
-        if req.test_pattern {
-            cmd.arg("--test-pattern");
-        }
+        // Step 4 of the renderer-Init refactor: the legacy `--<k> <v>`
+        // argv block (width/height/fps + metadata + test-pattern) is
+        // gone — every spawn parameter rides on the typed Init message
+        // sent immediately after accept(). The mpv renderer's
+        // `--render-node` was historically passed here too; it now
+        // lives in mpv's `[renderer.settings]` (identity = true) and
+        // is read off `init.settings` before EGL init. The renderer
+        // still recognises `--render-node` on the command line as a
+        // dev escape hatch for standalone-debug runs, but the daemon
+        // no longer emits it.
         cmd.kill_on_drop(true)
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
@@ -1321,8 +1314,14 @@ pub(crate) fn build_init_msg(
         }
         (v.primary_value, v.extras, v.settings)
     } else {
-        log::info!(
-            "renderer '{}' has no manifest schema; using legacy primary-key fallback",
+        // No schema declared on the manifest. Every in-tree renderer
+        // (image / mpv / wescene) now ships a v6 schema, so this branch
+        // is unreachable from any bundled manifest — kept for forward-
+        // compat with third-party plugins, but flagged as deprecated.
+        log::warn!(
+            "renderer '{}' has no manifest schema (no [renderer.settings] / extras); \
+             using legacy primary-key fallback. Schema-less manifests are deprecated; \
+             add a v6 schema before the next release.",
             def.name
         );
         const PRIMARY_KEYS: [&str; 4] = ["scene", "video", "image", "path"];
