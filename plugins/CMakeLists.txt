@@ -18,6 +18,14 @@ if(NOT TARGET waywallen::bridge)
     add_subdirectory(../bridge waywallen-bridge-build)
 endif()
 
+# Same idea for waywallen::ffmpeg_vk — Iter 1 hoisted the per-plugin
+# VkProducer into libs/ffmpeg so image + video plugins share one copy.
+# Pulling the subdir in here means rstd-less plugin builds work fine
+# (libs/ffmpeg gates the rstd-dependent thumbnail target on rstd).
+if(NOT TARGET waywallen::ffmpeg_vk)
+    add_subdirectory(../libs/ffmpeg waywallen-ffmpeg-build)
+endif()
+
 if(WAYWALLEN_BUILD_MPV_PLUGIN)
     add_subdirectory(mpv)
 endif()

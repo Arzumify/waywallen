@@ -13,7 +13,7 @@
 #include <waywallen-bridge/probe_vk.h>
 
 #include "av_image.hpp"
-#include "vk_producer.hpp"
+#include <vk_device.hpp>
 
 #include <atomic>
 #include <cerrno>
@@ -195,7 +195,7 @@ static void maybe_dump_producer_frame(const HostState& host,
     std::fclose(sf);
 }
 
-bool upload_to_slot(HostState& host, ww_image::VkProducer& producer,
+bool upload_to_slot(HostState& host, waywallen::ffvk::Producer& producer,
                     const ww_pool_directive_t& directive,
                     uint32_t slot_index) {
     ww_pool_slot_t s {};
@@ -240,7 +240,7 @@ bool upload_to_slot(HostState& host, ww_image::VkProducer& producer,
 /* Apply a directive received from the daemon. After bridge brings the
  * slots up, upload our cached RGBA into slot 0 and submit one frame.
  * Static images: a single submit per (re-)negotiation is enough. */
-void apply_negotiate_request(HostState& host, ww_image::VkProducer& producer,
+void apply_negotiate_request(HostState& host, waywallen::ffvk::Producer& producer,
                              const ww_pool_directive_t& d) {
     int rc = ww_bridge_pool_apply_directive(host.pool, host.sock, &d);
     if (rc != 0) {
@@ -363,7 +363,7 @@ void reader_loop(HostState& host) {
 // `format_caps` message on the other end and decode it.
 static int print_caps_json(const Options& opt) {
     std::string verr;
-    auto producer = ww_image::VkProducer::create(opt.width, opt.height, &verr);
+    auto producer = waywallen::ffvk::Producer::create(opt.width, opt.height, &verr);
     if (!producer) {
         std::fprintf(stderr, "waywallen-image-renderer: vk_producer: %s\n",
                      verr.c_str());
@@ -520,7 +520,7 @@ int main(int argc, char** argv) {
 
     if (opt.vulkan_probe) {
         std::string verr;
-        auto prod = ww_image::VkProducer::create(opt.width, opt.height, &verr);
+        auto prod = waywallen::ffvk::Producer::create(opt.width, opt.height, &verr);
         if (!prod) {
             std::fprintf(stderr, "waywallen-image-renderer: vk_producer: %s\n",
                          verr.c_str());
@@ -602,7 +602,7 @@ int main(int argc, char** argv) {
     if (rgba_buf.data.empty()) die("decode " + opt.image_path + ": " + derr.message);
 
     std::string verr;
-    auto producer = ww_image::VkProducer::create(opt.width, opt.height, &verr);
+    auto producer = waywallen::ffvk::Producer::create(opt.width, opt.height, &verr);
     if (!producer) die("vk_producer: " + verr);
 
     /* GPU info diagnostic (uses bridge probe_vk dispatch table). */

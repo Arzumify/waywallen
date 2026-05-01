@@ -1,12 +1,13 @@
 #pragma once
 
-// Iter 0 video plugin's Vulkan helper. Mirrors plugins/image/src/vk_producer.hpp
-// almost line-for-line, with one functional difference: a per-submit
-// VkFence makes upload_into safe to call repeatedly (every video frame),
-// whereas the image-plugin version assumes one upload per directive.
+// waywallen::ffvk — the Vulkan-side helper layer that the renderer plugins
+// share. Iter 1 lifts the per-plugin `VkProducer` here so the image and
+// video plugins stop carrying duplicate copies. Iter 2 grows this header
+// with FFmpeg-vulkan glue (AVHWDeviceContext, NV12→RGBA compute pass).
 //
-// Iter 1 hoists this code into libs/ffmpeg/vk_device and both plugins
-// share it; for Iter 0 we duplicate to keep the smoke-test self-contained.
+// The lib is plain C++20 (no rstd dep) so the plugins build tree can
+// pull it in without dragging fetchdeps. The C++20-modules thumbnail
+// extractor in `decoder.cppm` lives in a sibling target and is unaffected.
 
 #include <cstdint>
 #include <memory>
@@ -14,15 +15,26 @@
 
 #include <vulkan/vulkan.h>
 
-namespace ww_video {
+namespace waywallen::ffvk {
 
-class VkProducer {
+// Bring up a VkInstance/VkPhysicalDevice/VkDevice with the extension set
+// the bridge pool's Vulkan backend needs (DMA-BUF export, modifier
+// import, semaphore SYNC_FD), plus a HOST_VISIBLE|COHERENT staging
+// buffer pre-mapped at `width*height*4` bytes for repeated RGBA8
+// uploads.
+//
+// Iter 0/1 callers use upload_into() once per video frame — the per-
+// submit fence inside makes that race-free against cmd buffer reuse.
+// Iter 2's GPU YUV→RGB path reuses just the device/instance handles
+// and drives its own command buffers; the staging buffer is then
+// repurposed for sw-fallback uploads.
+class Producer {
 public:
-    ~VkProducer();
-    VkProducer(const VkProducer&)            = delete;
-    VkProducer& operator=(const VkProducer&) = delete;
+    ~Producer();
+    Producer(const Producer&)            = delete;
+    Producer& operator=(const Producer&) = delete;
 
-    static std::unique_ptr<VkProducer>
+    static std::unique_ptr<Producer>
     create(uint32_t width, uint32_t height, std::string* err);
 
     VkInstance       instance() const         { return instance_; }
@@ -38,14 +50,15 @@ public:
     uint32_t         width() const  { return width_; }
     uint32_t         height() const { return height_; }
 
-    // Copy `data` (tightly packed RGBA8, `size` bytes) into `target`
-    // VkImage and return an exported sync_fd that signals when the GPU
-    // is done writing. Bridge takes ownership of the sync_fd. -1 on error.
+    // Copy `data` (tightly packed RGBA8, `size` bytes == width*height*4)
+    // into `target` VkImage and return an exported sync_fd that signals
+    // when the GPU is done writing. The bridge pool takes ownership of
+    // the sync_fd. Returns -1 with `*err` populated on failure.
     int upload_into(VkImage target, uint32_t target_width, uint32_t target_height,
                     const uint8_t* data, size_t size, std::string* err);
 
 private:
-    VkProducer() = default;
+    Producer() = default;
 
     VkInstance       instance_ { VK_NULL_HANDLE };
     VkPhysicalDevice phys_ { VK_NULL_HANDLE };
@@ -56,9 +69,6 @@ private:
     VkCommandPool    cmd_pool_ { VK_NULL_HANDLE };
     VkCommandBuffer  cmd_ { VK_NULL_HANDLE };
     VkSemaphore      signal_sem_ { VK_NULL_HANDLE };
-    /* Per-submit fence — caller waits on it before reusing cmd_ /
-     * staging_mem_. `fence_pending_` tracks whether the fence has been
-     * submitted at least once (skip the wait on the first call). */
     VkFence          done_fence_ { VK_NULL_HANDLE };
     bool             fence_pending_ { false };
 
@@ -80,4 +90,4 @@ private:
     PFN_vkGetSemaphoreFdKHR vkGetSemaphoreFdKHR_ { nullptr };
 };
 
-} // namespace ww_video
+} // namespace waywallen::ffvk

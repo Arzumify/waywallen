@@ -46,7 +46,6 @@ endif()
 add_executable(waywallen-image-renderer
     src/main.cpp
     src/av_image.cpp
-    src/vk_producer.cpp
 )
 
 target_compile_features(waywallen-image-renderer PRIVATE cxx_std_20)
@@ -55,9 +54,17 @@ target_compile_options(waywallen-image-renderer PRIVATE
     -Wno-missing-field-initializers
 )
 
+# waywallen::ffmpeg_vk supplies waywallen::ffvk::Producer (the staging
+# RGBA upload helper formerly duplicated as ww_image::VkProducer).
+if(NOT TARGET waywallen::ffmpeg_vk)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../libs/ffmpeg
+                     waywallen-ffmpeg-build EXCLUDE_FROM_ALL)
+endif()
+
 target_link_libraries(waywallen-image-renderer
     PRIVATE
         waywallen::bridge
+        waywallen::ffmpeg_vk
         PkgConfig::AVFORMAT
         PkgConfig::AVCODEC
         PkgConfig::AVUTIL

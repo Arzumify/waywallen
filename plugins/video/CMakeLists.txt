@@ -48,7 +48,6 @@ endif()
 add_executable(waywallen-video-renderer
     src/main.cpp
     src/av_video.cpp
-    src/vk_producer.cpp
 )
 
 target_compile_features(waywallen-video-renderer PRIVATE cxx_std_20)
@@ -57,9 +56,16 @@ target_compile_options(waywallen-video-renderer PRIVATE
     -Wno-missing-field-initializers
 )
 
+# waywallen::ffmpeg_vk supplies waywallen::ffvk::Producer (Iter 1).
+if(NOT TARGET waywallen::ffmpeg_vk)
+    add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../../libs/ffmpeg
+                     waywallen-ffmpeg-build EXCLUDE_FROM_ALL)
+endif()
+
 target_link_libraries(waywallen-video-renderer
     PRIVATE
         waywallen::bridge
+        waywallen::ffmpeg_vk
         PkgConfig::AVFORMAT
         PkgConfig::AVCODEC
         PkgConfig::AVUTIL

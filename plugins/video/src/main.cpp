@@ -16,7 +16,7 @@
 #include <waywallen-bridge/probe_vk.h>
 
 #include "av_video.hpp"
-#include "vk_producer.hpp"
+#include <vk_device.hpp>
 
 #include <atomic>
 #include <cerrno>
@@ -252,7 +252,7 @@ int main(int argc, char** argv) {
 
     /* --- Vulkan producer --- */
     std::string verr;
-    auto producer = ww_video::VkProducer::create(opt.width, opt.height, &verr);
+    auto producer = waywallen::ffvk::Producer::create(opt.width, opt.height, &verr);
     if (!producer) die("vk_producer: " + verr);
 
     ww_bridge_vk_dt_t vdt {};

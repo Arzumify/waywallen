@@ -1,4 +1,4 @@
-#include "vk_producer.hpp"
+#include "vk_device.hpp"
 
 #include <cstdio>
 #include <cstring>
@@ -6,7 +6,7 @@
 #include <unistd.h>
 #include <vector>
 
-namespace ww_image {
+namespace waywallen::ffvk {
 
 namespace {
 
@@ -61,13 +61,14 @@ bool pick_queue_family(VkPhysicalDevice phys, uint32_t* out) {
 } // namespace
 
 
-VkProducer::~VkProducer() {
+Producer::~Producer() {
     if (device_ != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_);
         if (staging_map_)         vkUnmapMemory(device_, staging_mem_);
         if (staging_buf_)         vkDestroyBuffer(device_, staging_buf_, nullptr);
         if (staging_mem_)         vkFreeMemory(device_, staging_mem_, nullptr);
         if (signal_sem_)          vkDestroySemaphore(device_, signal_sem_, nullptr);
+        if (done_fence_)          vkDestroyFence(device_, done_fence_, nullptr);
         if (cmd_pool_)            vkDestroyCommandPool(device_, cmd_pool_, nullptr);
         vkDestroyDevice(device_, nullptr);
     }
@@ -75,18 +76,17 @@ VkProducer::~VkProducer() {
     if (drm_render_fd_ >= 0) ::close(drm_render_fd_);
 }
 
-std::unique_ptr<VkProducer>
-VkProducer::create(uint32_t width, uint32_t height, std::string* err) {
+std::unique_ptr<Producer>
+Producer::create(uint32_t width, uint32_t height, std::string* err) {
     if (width == 0 || height == 0) {
-        fail(err, "VkProducer: width/height must be non-zero");
+        fail(err, "Producer: width/height must be non-zero");
         return nullptr;
     }
 
-    auto self = std::unique_ptr<VkProducer>(new VkProducer());
+    auto self = std::unique_ptr<Producer>(new Producer());
     self->width_ = width;
     self->height_ = height;
 
-    // --- Instance -------------------------------------------------------
     const char* inst_exts[] = {
         VK_KHR_EXTERNAL_MEMORY_CAPABILITIES_EXTENSION_NAME,
         VK_KHR_EXTERNAL_SEMAPHORE_CAPABILITIES_EXTENSION_NAME,
@@ -94,7 +94,7 @@ VkProducer::create(uint32_t width, uint32_t height, std::string* err) {
     };
     VkApplicationInfo app {};
     app.sType            = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-    app.pApplicationName = "waywallen-image-renderer";
+    app.pApplicationName = "waywallen-ffvk";
     app.apiVersion       = VK_API_VERSION_1_1;
 
     VkInstanceCreateInfo ici {};
@@ -102,14 +102,12 @@ VkProducer::create(uint32_t width, uint32_t height, std::string* err) {
     ici.pApplicationInfo        = &app;
     ici.enabledExtensionCount   = static_cast<uint32_t>(std::size(inst_exts));
     ici.ppEnabledExtensionNames = inst_exts;
-
     if (VkResult r = vkCreateInstance(&ici, nullptr, &self->instance_);
         r != VK_SUCCESS) {
         fail(err, std::string("vkCreateInstance: ") + vk_result_str(r));
         return nullptr;
     }
 
-    // --- Physical device ------------------------------------------------
     uint32_t pd_count = 0;
     vkEnumeratePhysicalDevices(self->instance_, &pd_count, nullptr);
     if (pd_count == 0) {
@@ -145,7 +143,6 @@ VkProducer::create(uint32_t width, uint32_t height, std::string* err) {
         return nullptr;
     }
 
-    // --- Device ---------------------------------------------------------
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci {};
     qci.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
@@ -162,7 +159,6 @@ VkProducer::create(uint32_t width, uint32_t height, std::string* err) {
     dci.pQueueCreateInfos       = &qci;
     dci.enabledExtensionCount   = static_cast<uint32_t>(dev_exts.size());
     dci.ppEnabledExtensionNames = dev_exts.data();
-
     if (VkResult r = vkCreateDevice(self->phys_, &dci, nullptr, &self->device_);
         r != VK_SUCCESS) {
         fail(err, std::string("vkCreateDevice: ") + vk_result_str(r));
@@ -178,7 +174,6 @@ VkProducer::create(uint32_t width, uint32_t height, std::string* err) {
         return nullptr;
     }
 
-    // --- Identity (UUID + DRM render node) -----------------------------
     auto vkGetPhysicalDeviceProperties2_ =
         reinterpret_cast<PFN_vkGetPhysicalDeviceProperties2>(
             vkGetInstanceProcAddr(self->instance_,
@@ -202,10 +197,6 @@ VkProducer::create(uint32_t width, uint32_t height, std::string* err) {
         }
     }
 
-    /* Open the matching render node so the bridge pool can use it for
-     * the release timeline drm_syncobj. The render node is identified
-     * by (major,minor) — since these are the renderer's own numbers
-     * we can cheaply scan /dev/dri/renderD12X and stat() until match. */
     if (self->drm_render_minor_ != 0) {
         for (int i = 128; i < 192; ++i) {
             char path[64];
@@ -218,7 +209,6 @@ VkProducer::create(uint32_t width, uint32_t height, std::string* err) {
         }
     }
 
-    // --- Command pool + buffer -----------------------------------------
     VkCommandPoolCreateInfo cpi {};
     cpi.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     cpi.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -239,8 +229,15 @@ VkProducer::create(uint32_t width, uint32_t height, std::string* err) {
         fail(err, std::string("vkAllocateCommandBuffers: ") + vk_result_str(r));
         return nullptr;
     }
+    VkFenceCreateInfo fci {};
+    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    if (VkResult r = vkCreateFence(self->device_, &fci, nullptr,
+                                   &self->done_fence_);
+        r != VK_SUCCESS) {
+        fail(err, std::string("vkCreateFence: ") + vk_result_str(r));
+        return nullptr;
+    }
 
-    // --- Acquire semaphore (binary, exported as SYNC_FD) ---------------
     VkExportSemaphoreCreateInfo exp_sem {};
     exp_sem.sType       = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO;
     exp_sem.handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
@@ -254,10 +251,8 @@ VkProducer::create(uint32_t width, uint32_t height, std::string* err) {
         return nullptr;
     }
 
-    // --- Staging buffer (HOST_VISIBLE|COHERENT, tightly packed RGBA) ---
     const VkDeviceSize tight = VkDeviceSize(width) * height * 4;
     self->staging_size_ = tight;
-
     VkBufferCreateInfo bci {};
     bci.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bci.size        = tight;
@@ -313,10 +308,24 @@ VkProducer::create(uint32_t width, uint32_t height, std::string* err) {
     return self;
 }
 
-int VkProducer::upload_into(VkImage target, uint32_t target_w, uint32_t target_h,
-                            const uint8_t* data, size_t size, std::string* err) {
+int Producer::upload_into(VkImage target, uint32_t target_w, uint32_t target_h,
+                          const uint8_t* data, size_t size, std::string* err) {
     if (target == VK_NULL_HANDLE) { fail(err, "upload_into: target VkImage is null"); return -1; }
     if (size != staging_size_)    { fail(err, "upload_into: size mismatch"); return -1; }
+
+    if (fence_pending_) {
+        if (VkResult r = vkWaitForFences(device_, 1, &done_fence_, VK_TRUE,
+                                         /* 1s */ 1'000'000'000ull);
+            r != VK_SUCCESS) {
+            fail(err, std::string("vkWaitForFences(prev upload): ") + vk_result_str(r));
+            return -1;
+        }
+        if (VkResult r = vkResetFences(device_, 1, &done_fence_); r != VK_SUCCESS) {
+            fail(err, std::string("vkResetFences: ") + vk_result_str(r));
+            return -1;
+        }
+        fence_pending_ = false;
+    }
 
     std::memcpy(staging_map_, data, size);
 
@@ -333,7 +342,6 @@ int VkProducer::upload_into(VkImage target, uint32_t target_w, uint32_t target_h
         return -1;
     }
 
-    /* UNDEFINED → TRANSFER_DST_OPTIMAL. */
     VkImageMemoryBarrier to_dst {};
     to_dst.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     to_dst.srcAccessMask       = 0;
@@ -363,7 +371,6 @@ int VkProducer::upload_into(VkImage target, uint32_t target_w, uint32_t target_h
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                            1, &region);
 
-    /* TRANSFER_DST_OPTIMAL → GENERAL, release to FOREIGN. */
     VkImageMemoryBarrier to_foreign {};
     to_foreign.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     to_foreign.srcAccessMask       = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -390,13 +397,12 @@ int VkProducer::upload_into(VkImage target, uint32_t target_w, uint32_t target_h
     si.pCommandBuffers      = &cmd_;
     si.signalSemaphoreCount = 1;
     si.pSignalSemaphores    = &signal_sem_;
-    if (VkResult r = vkQueueSubmit(queue_, 1, &si, VK_NULL_HANDLE); r != VK_SUCCESS) {
+    if (VkResult r = vkQueueSubmit(queue_, 1, &si, done_fence_); r != VK_SUCCESS) {
         fail(err, std::string("vkQueueSubmit: ") + vk_result_str(r));
         return -1;
     }
+    fence_pending_ = true;
 
-    /* Export sync_file fd. Consumes the semaphore's signal payload so
-     * it's reusable on the next upload. */
     VkSemaphoreGetFdInfoKHR sgfi {};
     sgfi.sType      = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR;
     sgfi.semaphore  = signal_sem_;
@@ -410,4 +416,4 @@ int VkProducer::upload_into(VkImage target, uint32_t target_w, uint32_t target_h
     return sync_fd;
 }
 
-} // namespace ww_image
+} // namespace waywallen::ffvk
