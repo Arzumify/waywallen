@@ -261,6 +261,14 @@ async fn async_main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("open database {}", db_path.display()))?;
 
+    // Hand the DB to the source manager so `ctx.library_meta_*`
+    // (registered as mlua async functions) can read/write
+    // `library.metadata` from inside Lua source plugins.
+    {
+        let mut sm = source_mgr.lock().await;
+        sm.attach_db(db.clone());
+    }
+
     let (shutdown_tx, shutdown_rx_for_tasks) = tokio::sync::watch::channel(false);
     let task_mgr = tasks::TaskManager::spawn(shutdown_rx_for_tasks);
 
@@ -423,8 +431,18 @@ async fn async_main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("plugin load join: {e}"))?;
 
             // Step 2 — scan against DB-driven libraries + sync results
-            // + seed the playlist.
-            if let Err(e) = control::refresh_sources(&state_for_task).await {
+            // + seed the playlist. Skip when no libraries are
+            // configured: a brand-new user has nothing to scan, and
+            // `refresh_sources` would flip `scan_in_progress` true →
+            // false in a tight window, flashing the UI loading
+            // indicator on first launch.
+            let skip_refresh = crate::model::repo::list_libraries(&state_for_task.db)
+                .await
+                .map(|v| v.is_empty())
+                .unwrap_or(false);
+            if skip_refresh {
+                log::debug!("no libraries configured; skipping initial source refresh");
+            } else if let Err(e) = control::refresh_sources(&state_for_task).await {
                 log::warn!("initial source refresh failed: {e:#}");
             }
 

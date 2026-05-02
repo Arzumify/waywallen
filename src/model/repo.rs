@@ -149,6 +149,87 @@ pub async fn remove_library(db: &DatabaseConnection, id: i64) -> Result<u64> {
     Ok(res.rows_affected)
 }
 
+/// Decode the JSON blob in `library.metadata` into a flat string map.
+/// Invalid or empty JSON falls back to an empty map so callers never
+/// have to deal with corruption — we always present a usable view.
+pub async fn get_library_metadata(
+    db: &DatabaseConnection,
+    library_id: i64,
+) -> Result<HashMap<String, String>> {
+    let row = library::Entity::find_by_id(library_id)
+        .one(db)
+        .await
+        .with_context(|| format!("select library id={library_id} for metadata"))?
+        .ok_or_else(|| anyhow::anyhow!("library id={library_id} not found"))?;
+    Ok(decode_library_metadata(&row.metadata))
+}
+
+pub async fn get_library_metadata_value(
+    db: &DatabaseConnection,
+    library_id: i64,
+    key: &str,
+) -> Result<Option<String>> {
+    Ok(get_library_metadata(db, library_id).await?.remove(key))
+}
+
+/// Read-modify-write a single key in `library.metadata`. Pass
+/// `value = None` to delete the key. Other keys survive.
+pub async fn set_library_metadata_value(
+    db: &DatabaseConnection,
+    library_id: i64,
+    key: &str,
+    value: Option<&str>,
+) -> Result<()> {
+    let existing = library::Entity::find_by_id(library_id)
+        .one(db)
+        .await
+        .with_context(|| format!("reload library id={library_id} for metadata write"))?
+        .ok_or_else(|| anyhow::anyhow!("library id={library_id} not found"))?;
+    let mut map = decode_library_metadata(&existing.metadata);
+    match value {
+        Some(v) => {
+            map.insert(key.to_owned(), v.to_owned());
+        }
+        None => {
+            map.remove(key);
+        }
+    }
+    let encoded = serde_json::to_string(&map).context("encode library metadata")?;
+    let mut am: library::ActiveModel = existing.into();
+    am.metadata = Set(encoded);
+    am.update(db)
+        .await
+        .with_context(|| format!("update library metadata id={library_id}"))?;
+    Ok(())
+}
+
+/// Replace the full metadata map atomically.
+pub async fn replace_library_metadata(
+    db: &DatabaseConnection,
+    library_id: i64,
+    kv: &HashMap<String, String>,
+) -> Result<()> {
+    let existing = library::Entity::find_by_id(library_id)
+        .one(db)
+        .await
+        .with_context(|| format!("reload library id={library_id} for metadata write"))?
+        .ok_or_else(|| anyhow::anyhow!("library id={library_id} not found"))?;
+    let encoded = serde_json::to_string(kv).context("encode library metadata")?;
+    let mut am: library::ActiveModel = existing.into();
+    am.metadata = Set(encoded);
+    am.update(db)
+        .await
+        .with_context(|| format!("update library metadata id={library_id}"))?;
+    Ok(())
+}
+
+fn decode_library_metadata(raw: &str) -> HashMap<String, String> {
+    if raw.is_empty() {
+        return HashMap::new();
+    }
+    serde_json::from_str(raw).unwrap_or_default()
+}
+
 pub async fn delete_libraries_missing(
     db: &DatabaseConnection,
     plugin_id: i64,

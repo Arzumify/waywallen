@@ -191,13 +191,17 @@ MD.Page {
                     ColumnLayout {
                         anchors.centerIn: parent
                         spacing: 16
-                        visible: m_grid_view.count === 0
+                        // Wait for the initial list query to settle before
+                        // committing to the empty state — otherwise a
+                        // brand-new user (empty DB, no libraries) sees a
+                        // BusyIndicator flash from the in-flight fetch
+                        // even though the daemon isn't scanning anything.
+                        visible: m_grid_view.count === 0 && !wallpaperQuery.querying
 
-                        // Spin while either the list query is mid-flight,
-                        // or the daemon reports an in-progress scan via
-                        // `Notify.scanInProgress` (closed-loop StatusSync,
-                        // tolerates dropped start/end events).
-                        readonly property bool scanning: wallpaperQuery.querying || W.Notify.scanInProgress
+                        // Daemon-side scan activity only. The list-fetch
+                        // round-trip is a different concern and is gated
+                        // by `visible` above.
+                        readonly property bool scanning: W.Notify.scanInProgress
 
                         MD.BusyIndicator {
                             Layout.alignment: Qt.AlignHCenter

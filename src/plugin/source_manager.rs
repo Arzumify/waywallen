@@ -1,10 +1,12 @@
 use anyhow::Result;
 use mlua::prelude::*;
+use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use crate::media_probe::{AvFormatProbe, MediaProbe};
+use crate::model::repo;
 use crate::wallpaper_type::{WallpaperEntry, WallpaperType};
 
 // ---------------------------------------------------------------------------
@@ -32,6 +34,10 @@ pub struct SourceManager {
     by_type: HashMap<WallpaperType, Vec<usize>>,
     /// Shared media probe exposed to Lua via ctx.probe(path).
     probe: Arc<dyn MediaProbe>,
+    /// DB used by the `ctx.library_meta_*` async-Lua-function bridge.
+    /// `None` means the bridge silently no-ops (used by tests that
+    /// don't exercise persistence).
+    db: Option<DatabaseConnection>,
 }
 
 // mlua with the `send` feature makes Lua: Send.
@@ -56,7 +62,16 @@ impl SourceManager {
             entries: Vec::new(),
             by_type: HashMap::new(),
             probe,
+            db: None,
         })
+    }
+
+    /// Hand the DB to the source manager so `ctx.library_meta_get/set`
+    /// (registered as mlua async functions) can read/write the
+    /// `library.metadata` JSON column. Without this, the metadata
+    /// functions return nil / false.
+    pub fn attach_db(&mut self, db: DatabaseConnection) {
+        self.db = Some(db);
     }
 
     /// Load a single `.lua` source plugin. Returns the plugin name.
@@ -112,7 +127,12 @@ impl SourceManager {
     /// plugin missing from the map (or with an empty list) is scanned
     /// with no libraries — Lua plugins should emit zero entries in
     /// that case rather than fall back to defaults.
-    pub fn scan_all(
+    ///
+    /// Async because `ctx.library_meta_*` are mlua async functions
+    /// that need a tokio runtime to drive their `sea-orm` calls; the
+    /// caller drives this via either an enclosing async context or
+    /// `Handle::block_on` from a `spawn_blocking` thread.
+    pub async fn scan_all(
         &mut self,
         libs_by_plugin: &HashMap<String, Vec<String>>,
     ) -> Result<()> {
@@ -125,7 +145,7 @@ impl SourceManager {
                 .get(name)
                 .map(|v| v.as_slice())
                 .unwrap_or(&[]);
-            if let Err(e) = self.scan_plugin(name, libs) {
+            if let Err(e) = self.scan_plugin(name, libs).await {
                 log::warn!("scan plugin {name} failed: {e}");
             }
         }
@@ -134,7 +154,7 @@ impl SourceManager {
 
     /// Run `scan(ctx)` on a single plugin by name with the supplied
     /// library list exposed as `ctx.libraries()`.
-    fn scan_plugin(&mut self, name: &str, libraries: &[String]) -> Result<()> {
+    async fn scan_plugin(&mut self, name: &str, libraries: &[String]) -> Result<()> {
         let key = self
             .plugins
             .get(name)
@@ -144,8 +164,8 @@ impl SourceManager {
             .get("scan")
             .map_err(|e| anyhow::anyhow!("plugin must export scan(ctx): {e}"))?;
 
-        let ctx = self.build_ctx(libraries)?;
-        let results: LuaTable = scan_fn.call(ctx)?;
+        let ctx = self.build_ctx(Some(name), libraries)?;
+        let results: LuaTable = scan_fn.call_async(ctx).await?;
 
         for pair in results.sequence_values::<LuaTable>() {
             let tbl = pair?;
@@ -184,8 +204,12 @@ impl SourceManager {
 
     /// Build the `ctx` table passed to Lua `scan(ctx)`. `libraries` is
     /// the per-plugin DB-driven library list exposed as
-    /// `ctx.libraries()`.
-    fn build_ctx(&self, libraries: &[String]) -> Result<LuaTable> {
+    /// `ctx.libraries()`. `plugin_name` is `Some` when called from
+    /// `scan_plugin` (where plugin identity is known) and `None` from
+    /// `auto_detect_all` (which runs before plugins are registered in
+    /// the DB) — the latter disables the `library_meta_*` bridge
+    /// because there is no plugin row to scope writes to.
+    fn build_ctx(&self, plugin_name: Option<&str>, libraries: &[String]) -> Result<LuaTable> {
         let ctx = self.lua.create_table()?;
 
         // ctx.glob(pattern) -> list of file paths
@@ -329,6 +353,108 @@ impl SourceManager {
         })?;
         ctx.set("probe", probe_fn)?;
 
+        // ctx.library_meta_get(library_path, key) -> string|nil
+        // ctx.library_meta_set(library_path, key, value_or_nil) -> bool
+        //
+        // Per-library KV scratch space backed by `library.metadata`
+        // (JSON column). Scoped to the *current* plugin: a plugin can
+        // only read/write metadata on libraries it owns. The
+        // (plugin_name, library_path) tuple resolves to a library row
+        // via the existing `idx_library_plugin_path` unique index, so
+        // both lookups are cheap.
+        //
+        // Implemented as mlua async functions: when invoked, the Lua
+        // coroutine yields and the surrounding `scan_fn.call_async` /
+        // `extras_fn.call_async` driver awaits the sea-orm future on
+        // whatever runtime is driving the call. Returns nil / false if
+        // the DB hasn't been attached or the (plugin, library) tuple
+        // doesn't exist yet — set-before-scan is a no-op rather than an
+        // error so plugins can be defensive without crashing the scan.
+        {
+            let kv_db = self.db.clone();
+            let kv_plugin = plugin_name.map(str::to_owned);
+
+            let getter_db = kv_db.clone();
+            let getter_plugin = kv_plugin.clone();
+            let library_meta_get_fn = self.lua.create_async_function(
+                move |lua, (lib_path, key): (String, String)| {
+                    let db = getter_db.clone();
+                    let plugin_name = getter_plugin.clone();
+                    async move {
+                        let (Some(db), Some(plugin_name)) = (db, plugin_name) else {
+                            return Ok(mlua::Value::Nil);
+                        };
+                        let res: anyhow::Result<Option<String>> = async {
+                            let Some(plugin) =
+                                repo::find_plugin_by_name(&db, &plugin_name).await?
+                            else {
+                                return Ok(None);
+                            };
+                            let Some(lib) =
+                                repo::find_library(&db, plugin.id, &lib_path).await?
+                            else {
+                                return Ok(None);
+                            };
+                            repo::get_library_metadata_value(&db, lib.id, &key).await
+                        }
+                        .await;
+                        match res {
+                            Ok(Some(v)) => Ok(mlua::Value::String(lua.create_string(&v)?)),
+                            Ok(None) => Ok(mlua::Value::Nil),
+                            Err(e) => {
+                                log::warn!("library_meta_get: {e:#}");
+                                Ok(mlua::Value::Nil)
+                            }
+                        }
+                    }
+                },
+            )?;
+            ctx.set("library_meta_get", library_meta_get_fn)?;
+
+            let setter_db = kv_db;
+            let setter_plugin = kv_plugin;
+            let library_meta_set_fn = self.lua.create_async_function(
+                move |_, (lib_path, key, value): (String, String, Option<String>)| {
+                    let db = setter_db.clone();
+                    let plugin_name = setter_plugin.clone();
+                    async move {
+                        let (Some(db), Some(plugin_name)) = (db, plugin_name) else {
+                            return Ok(false);
+                        };
+                        let res: anyhow::Result<bool> = async {
+                            let Some(plugin) =
+                                repo::find_plugin_by_name(&db, &plugin_name).await?
+                            else {
+                                return Ok(false);
+                            };
+                            let Some(lib) =
+                                repo::find_library(&db, plugin.id, &lib_path).await?
+                            else {
+                                return Ok(false);
+                            };
+                            repo::set_library_metadata_value(
+                                &db,
+                                lib.id,
+                                &key,
+                                value.as_deref(),
+                            )
+                            .await?;
+                            Ok(true)
+                        }
+                        .await;
+                        match res {
+                            Ok(b) => Ok(b),
+                            Err(e) => {
+                                log::warn!("library_meta_set: {e:#}");
+                                Ok(false)
+                            }
+                        }
+                    }
+                },
+            )?;
+            ctx.set("library_meta_set", library_meta_set_fn)?;
+        }
+
         // Source plugins write `entry.metadata` directly using the
         // canonical schema:
         //   metadata = { path = resource, [extras...] }
@@ -363,16 +489,18 @@ impl SourceManager {
     /// at spawn time (under SPAWN_VERSION 3 these become `--<key>
     /// <value>` argv after `--ipc <socket>`).
     ///
-    /// The Lua plugin exports `extras(entry: table) -> table` returning
-    /// a flat `{string -> string}` map. Plugins that haven't migrated
-    /// fall through to `entry.metadata`, preserving the v6→v3
-    /// transition path.
+    /// The Lua plugin exports `extras(entry, ctx) -> table` returning
+    /// a flat `{string -> string}` map. `ctx` carries the same helpers
+    /// scan(ctx) sees — including `library_meta_get` — so plugins can
+    /// pull values they cached at scan time out of `library.metadata`
+    /// instead of duplicating them on every entry. Plugins that
+    /// haven't migrated fall through to `entry.metadata`.
     ///
     /// `extras["path"]` is mandatory in the result — that's the
     /// canonical resource path. The daemon does NOT enforce that here;
     /// renderers fail at spawn-time with `--path <file> is required`
     /// if the plugin omitted it.
-    pub fn call_extras(
+    pub async fn call_extras(
         &self,
         plugin_name: &str,
         entry: &WallpaperEntry,
@@ -384,9 +512,8 @@ impl SourceManager {
         let module: LuaTable = self.lua.registry_value(key)?;
         let extras_fn: Option<LuaFunction> = module.get("extras").ok();
         let Some(extras_fn) = extras_fn else {
-            // Legacy path: plugin hasn't migrated to extras(entry)
-            // yet. Fall back to entry.metadata until Phase 6 finishes
-            // and every shipped plugin exports extras().
+            // Legacy path: plugin hasn't migrated to extras(entry, ctx)
+            // yet. Fall back to entry.metadata.
             log::debug!(
                 "source plugin '{plugin_name}' has no extras() function; \
                  using legacy entry.metadata as CLI extras"
@@ -411,7 +538,22 @@ impl SourceManager {
         if let Some(d) = &entry.description {
             entry_tbl.set("description", d.clone())?;
         }
-        let result: LuaTable = extras_fn.call(entry_tbl)?;
+        // `library_root` and `external_id` are the two "where did this
+        // come from" anchors plugins need at extras-time: the former
+        // to look up library-scoped metadata, the latter as a
+        // first-class id (e.g. wallpaper_engine workshop_id) without
+        // re-parsing the resource path.
+        if !entry.library_root.is_empty() {
+            entry_tbl.set("library_root", entry.library_root.clone())?;
+        }
+        if let Some(eid) = &entry.external_id {
+            entry_tbl.set("external_id", eid.clone())?;
+        }
+        // Build the same ctx scan(ctx) sees, so extras can call
+        // `library_meta_get` etc. Empty libraries list — extras runs
+        // per-entry, not per-library, and shouldn't need to enumerate.
+        let ctx = self.build_ctx(Some(plugin_name), &[])?;
+        let result: LuaTable = extras_fn.call_async((entry_tbl, ctx)).await?;
         let mut out = HashMap::new();
         for pair in result.pairs::<String, String>() {
             let (k, v) = pair?;
@@ -426,7 +568,7 @@ impl SourceManager {
     /// `auto_detect` export are silently skipped. Each plugin's ctx
     /// sees an empty `libraries()` because auto-detect runs *before*
     /// any libraries are registered.
-    pub fn auto_detect_all(&self) -> Result<HashMap<String, Vec<String>>> {
+    pub async fn auto_detect_all(&self) -> Result<HashMap<String, Vec<String>>> {
         let mut out: HashMap<String, Vec<String>> = HashMap::new();
         let empty: [String; 0] = [];
         for (name, key) in &self.plugins {
@@ -435,8 +577,8 @@ impl SourceManager {
                 Ok(f) => f,
                 Err(_) => continue,
             };
-            let ctx = self.build_ctx(&empty)?;
-            let results: LuaTable = match auto_fn.call(ctx) {
+            let ctx = self.build_ctx(None, &empty)?;
+            let results: LuaTable = match auto_fn.call_async(ctx).await {
                 Ok(t) => t,
                 Err(e) => {
                     log::warn!("auto_detect plugin {name}: {e}");
@@ -543,6 +685,24 @@ mod tests {
         }
     }
 
+    /// Drive an async scan from a sync `#[test]` — these tests don't
+    /// touch the DB so a single-thread runtime is fine.
+    fn block(fut: impl std::future::Future<Output = ()>) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(fut)
+    }
+
+    fn block_value<T>(fut: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(fut)
+    }
+
     #[test]
     fn ctx_probe_callable_from_lua() {
         let probe = Arc::new(FakeProbe {
@@ -588,7 +748,7 @@ return M
 
         let mut mgr = SourceManager::with_probe(probe as Arc<dyn MediaProbe>).unwrap();
         mgr.load_plugin(&plugin_path).unwrap();
-        mgr.scan_all(&HashMap::new()).unwrap();
+        block(async { mgr.scan_all(&HashMap::new()).await.unwrap() });
 
         let entries = mgr.list();
         assert_eq!(entries.len(), 1);
@@ -626,7 +786,7 @@ return M
         let name = mgr.load_plugin(&plugin_path).unwrap();
         assert_eq!(name, "test");
 
-        mgr.scan_all(&HashMap::new()).unwrap();
+        block(async { mgr.scan_all(&HashMap::new()).await.unwrap() });
         assert_eq!(mgr.list().len(), 1);
         assert_eq!(mgr.list()[0].id, "w1");
         assert_eq!(mgr.list()[0].wp_type, "image");
@@ -657,7 +817,7 @@ return M
         std::fs::write(nested.join("loop.webm"), b"more video bytes").unwrap();
 
         let plugin_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("plugins/mpv/sources/video.lua");
+            .join("plugins/video/sources/video.lua");
 
         let mut mgr = SourceManager::new().unwrap();
         let name = mgr.load_plugin(&plugin_path).unwrap();
@@ -668,7 +828,7 @@ return M
             "video".to_string(),
             vec![lib.path().to_string_lossy().to_string()],
         );
-        mgr.scan_all(&libs).unwrap();
+        block(async { mgr.scan_all(&libs).await.unwrap() });
 
         let entries = mgr.list();
         assert_eq!(entries.len(), 2);
@@ -679,13 +839,18 @@ return M
         assert!(entries.iter().all(|e| e.width.is_none()));
         assert!(entries.iter().all(|e| e.height.is_none()));
         assert!(entries.iter().all(|e| e.format.is_none()));
+        // SPAWN_VERSION 3: plugins emit empty `metadata`; the canonical
+        // resource path lives in `entry.resource` and is surfaced to
+        // the renderer via the plugin's `extras(entry)` Lua callback.
+        assert!(entries.iter().all(|e| e.metadata.is_empty()));
 
         let clip_path = lib.path().join("clip.MP4").to_string_lossy().to_string();
-        let clip = mgr.get(&format!("video:{clip_path}")).unwrap();
+        let clip = mgr.get(&format!("video:{clip_path}")).unwrap().clone();
         assert_eq!(clip.name, "clip");
         assert_eq!(clip.resource, clip_path);
-        assert_eq!(clip.metadata.get("video"), Some(&clip.resource));
-        assert_eq!(clip.metadata.get("path"), Some(&clip.resource));
+
+        let extras = block_value(async { mgr.call_extras("video", &clip).await.unwrap() });
+        assert_eq!(extras.get("path"), Some(&clip.resource));
 
         assert_eq!(mgr.list_by_type("video").len(), 2);
         assert!(mgr.list_by_type("image").is_empty());

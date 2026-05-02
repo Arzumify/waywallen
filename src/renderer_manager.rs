@@ -45,11 +45,12 @@ pub struct SpawnRequest {
     /// (mandatory). Plugin-specific keys (`assets`, `workshop_id`, …)
     /// must be ⊆ the renderer manifest's `extras` whitelist + `path`.
     pub extras: HashMap<String, String>,
-    /// **DEPRECATED, kept temporarily for back-compat with the old
-    /// validate_metadata path** — plumbed into Init.settings kv until
-    /// Phase 6 deletes both the field and the validator. New
-    /// callers should write to `extras` (CLI argv) instead.
-    pub metadata: HashMap<String, String>,
+    /// Plugin settings kv that flows directly into `Init.settings`.
+    /// The caller is responsible for sourcing this — typically the
+    /// reconciled per-plugin section of the daemon's settings store.
+    /// Identity-tagged keys (per the manifest schema) gate reuse;
+    /// non-identity keys can be hot-applied via `ApplySettings`.
+    pub settings: HashMap<String, String>,
     /// Hint to the renderer for one or both render-target axes. `0` on
     /// either axis means "renderer fills this in from native". See
     /// `extent_mode` for the interpretation.
@@ -59,7 +60,6 @@ pub struct SpawnRequest {
     /// `crate::settings::extent_mode::*` (and `ww_extent_mode_t` in
     /// the C bridge). `0` = `AS_GIVEN`.
     pub extent_mode: u32,
-    pub fps: u32,
     /// When true, pass `--test-pattern` to the renderer host, which
     /// bypasses `SceneWallpaper::loadScene` and drives the offscreen
     /// ExSwapchain ring on a host-owned timer. Used to bring up the
@@ -154,12 +154,16 @@ pub struct RendererHandle {
     /// requests that share the same `width`/`height` but disagree on
     /// the daemon's interpretation hint.
     pub extent_mode: u32,
-    pub fps: u32,
-    /// The `SpawnRequest.metadata` this renderer was started with.
-    /// Retained so the manager can deduplicate a subsequent spawn
-    /// request that would produce an identical renderer — see
-    /// `RendererManager::find_reusable`.
-    pub metadata: HashMap<String, String>,
+    /// The `SpawnRequest.extras` this renderer was started with —
+    /// canonical resource path + manifest-allowlisted keys
+    /// (`assets`, `workshop_id`, …) that ride on CLI argv. This is
+    /// the per-spawn identity differentiator: two SpawnRequests of
+    /// the same plugin / wp_type / extent that disagree on `extras`
+    /// MUST get different renderer processes (different `path` =
+    /// different wallpaper). Settings, by contrast, are plugin-wide
+    /// (`Settings::plugin(&name)`) and shared across all renderers
+    /// of a plugin, so they don't differentiate.
+    pub extras: HashMap<String, String>,
     /// Renderer plugin name from the resolved `RendererDef` (e.g.
     /// `"wescene"`). Surfaced to the UI so users see a friendly
     /// `<name>-<pid>` label instead of the opaque UUID.
@@ -234,21 +238,6 @@ pub struct RendererHandle {
     /// short-circuit. `None` until the first dispatch.
     last_dispatched_scheme:
         Arc<StdMutex<Option<crate::negotiate::NegotiatedScheme>>>,
-
-    /// Runtime-tunable plugin settings most recently pushed via
-    /// `ApplySettings` (or seeded at spawn from the initial Init's
-    /// non-identity settings). Used by the apply path to compute the
-    /// delta against an incoming SpawnRequest so we only dispatch
-    /// ApplySettings when something actually changed. Identity-tagged
-    /// settings do NOT live here — those force a respawn.
-    runtime_settings: Arc<StdMutex<HashMap<String, String>>>,
-
-    /// Per-instance setting overrides — keys the user has set
-    /// specifically for THIS active renderer. L2 (plugin default)
-    /// changes do NOT touch keys in this set; only an explicit
-    /// per-instance override change does. Empty by default; populated
-    /// by a future per-instance-override RPC.
-    overrides: Arc<StdMutex<std::collections::HashSet<String>>>,
 
     /// Sink for per-frame [`crate::sync::FrameRecord`]s. The display
     /// endpoint pushes one record per consumer per frame; the reaper
@@ -399,53 +388,6 @@ impl RendererHandle {
         }
     }
 
-    /// Snapshot of the runtime-settings cache. Used by the apply path
-    /// to compute a delta against an incoming SpawnRequest's
-    /// non-identity metadata.
-    pub fn runtime_settings_snapshot(&self) -> HashMap<String, String> {
-        self.runtime_settings
-            .lock()
-            .ok()
-            .map(|g| g.clone())
-            .unwrap_or_default()
-    }
-
-    /// Replace the runtime-settings cache with `new`. Called from the
-    /// `send_apply_settings` path right after a successful dispatch so
-    /// the next reuse comparison has up-to-date state.
-    pub fn set_runtime_settings(&self, new: HashMap<String, String>) {
-        if let Ok(mut g) = self.runtime_settings.lock() {
-            *g = new;
-        }
-    }
-
-    /// True iff the user has set a per-instance override for `key`.
-    /// L2 (plugin default) changes must skip these keys when fanning
-    /// out ApplySettings — the override wins by intent.
-    pub fn has_override(&self, key: &str) -> bool {
-        self.overrides
-            .lock()
-            .map(|g| g.contains(key))
-            .unwrap_or(false)
-    }
-
-    /// Mark `key` as a per-instance override. Subsequent L2 changes
-    /// to this key will not propagate to this renderer.
-    pub fn add_override(&self, key: &str) {
-        if let Ok(mut g) = self.overrides.lock() {
-            g.insert(key.to_string());
-        }
-    }
-
-    /// Clear a per-instance override on `key`. Subsequent L2 changes
-    /// to this key resume propagating to this renderer.
-    #[allow(dead_code)]
-    pub fn clear_override(&self, key: &str) {
-        if let Ok(mut g) = self.overrides.lock() {
-            g.remove(key);
-        }
-    }
-
     /// Push a per-frame [`crate::sync::FrameRecord`] to the reaper.
     /// The display endpoint calls this once per consumer per frame,
     /// after creating the consumer's binary release_syncobj. Returns
@@ -587,20 +529,10 @@ impl RendererManager {
                 .clone(),
         };
 
-        // Build the Init message *before* spawning the child so a
-        // schema-validation error fails fast (no fork(), no orphan
-        // socket file lingering past TempUnlink). The argv block
-        // below is the legacy fall-through path; renderers that
-        // already consume Init ignore it. Step 3 deletes the legacy
-        // argv branch entirely.
-        let init_msg = build_init_msg(&req, &renderer_def)?;
-
-        // Snapshot the non-identity (runtime-tunable) slice of
-        // settings so the apply path can compute a delta on a future
-        // reuse. Identity-tagged settings DO NOT live in this cache —
-        // those force a respawn on change.
-        let initial_runtime_settings =
-            initial_runtime_settings(&req, &renderer_def);
+        // Build the Init message *before* spawning the child (no
+        // orphan socket file lingering past TempUnlink if anything
+        // goes wrong later).
+        let init_msg = build_init_msg(&req, &renderer_def);
 
         let mut cmd = Command::new(&renderer_def.bin);
         cmd.arg("--ipc").arg(&sock_path);
@@ -729,8 +661,7 @@ impl RendererManager {
             width: req.width,
             height: req.height,
             extent_mode: req.extent_mode,
-            fps: req.fps,
-            metadata: req.metadata.clone(),
+            extras: req.extras.clone(),
             name: renderer_def.name.clone(),
             pid: child_pid,
             gpu,
@@ -741,8 +672,6 @@ impl RendererManager {
             release_syncobj,
             format_caps,
             last_dispatched_scheme: Arc::new(StdMutex::new(None)),
-            runtime_settings: Arc::new(StdMutex::new(initial_runtime_settings)),
-            overrides: Arc::new(StdMutex::new(std::collections::HashSet::new())),
             frame_record_tx,
             pending_configure,
             child: Arc::new(TokioMutex::new(Some(child))),
@@ -770,7 +699,7 @@ impl RendererManager {
             let mut inner = self.inner.lock().await;
             inner.renderers.insert(id.clone(), handle);
         }
-        log::info!("spawned renderer {id} ({}x{} @ {} fps)", req.width, req.height, req.fps);
+        log::info!("spawned renderer {id} ({}x{})", req.width, req.height);
         Ok(id)
     }
 
@@ -782,44 +711,22 @@ impl RendererManager {
     /// the manifest declares fps as a runtime setting (or for reusable
     /// mismatches against the typed `req.fps`, see below).
     ///
-    /// Identity for v6:
-    ///   - `wp_type`, `width`, `height`, `test_pattern`
-    ///   - `fps` is identity unless the manifest declares a
-    ///     `settings.fps` entry with `identity = false` (Step 4 does
-    ///     NOT make daemon-typed `fps` runtime by itself; that remains
-    ///     identity-coupled to the spawn). It IS surfaced as a delta
-    ///     value so callers can dispatch ApplySettings.fps when
-    ///     manifest_settings_runtime_fps is true.
-    ///   - `resource_primary` (`metadata["path"]`) and `extras` keys
-    ///     are identity.
-    ///   - `settings` keys with `identity = true` are identity.
-    ///   - schema-less manifests (no `extras` and no `settings`) treat
-    ///     ALL metadata as identity to preserve today's behavior. This
-    ///     covers wescene until OWE migrates.
+    /// Reuse a live renderer when:
+    ///   - structural: `wp_type` / `width` / `height` / `extent_mode` /
+    ///     resolved renderer plugin name all match.
+    ///   - per-spawn: `extras` matches (different `path` ⇒ different
+    ///     wallpaper ⇒ different renderer process).
     ///
-    /// Returns `None` when no live renderer matches identity.
-    pub async fn find_reusable(
-        &self,
-        req: &SpawnRequest,
-    ) -> Option<(RendererId, HashMap<String, String>, Option<u32>)> {
+    /// Plugin settings live in `Settings::plugin(&name)` and are
+    /// pushed live to all renderers by `SettingsSet`. The renderer
+    /// applies what it can; whatever it can't apply live takes effect
+    /// on the next spawn (via the fresh `Init.settings`). Returns
+    /// `None` when no live renderer matches.
+    pub async fn find_reusable(&self, req: &SpawnRequest) -> Option<RendererId> {
         let def = match req.renderer_name.as_deref() {
             Some(name) => self.registry.resolve_by_name(name)?.clone(),
             None => self.registry.resolve(&req.wp_type)?.clone(),
         };
-        let req_identity = identity_view(req, &def);
-        let req_runtime = runtime_view(req, &def);
-
-        // Whether the manifest treats `fps` as a hot-reloadable
-        // setting (identity = false). When it does, fps mismatches
-        // do NOT gate reuse — the daemon dispatches the change via
-        // ApplySettings instead of respawning. When fps is absent
-        // from the schema or marked identity = true, a typed-fps
-        // mismatch DOES gate reuse.
-        let fps_is_runtime = def
-            .settings
-            .get("fps")
-            .map(|s| !s.identity)
-            .unwrap_or(false);
 
         let inner = self.inner.lock().await;
         for (id, h) in inner.renderers.iter() {
@@ -831,41 +738,10 @@ impl RendererManager {
             {
                 continue;
             }
-            if !fps_is_runtime && h.fps != req.fps {
+            if h.extras != req.extras {
                 continue;
             }
-            // Build the live renderer's identity view from its stored
-            // metadata, using the SAME def (renderer name matched
-            // above so the schema is the same).
-            let live_identity = identity_view_from_metadata(&h.metadata, &def);
-            if live_identity != req_identity {
-                continue;
-            }
-            // Identity hit. Compute delta = req_runtime ∖ live_runtime
-            // (where "live_runtime" is the handle's cache). Only keys
-            // present in the request and either missing from or
-            // different in the live cache appear in the delta.
-            let live_runtime = h.runtime_settings_snapshot();
-            let mut delta: HashMap<String, String> = HashMap::new();
-            for (k, v) in &req_runtime {
-                match live_runtime.get(k) {
-                    Some(prev) if prev == v => {}
-                    _ => {
-                        delta.insert(k.clone(), v.clone());
-                    }
-                }
-            }
-            // fps as ApplySettings field: only meaningful when the
-            // manifest declares settings.fps with identity = false
-            // (otherwise the early-exit above already filtered fps
-            // mismatches as identity changes). Surface as a delta
-            // value only when it actually changed.
-            let fps_change = if fps_is_runtime && h.fps != req.fps {
-                Some(req.fps)
-            } else {
-                None
-            };
-            return Some((id.clone(), delta, fps_change));
+            return Some(id.clone());
         }
         None
     }
@@ -997,13 +873,7 @@ impl RendererManager {
             settings.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
         );
         self.send_control(id, msg).await?;
-        // Merge into the runtime cache so the next find_reusable can
-        // see we already applied this delta.
-        let mut merged = handle.runtime_settings_snapshot();
-        for (k, v) in settings {
-            merged.insert(k, v);
-        }
-        handle.set_runtime_settings(merged);
+        let _ = handle;
         Ok(())
     }
 
@@ -1374,70 +1244,30 @@ impl Drop for TempUnlink {
 /// Build the typed `Init` control message the daemon emits right
 /// after a renderer subprocess connects back.
 ///
-/// Resource derivation:
-/// - When the manifest has any schema (`extras` or `settings`), the
-///   daemon pulls `resource_primary` (`metadata["path"]`) /
-///   `resource_extras` / `settings` straight from `validate_metadata`.
-///   Validation errors propagate up so a typo'd source-plugin metadata
-///   key fails the spawn before the child is ever forked.
-/// - When the manifest has no schema (legacy), fall back to the
-///   Step 1 hard-coded primary-key priority list (`scene` → `video`
-///   → `image` → `path`) so old manifests continue to work unchanged.
-///   An info log makes the legacy path visible. This branch goes away
-///   once OWE migrates wescene.
-///
-/// `resource_kind` is always `req.wp_type` — the daemon already knows
-/// the wallpaper type from the entry, so a manifest-side `kind` would
-/// only be redundant.
-///
 /// SPAWN_VERSION 3: Init carries only what's needed before
-/// `advertise_caps` (extent triple) plus the resolved L1 settings kv.
+/// `advertise_caps` (extent triple) plus the resolved settings kv.
 /// Resource path + extras (assets, workshop_id, …) ride on the
 /// renderer's CLI argv instead — see `spawn`'s argv builder.
+///
+/// `req.settings` is taken as authoritative — bound-checking and
+/// default-filling happen at the settings-store boundary
+/// (`Settings::reconcile` on startup, `coerce_and_validate` in the
+/// `SettingsSet` RPC), so spawn-time re-validation would be
+/// redundant defense. The typed `test_pattern` flag is injected
+/// last and overrides whatever was in `settings`, matching the
+/// apply-path contract where it is the canonical source for that
+/// key. `fps` is plain settings — callers put it in `req.settings`.
 ///
 /// `spawn_version` is read from the manifest if set, otherwise the
 /// daemon's compile-time `SPAWN_VERSION` constant.
 pub(crate) fn build_init_msg(
     req: &SpawnRequest,
     def: &RendererDef,
-) -> Result<ControlMsg> {
+) -> ControlMsg {
     let spawn_version = def.spawn_version.unwrap_or(SPAWN_VERSION);
 
-    // Settings kv = manifest-validated subset of `req.metadata`,
-    // plus injected typed scalars (`fps`, `test_pattern`) for
-    // schemas that declare them. Until SpawnRequest's typed fields
-    // (`fps`, `test_pattern`) are dropped in favour of pure
-    // metadata-driven flow, the typed values WIN over what the
-    // metadata happens to carry — that matches the apply-path
-    // contract: `WallpaperApply` derives req.fps from plugin_kv
-    // explicitly and we don't want validate_metadata's
-    // schema-default-fill to silently disagree.
-    let mut settings_kv: HashMap<String, String> =
-        if crate::plugin::renderer_registry::manifest_has_schema(def) {
-            let v = crate::plugin::renderer_registry::validate_metadata(def, &req.metadata)
-                .map_err(|errs| {
-                    let joined = errs
-                        .iter()
-                        .map(|e| e.to_string())
-                        .collect::<Vec<_>>()
-                        .join("; ");
-                    anyhow!("renderer '{}' metadata validation failed: {joined}", def.name)
-                })?;
-            for w in &v.warnings {
-                log::warn!("renderer '{}': {w}", def.name);
-            }
-            v.settings
-        } else {
-            log::warn!(
-                "renderer '{}' has no manifest schema; sending empty Init.settings",
-                def.name
-            );
-            HashMap::new()
-        };
+    let mut settings_kv: HashMap<String, String> = req.settings.clone();
 
-    if def.settings.contains_key("fps") && req.fps != 0 {
-        settings_kv.insert("fps".to_string(), req.fps.to_string());
-    }
     if def.settings.contains_key("test_pattern") && req.test_pattern {
         settings_kv.insert("test_pattern".to_string(), "1".to_string());
     }
@@ -1445,90 +1275,13 @@ pub(crate) fn build_init_msg(
     let mut settings: Vec<(String, String)> = settings_kv.into_iter().collect();
     settings.sort_by(|a, b| a.0.cmp(&b.0));
 
-    Ok(ControlMsg::Init {
+    ControlMsg::Init {
         spawn_version,
         extent_w: req.width,
         extent_h: req.height,
         extent_mode: req.extent_mode,
         settings,
-    })
-}
-
-/// Identity key for `find_reusable`. Two requests compare equal under
-/// this view iff reusing one renderer for the other is safe (same
-/// resource, same identity-tagged settings). Schema-less manifests
-/// treat ALL metadata as identity — that's the wescene path until
-/// OWE catches up.
-///
-/// `BTreeMap` rather than `HashMap` so the value is `Eq + Ord` and
-/// stable across hash randomization (test determinism).
-type IdentityKey = std::collections::BTreeMap<String, String>;
-
-fn identity_view(req: &SpawnRequest, def: &RendererDef) -> IdentityKey {
-    identity_view_from_metadata(&req.metadata, def)
-}
-
-fn identity_view_from_metadata(
-    metadata: &HashMap<String, String>,
-    def: &RendererDef,
-) -> IdentityKey {
-    let schema_less = !crate::plugin::renderer_registry::manifest_has_schema(def);
-    let mut out = IdentityKey::new();
-    if schema_less {
-        // Preserve today's behaviour: every metadata entry is
-        // identity. Covers wescene's current manifest.
-        for (k, v) in metadata {
-            out.insert(k.clone(), v.clone());
-        }
-        return out;
     }
-    for (k, v) in metadata {
-        let is_identity = if let Some(setting) = def.settings.get(k) {
-            setting.identity
-        } else {
-            // Anything not in settings — `path`, extras, unknown — is
-            // identity. Resource keys are always identity-coupled to
-            // the spawn.
-            true
-        };
-        if is_identity {
-            out.insert(k.clone(), v.clone());
-        }
-    }
-    out
-}
-
-/// Runtime-tunable subset of `req.metadata`: keys that the manifest
-/// schema declares as `identity = false`. Schema-less manifests yield
-/// an empty map (no key is hot-applicable until the manifest opts in).
-///
-/// Under SPAWN_VERSION 3 every setting (including `fps` and
-/// `test_pattern`) is a regular kv key — there's no typed wire field
-/// to deduplicate against, so this view is uniform.
-fn runtime_view(req: &SpawnRequest, def: &RendererDef) -> HashMap<String, String> {
-    let mut out = HashMap::new();
-    if def.settings.is_empty() {
-        return out;
-    }
-    for (k, v) in &req.metadata {
-        if let Some(setting) = def.settings.get(k) {
-            if !setting.identity {
-                out.insert(k.clone(), v.clone());
-            }
-        }
-    }
-    out
-}
-
-/// Seed for `RendererHandle.runtime_settings`: the `identity = false`
-/// slice of the SpawnRequest's metadata. Identity-tagged settings
-/// don't belong here — those force a respawn on change, so caching
-/// them would be misleading.
-fn initial_runtime_settings(
-    req: &SpawnRequest,
-    def: &RendererDef,
-) -> HashMap<String, String> {
-    runtime_view(req, def)
 }
 
 /// Run the post-accept handshake on a blocking std `UnixStream`:
@@ -1615,8 +1368,7 @@ impl RendererHandle {
             width: 1920,
             height: 1080,
             extent_mode: 0,
-            fps: 30,
-            metadata: HashMap::new(),
+            extras: HashMap::new(),
             name: "test-stub".into(),
             pid: None,
             gpu: DrmNode::UNKNOWN,
@@ -1627,8 +1379,6 @@ impl RendererHandle {
             release_syncobj: Arc::new(StdMutex::new(None)),
             format_caps: Arc::new(StdMutex::new(None)),
             last_dispatched_scheme: Arc::new(StdMutex::new(None)),
-            runtime_settings: Arc::new(StdMutex::new(HashMap::new())),
-            overrides: Arc::new(StdMutex::new(std::collections::HashSet::new())),
             frame_record_tx: None,
             pending_configure: Arc::new(StdMutex::new(None)),
             child: Arc::new(TokioMutex::new(None)),
@@ -1710,21 +1460,23 @@ mod init_handshake_tests {
     #[test]
     fn slim_init_carries_extent_and_settings_kv() {
         // SPAWN_VERSION 3 sanity: extent triple + settings kv come
-        // through; no typed scalar promotion of fps / test_pattern.
-        let mut metadata = HashMap::new();
-        metadata.insert("path".to_string(), "/tmp/clip.mp4".to_string());
+        // through verbatim. The caller is responsible for sourcing a
+        // reconciled settings map (the daemon pulls it from
+        // `Settings::plugin(&name)`); build_init_msg does not refill
+        // defaults or filter unknown keys.
+        let mut settings_in = HashMap::new();
+        settings_in.insert("loop_file".to_string(), "inf".to_string());
         let req = SpawnRequest {
             extras: HashMap::new(),
             wp_type: "video".into(),
-            metadata,
+            settings: settings_in,
             width: 1920,
             height: 1080,
             extent_mode: 0,
-            fps: 30,
             test_pattern: false,
             renderer_name: None,
         };
-        let msg = build_init_msg(&req, &def_mpv_schema()).expect("ok");
+        let msg = build_init_msg(&req, &def_mpv_schema());
         match msg {
             ControlMsg::Init {
                 spawn_version,
@@ -1737,7 +1489,6 @@ mod init_handshake_tests {
                 assert_eq!(extent_w, 1920);
                 assert_eq!(extent_h, 1080);
                 assert_eq!(extent_mode, 0);
-                // mpv schema declares loop_file with default = "inf".
                 assert_eq!(
                     settings,
                     vec![("loop_file".to_string(), "inf".to_string())]
@@ -1778,20 +1529,19 @@ mod init_handshake_tests {
             .expect("renderer send InitNack");
         });
 
-        let mut metadata = HashMap::new();
-        metadata.insert("scene".to_string(), "/tmp/scene.pkg".to_string());
+        let mut settings = HashMap::new();
+        settings.insert("scene".to_string(), "/tmp/scene.pkg".to_string());
         let req = SpawnRequest {
             extras: HashMap::new(),
             wp_type: "scene".into(),
-            metadata,
+            settings,
             width: 800,
             height: 600,
             extent_mode: 0,
-            fps: 30,
             test_pattern: false,
             renderer_name: None,
         };
-        let init = build_init_msg(&req, &def_legacy("wescene-renderer")).expect("ok");
+        let init = build_init_msg(&req, &def_legacy("wescene-renderer"));
         let err = run_init_handshake(&daemon, &init)
             .expect_err("InitNack must abort the handshake");
         let s = err.to_string();
@@ -1835,197 +1585,80 @@ mod reuse_tests {
         }
     }
 
-    #[test]
-    fn identity_view_separates_runtime_from_identity() {
-        let def = def_mpv();
-        let mut metadata = HashMap::new();
-        metadata.insert("path".into(), "/clip.mp4".into());
-        metadata.insert("loop_file".into(), "no".into()); // identity = false
-        metadata.insert("hwdec".into(), "auto-safe".into()); // identity = false
-        let req = SpawnRequest {
-            extras: HashMap::new(),
-            wp_type: "video".into(),
-            metadata,
-            width: 1920,
-            height: 1080,
-            extent_mode: 0,
-            fps: 30,
-            test_pattern: false,
-            renderer_name: None,
-        };
-        let id = identity_view(&req, &def);
-        // `path` is identity (resource primary); loop_file/hwdec are
-        // runtime so they MUST NOT appear in the identity view.
-        assert_eq!(id.get("path").map(|s| s.as_str()), Some("/clip.mp4"));
-        assert!(id.get("loop_file").is_none());
-        assert!(id.get("hwdec").is_none());
-
-        let rt = runtime_view(&req, &def);
-        assert_eq!(rt.get("loop_file").map(|s| s.as_str()), Some("no"));
-        assert_eq!(rt.get("hwdec").map(|s| s.as_str()), Some("auto-safe"));
-        assert!(rt.get("path").is_none());
-    }
-
-    #[test]
-    fn identity_view_schema_less_treats_all_as_identity() {
-        // Wescene's manifest currently has no settings, no extras —
-        // all metadata must be identity so today's behaviour is
-        // preserved.
-        let def = RendererDef {
-            name: "wescene-renderer".into(),
-            bin: PathBuf::from("/dev/null"),
-            types: vec!["scene".into()],
-            priority: 100,
-            version: "v0.0.0".into(),
-            spawn_version: None,
-            extras: Vec::new(),
-            settings: HashMap::new(),
-        };
-        let mut metadata = HashMap::new();
-        metadata.insert("scene".into(), "/wp.pkg".into());
-        metadata.insert("volume".into(), "0.5".into());
-        let req = SpawnRequest {
-            extras: HashMap::new(),
-            wp_type: "scene".into(),
-            metadata,
-            width: 1920,
-            height: 1080,
-            extent_mode: 0,
-            fps: 30,
-            test_pattern: false,
-            renderer_name: None,
-        };
-        let id = identity_view(&req, &def);
-        assert_eq!(id.get("scene").map(|s| s.as_str()), Some("/wp.pkg"));
-        assert_eq!(id.get("volume").map(|s| s.as_str()), Some("0.5"));
-        let rt = runtime_view(&req, &def);
-        assert!(rt.is_empty());
-    }
-
-    #[tokio::test]
-    async fn find_reusable_returns_delta_when_identity_matches() {
-        let mut registry = RendererRegistry::new();
-        registry.register(def_mpv());
-        let mgr = RendererManager::new(registry);
-
-        // Build a live mpv-named handle directly: metadata holds the
-        // video path (identity) and a stale loop_file value. The
-        // runtime_settings cache reflects the prior ApplySettings
-        // state — `loop_file = inf`.
-        let mut handle_md = HashMap::new();
-        handle_md.insert("path".into(), "/clip.mp4".into());
-        handle_md.insert("loop_file".into(), "inf".into());
-        let (_a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
-        let (events_tx, _events_rx) = tokio::sync::broadcast::channel::<EventMsg>(8);
-        let h = Arc::new(RendererHandle {
-            id: "h1".into(),
-            wp_type: "video".into(),
-            width: 1920,
-            height: 1080,
-            extent_mode: 0,
-            fps: 30,
-            metadata: handle_md,
-            name: "waywallen-mpv".into(),
-            pid: None,
-            gpu: DrmNode::UNKNOWN,
-            sock: Arc::new(StdMutex::new(_a)),
-            events: events_tx,
-            bind_snapshot: Arc::new(StdMutex::new(None)),
-            sync_fds: Arc::new(StdMutex::new(std::collections::VecDeque::new())),
-            release_syncobj: Arc::new(StdMutex::new(None)),
-            format_caps: Arc::new(StdMutex::new(None)),
-            last_dispatched_scheme: Arc::new(StdMutex::new(None)),
-            runtime_settings: Arc::new(StdMutex::new({
-                let mut m = HashMap::new();
-                m.insert("loop_file".to_string(), "inf".to_string());
-                m
-            })),
-            overrides: Arc::new(StdMutex::new(std::collections::HashSet::new())),
-            frame_record_tx: None,
-            pending_configure: Arc::new(StdMutex::new(None)),
-            child: Arc::new(TokioMutex::new(None)),
-        });
-        mgr.register_test_handle(h).await;
-
-        // Same identity (same path), but loop_file flipped:
-        // identity hit, delta = {loop_file=no}.
-        let mut req_md = HashMap::new();
-        req_md.insert("path".into(), "/clip.mp4".into());
-        req_md.insert("loop_file".into(), "no".into());
-        let req = SpawnRequest {
-            extras: HashMap::new(),
-            wp_type: "video".into(),
-            metadata: req_md,
-            width: 1920,
-            height: 1080,
-            extent_mode: 0,
-            fps: 30,
-            test_pattern: false,
-            renderer_name: None,
-        };
-        let (id, delta, fps_change) = mgr
-            .find_reusable(&req)
-            .await
-            .expect("identity hit expected");
-        assert_eq!(id, "h1");
-        assert_eq!(delta.get("loop_file").map(|s| s.as_str()), Some("no"));
-        assert!(delta.get("path").is_none(), "path must not be in delta");
-        assert!(fps_change.is_none(), "fps not declared as runtime in mpv schema");
-    }
-
-    #[tokio::test]
-    async fn find_reusable_misses_on_identity_change() {
-        let mut registry = RendererRegistry::new();
-        registry.register(def_mpv());
-        let mgr = RendererManager::new(registry);
-
-        // Live handle for /clip.mp4, but the request asks for /other.mp4.
-        let (_a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
+    /// Construct a live mpv handle stub with the given extras dict.
+    /// Mirrors `RendererHandle::test_stub` but lets the test pin
+    /// `extras` (the per-spawn identity differentiator).
+    fn live_mpv_handle(id: &str, extras: HashMap<String, String>) -> Arc<RendererHandle> {
+        let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
         let (events_tx, _) = tokio::sync::broadcast::channel::<EventMsg>(8);
-        let mut md = HashMap::new();
-        md.insert("path".into(), "/clip.mp4".into());
-        let h = Arc::new(RendererHandle {
-            id: "h1".into(),
+        Arc::new(RendererHandle {
+            id: id.into(),
             wp_type: "video".into(),
             width: 1920,
             height: 1080,
             extent_mode: 0,
-            fps: 30,
-            metadata: md,
+            extras,
             name: "waywallen-mpv".into(),
             pid: None,
             gpu: DrmNode::UNKNOWN,
-            sock: Arc::new(StdMutex::new(_a)),
+            sock: Arc::new(StdMutex::new(a)),
             events: events_tx,
             bind_snapshot: Arc::new(StdMutex::new(None)),
             sync_fds: Arc::new(StdMutex::new(std::collections::VecDeque::new())),
             release_syncobj: Arc::new(StdMutex::new(None)),
             format_caps: Arc::new(StdMutex::new(None)),
             last_dispatched_scheme: Arc::new(StdMutex::new(None)),
-            runtime_settings: Arc::new(StdMutex::new(HashMap::new())),
-            overrides: Arc::new(StdMutex::new(std::collections::HashSet::new())),
             frame_record_tx: None,
             pending_configure: Arc::new(StdMutex::new(None)),
             child: Arc::new(TokioMutex::new(None)),
-        });
-        mgr.register_test_handle(h).await;
+        })
+    }
 
-        let mut req_md = HashMap::new();
-        req_md.insert("path".into(), "/other.mp4".into());
-        let req = SpawnRequest {
-            extras: HashMap::new(),
+    fn req_with_extras(extras: HashMap<String, String>) -> SpawnRequest {
+        SpawnRequest {
+            extras,
             wp_type: "video".into(),
-            metadata: req_md,
+            settings: HashMap::new(),
             width: 1920,
             height: 1080,
             extent_mode: 0,
-            fps: 30,
             test_pattern: false,
             renderer_name: None,
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn find_reusable_hits_when_extras_match() {
+        let mut registry = RendererRegistry::new();
+        registry.register(def_mpv());
+        let mgr = RendererManager::new(registry);
+
+        let mut extras = HashMap::new();
+        extras.insert("path".into(), "/clip.mp4".into());
+        let h = live_mpv_handle("h1", extras.clone());
+        mgr.register_test_handle(h).await;
+
+        let req = req_with_extras(extras);
+        let id = mgr.find_reusable(&req).await.expect("reuse hit expected");
+        assert_eq!(id, "h1");
+    }
+
+    #[tokio::test]
+    async fn find_reusable_misses_on_different_path() {
+        let mut registry = RendererRegistry::new();
+        registry.register(def_mpv());
+        let mgr = RendererManager::new(registry);
+
+        let mut h_extras = HashMap::new();
+        h_extras.insert("path".into(), "/clip.mp4".into());
+        mgr.register_test_handle(live_mpv_handle("h1", h_extras)).await;
+
+        let mut req_extras = HashMap::new();
+        req_extras.insert("path".into(), "/other.mp4".into());
+        let req = req_with_extras(req_extras);
         assert!(
             mgr.find_reusable(&req).await.is_none(),
-            "different primary key value must miss"
+            "different path must miss reuse",
         );
     }
 
@@ -2050,8 +1683,7 @@ mod reuse_tests {
             width: 1920,
             height: 1080,
             extent_mode: 0,
-            fps: 30,
-            metadata: HashMap::new(),
+            extras: HashMap::new(),
             name: "waywallen-mpv".into(),
             pid: None,
             gpu: DrmNode::UNKNOWN,
@@ -2062,8 +1694,6 @@ mod reuse_tests {
             release_syncobj: Arc::new(StdMutex::new(None)),
             format_caps: Arc::new(StdMutex::new(None)),
             last_dispatched_scheme: Arc::new(StdMutex::new(None)),
-            runtime_settings: Arc::new(StdMutex::new(HashMap::new())),
-            overrides: Arc::new(StdMutex::new(std::collections::HashSet::new())),
             frame_record_tx: None,
             pending_configure: Arc::new(StdMutex::new(None)),
             child: Arc::new(TokioMutex::new(None)),
@@ -2088,15 +1718,9 @@ mod reuse_tests {
         let got = peer.join().expect("peer joined");
         match got {
             ControlMsg::ApplySettings { settings } => {
-                // SPAWN_VERSION 3: pure kv. fps=None means no fps key
-                // appended; in this test the caller passes only
-                // loop_file so settings should match exactly.
                 assert_eq!(settings, vec![("loop_file".into(), "no".into())]);
             }
             other => panic!("expected ApplySettings, got {other:?}"),
         }
-        // Cache merged.
-        let cache = h.runtime_settings_snapshot();
-        assert_eq!(cache.get("loop_file").map(|s| s.as_str()), Some("no"));
     }
 }

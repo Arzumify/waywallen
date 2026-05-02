@@ -275,18 +275,18 @@ async fn run_one_pair(
     // binary (`caps_discovery_intersection_is_non_empty`) only call
     // `--print-caps` which doesn't consult this env var.
     std::env::set_var("WAYWALLEN_IMAGE_DUMP_DIR", &prod_dir);
-    let mut metadata = std::collections::HashMap::new();
-    metadata.insert("path".to_string(), image_path.display().to_string());
-    // SPAWN_VERSION 3: extras becomes the CLI argv (`--path …`).
-    let extras = metadata.clone();
+    let mut extras = std::collections::HashMap::new();
+    extras.insert("path".to_string(), image_path.display().to_string());
+    // SPAWN_VERSION 3: extras becomes the CLI argv (`--path …`); the
+    // image renderer's manifest declares no settings so Init.settings
+    // is empty.
     let req = SpawnRequest {
         wp_type: "image".to_string(),
         extras,
-        metadata,
+        settings: std::collections::HashMap::new(),
         width: 640,
         height: 360,
         extent_mode: 0,
-        fps: 30,
         test_pattern: false,
         renderer_name: None,
     };

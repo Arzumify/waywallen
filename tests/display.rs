@@ -411,11 +411,10 @@ async fn two_displays_both_get_real_sync_fds() {
         .spawn(SpawnRequest {
             wp_type: "scene".into(),
             extras: std::collections::HashMap::new(),
-            metadata: std::collections::HashMap::new(),
+            settings: std::collections::HashMap::new(),
             width: 640,
             height: 480,
             extent_mode: 0,
-            fps: 60,
             test_pattern: false,
             renderer_name: None,
         })
@@ -522,11 +521,10 @@ async fn renderer_produces_real_sync_fds() {
         .spawn(SpawnRequest {
             wp_type: "scene".into(),
             extras: std::collections::HashMap::new(),
-            metadata: std::collections::HashMap::new(),
+            settings: std::collections::HashMap::new(),
             width: 640,
             height: 480,
             extent_mode: 0,
-            fps: 60,
             test_pattern: false,
             renderer_name: None,
         })

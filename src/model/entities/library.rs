@@ -11,6 +11,10 @@ pub struct Model {
     pub id: i64,
     pub plugin_id: i64,
     pub path: String,
+    /// JSON-encoded `{string -> string}` map. Free-form per-plugin
+    /// scratch space exposed to source plugins via `ctx.library_meta_*`.
+    /// Defaults to `"{}"` so legacy rows decode cleanly.
+    pub metadata: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -77,7 +77,7 @@ async fn handle_conn(
     }
     {
         let snap = state.router.snapshot_renderers().await;
-        let evt = renderers_replace_event(snap);
+        let evt = renderers_replace_event(snap, &state.settings);
         sink.send(Message::Binary(wrap_event(evt).encode_to_vec())).await?;
     }
 
@@ -162,7 +162,7 @@ async fn handle_conn(
                         let evt = displays_replace_event(snap, &state.settings);
                         sink.send(Message::Binary(wrap_event(evt).encode_to_vec())).await?;
                         let rsnap = state.router.snapshot_renderers().await;
-                        let revt = renderers_replace_event(rsnap);
+                        let revt = renderers_replace_event(rsnap, &state.settings);
                         sink.send(Message::Binary(wrap_event(revt).encode_to_vec())).await?;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -346,20 +346,27 @@ fn displays_replace_event(snap: Vec<DisplaySnapshot>, settings: &SettingsStore) 
     }
 }
 
-fn renderer_snapshot_to_pb(s: RendererSnapshot) -> pb::RendererInstance {
+fn renderer_snapshot_to_pb(s: RendererSnapshot, settings: &SettingsStore) -> pb::RendererInstance {
+    let fps: u32 = settings
+        .plugin(&s.name)
+        .and_then(|kv| kv.get("fps").and_then(|v| v.parse().ok()))
+        .unwrap_or(0);
     pb::RendererInstance {
         renderer_id: s.id,
-        fps: s.fps,
+        fps,
         status: s.status.as_str().to_string(),
         name: s.name,
         pid: s.pid,
     }
 }
 
-fn renderers_replace_event(snap: Vec<RendererSnapshot>) -> pb::Event {
+fn renderers_replace_event(snap: Vec<RendererSnapshot>, settings: &SettingsStore) -> pb::Event {
     pb::Event {
         payload: Some(pb::event::Payload::RendererSnapshot(pb::RendererSnapshot {
-            renderers: snap.into_iter().map(renderer_snapshot_to_pb).collect(),
+            renderers: snap
+                .into_iter()
+                .map(|s| renderer_snapshot_to_pb(s, settings))
+                .collect(),
         })),
     }
 }
@@ -395,7 +402,7 @@ fn router_event_to_pb(e: RouterEvent, settings: &SettingsStore) -> pb::Event {
         RouterEvent::DisplaysReplace(list) => displays_replace_event(list, settings),
         RouterEvent::RendererUpsert(s) => pb::Event {
             payload: Some(pb::event::Payload::RendererChanged(pb::RendererChanged {
-                renderer: Some(renderer_snapshot_to_pb(s)),
+                renderer: Some(renderer_snapshot_to_pb(s, settings)),
             })),
         },
         RouterEvent::RendererRemoved(id) => pb::Event {
@@ -403,7 +410,7 @@ fn router_event_to_pb(e: RouterEvent, settings: &SettingsStore) -> pb::Event {
                 renderer_id: id,
             })),
         },
-        RouterEvent::RenderersReplace(list) => renderers_replace_event(list),
+        RouterEvent::RenderersReplace(list) => renderers_replace_event(list, settings),
         RouterEvent::LibraryUpsert(s) => pb::Event {
             payload: Some(pb::event::Payload::LibraryChanged(pb::LibraryChanged {
                 library: Some(library_instance_to_pb(s)),
@@ -523,14 +530,26 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
         ),
 
         Req::RendererSpawn(r) => {
+            // Low-level RPC: caller hands in a single `metadata` map.
+            // Treat it as both the CLI argv extras (path / assets / …)
+            // and the Init.settings kv. This is loose by design — the
+            // RPC is for advanced/manual use; `WallpaperApply` is the
+            // intended end-user path and sources settings cleanly from
+            // the settings store.
+            //
+            // `r.fps` rides on `settings["fps"]` so the renderer sees
+            // it via `Init.settings` — the typed scalar is gone.
+            let mut settings = r.metadata.clone();
+            if r.fps != 0 {
+                settings.insert("fps".to_string(), r.fps.to_string());
+            }
             let spawn_req = renderer_manager::SpawnRequest {
                 wp_type: if r.wp_type.is_empty() { "scene".into() } else { r.wp_type },
-                extras: r.metadata.clone(),
-                metadata: r.metadata,
+                extras: r.metadata,
+                settings,
                 width: r.width,
                 height: r.height,
                 extent_mode: crate::settings::extent_mode::AS_GIVEN,
-                fps: r.fps,
                 test_pattern: false,
                 renderer_name: None,
             };
@@ -549,10 +568,18 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
             let ids = state.renderer_manager.list().await;
             let mut instances = Vec::with_capacity(ids.len());
             for id in &ids {
-                let (fps, name, pid) = match state.renderer_manager.get(id).await {
-                    Some(h) => (h.fps, h.name.clone(), h.pid.unwrap_or(0)),
-                    None => (0, String::new(), 0),
+                let (name, pid) = match state.renderer_manager.get(id).await {
+                    Some(h) => (h.name.clone(), h.pid.unwrap_or(0)),
+                    None => (String::new(), 0),
                 };
+                // fps lives in the plugin section of the settings store
+                // now (`Settings::reconcile` already enforces the
+                // schema). 0 = unknown / unset.
+                let fps: u32 = state
+                    .settings
+                    .plugin(&name)
+                    .and_then(|kv| kv.get("fps").and_then(|v| v.parse().ok()))
+                    .unwrap_or(0);
                 let status = if state.router.is_paused(id).await { "paused" } else { "playing" };
                 instances.push(pb::RendererInstance {
                     renderer_id: id.clone(),
@@ -876,20 +903,6 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
                 .settings
                 .plugin(&plugin_name)
                 .unwrap_or_default();
-            // Read the typed `fps` spawn field out of plugin kv if
-            // present, defaulting to 30. Step 4 of the renderer-Init
-            // refactor removed the legacy argv block, so fps now only
-            // travels on `Init.fps` — no double-pass risk, no need to
-            // `remove` the key from `plugin_kv` first. The schema
-            // validator filters unknown plugin-kv keys downstream.
-            let fps: u32 = plugin_kv
-                .get("fps")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(30);
-
-            let mut metadata: std::collections::HashMap<String, String> = plugin_kv;
-            // Wallpaper-supplied keys override plugin defaults.
-            metadata.extend(entry.metadata.clone());
 
             // SPAWN_VERSION 3: extras (canonical `path` + manifest
             // whitelist like `assets`/`workshop_id`) ride as CLI
@@ -902,6 +915,7 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
                 .lock()
                 .await
                 .call_extras(&entry.plugin_name, &entry)
+                .await
             {
                 Ok(m) => m,
                 Err(e) => {
@@ -916,11 +930,10 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
             let spawn_req = renderer_manager::SpawnRequest {
                 wp_type: entry.wp_type.clone(),
                 extras,
-                metadata,
+                settings: plugin_kv,
                 width,
                 height,
                 extent_mode,
-                fps,
                 test_pattern: false,
                 // Pin reuse + spawn to the explicit pick when the
                 // request named one; otherwise let the manager fall
@@ -932,36 +945,18 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
                 },
             };
 
-            // Reuse an existing renderer if its identity matches
-            // (wp_type + identity-tagged metadata + w/h/fps). Step 4
-            // makes the comparison identity-aware: runtime-tunable
-            // settings (identity = false in the manifest) only flow
-            // through ApplySettings — no respawn, no display flicker.
+            // Reuse an existing renderer when wp_type / extent / plugin
+            // / extras (path) all match and the handle hasn't been
+            // marked stale by an identity-tagged SettingsSet. Plugin
+            // settings live in the settings store and are pushed by
+            // SettingsSet's own broadcast, so the reuse path doesn't
+            // need to dispatch ApplySettings here.
             let renderer_id = match state.renderer_manager.find_reusable(&spawn_req).await {
-                Some((existing_id, delta, fps_change)) => {
-                    if delta.is_empty() && fps_change.is_none() {
-                        log::info!(
-                            "wallpaper_apply: reusing renderer {existing_id} for wallpaper {} (no settings delta)",
-                            entry.id
-                        );
-                    } else {
-                        log::info!(
-                            "wallpaper_apply: reusing renderer {existing_id} for wallpaper {} \
-                             (ApplySettings delta keys={:?}, fps_change={fps_change:?})",
-                            entry.id,
-                            delta.keys().collect::<Vec<_>>(),
-                        );
-                        let kv: Vec<(String, String)> = delta.into_iter().collect();
-                        if let Err(e) = state
-                            .renderer_manager
-                            .send_apply_settings(&existing_id, kv, fps_change)
-                            .await
-                        {
-                            log::warn!(
-                                "wallpaper_apply: send_apply_settings to {existing_id} failed: {e}"
-                            );
-                        }
-                    }
+                Some(existing_id) => {
+                    log::info!(
+                        "wallpaper_apply: reusing renderer {existing_id} for wallpaper {}",
+                        entry.id
+                    );
                     existing_id
                 }
                 None => {
@@ -1204,34 +1199,22 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
                     .cloned()
                     .unwrap_or_default();
 
-                // Partition the new kv into runtime vs identity per
-                // the manifest. Skip plugins with no schema — there's
-                // no way to tell hot-reloadable from identity, and
-                // wescene falls in this bucket today.
-                if def.settings.is_empty() {
+                // Forward every key the user actually changed (within
+                // the manifest schema) to all live renderers of this
+                // plugin. The renderer applies what it can hot-reload
+                // and ignores the rest; whatever it didn't accept will
+                // take effect on its next spawn via `Init.settings`,
+                // which sources the same settings store.
+                let kv: Vec<(String, String)> = new_kv
+                    .iter()
+                    .filter(|(k, v)| {
+                        def.settings.contains_key(*k) && old_kv.get(*k) != Some(v)
+                    })
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if kv.is_empty() {
                     continue;
                 }
-
-                let mut delta: std::collections::HashMap<String, String> =
-                    std::collections::HashMap::new();
-                for (k, v) in &new_kv {
-                    let Some(setting) = def.settings.get(k) else {
-                        continue;
-                    };
-                    if !setting.identity && old_kv.get(k) != Some(v) {
-                        delta.insert(k.clone(), v.clone());
-                    } else if setting.identity && old_kv.get(k) != Some(v) {
-                        log::warn!(
-                            "settings_set: '{plugin_name}.{k}' is identity-tagged; \
-                             change will only take effect on next renderer respawn"
-                        );
-                    }
-                }
-
-                if delta.is_empty() {
-                    continue;
-                }
-
                 let ids = state.renderer_manager.list().await;
                 for id in ids {
                     let Some(handle) = state.renderer_manager.get(&id).await else {
@@ -1240,20 +1223,9 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
                     if handle.name != plugin_name {
                         continue;
                     }
-                    // Respect per-instance overrides: keys the user
-                    // has set specifically on this renderer must not
-                    // be clobbered by a plugin-default change.
-                    let kv: Vec<(String, String)> = delta
-                        .iter()
-                        .filter(|(k, _)| !handle.has_override(k))
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
-                    if kv.is_empty() {
-                        continue;
-                    }
                     if let Err(e) = state
                         .renderer_manager
-                        .send_apply_settings(&id, kv, None)
+                        .send_apply_settings(&id, kv.clone(), None)
                         .await
                     {
                         log::warn!(

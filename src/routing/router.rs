@@ -181,13 +181,14 @@ impl RendererStatus {
 
 /// Read-only view of a registered renderer. Returned from
 /// `Router::snapshot_renderers`; mirrors the fields surfaced on the
-/// control-plane `RendererInstance` message.
+/// control-plane `RendererInstance` message minus per-plugin settings
+/// (those live in the settings store and are looked up at the wire-
+/// translation boundary).
 #[derive(Debug, Clone)]
 pub struct RendererSnapshot {
     pub id: RendererId,
     pub wp_type: String,
     pub name: String,
-    pub fps: u32,
     pub status: RendererStatus,
     pub pid: u32,
 }
@@ -990,7 +991,6 @@ impl Router {
             id: handle.id.clone(),
             wp_type: handle.wp_type.clone(),
             name: handle.name.clone(),
-            fps: handle.fps,
             status,
             pid: handle.pid.unwrap_or(0),
         })
@@ -1015,7 +1015,6 @@ impl Router {
                     id: handle.id.clone(),
                     wp_type: handle.wp_type.clone(),
                     name: handle.name.clone(),
-                    fps: handle.fps,
                     status,
                     pid: handle.pid.unwrap_or(0),
                 })

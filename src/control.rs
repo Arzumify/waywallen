@@ -45,7 +45,6 @@ pub async fn apply_wallpaper_by_id(
     id: &str,
     width: u32,
     height: u32,
-    fps: u32,
 ) -> Result<ApplyResult> {
     let app_clone = app.clone();
     let id_owned = id.to_string();
@@ -55,7 +54,7 @@ pub async fn apply_wallpaper_by_id(
         "apply/global",
         format!("apply/{id_owned}"),
         async move {
-            let res = apply_wallpaper_inner(&app_clone, &id_owned, width, height, fps).await;
+            let res = apply_wallpaper_inner(&app_clone, &id_owned, width, height).await;
             // If the receiver is gone the caller already moved on (or
             // was itself cancelled); silently drop the result.
             let _ = tx.send(res);
@@ -73,7 +72,6 @@ async fn apply_wallpaper_inner(
     id: &str,
     width: u32,
     height: u32,
-    fps: u32,
 ) -> Result<ApplyResult> {
     let entry = {
         let snap = app.source_snapshot.read().await;
@@ -81,14 +79,10 @@ async fn apply_wallpaper_inner(
     };
     let entry = entry.ok_or_else(|| anyhow!("wallpaper '{id}' not found"))?;
 
-    if app
-        .renderer_manager
-        .registry()
-        .resolve(&entry.wp_type)
-        .is_none()
-    {
-        return Err(anyhow!("no renderer for wallpaper type '{}'", entry.wp_type));
-    }
+    let renderer_plugin_name = match app.renderer_manager.registry().resolve(&entry.wp_type) {
+        Some(def) => def.name.clone(),
+        None => return Err(anyhow!("no renderer for wallpaper type '{}'", entry.wp_type)),
+    };
 
     // The D-Bus + rotator entry point always relinks every display
     // to the new renderer (relink_all_displays_to below). That means
@@ -101,10 +95,7 @@ async fn apply_wallpaper_inner(
     }
 
     // `width`/`height` of `0` are legal — they tell the renderer to
-    // derive that axis from the wallpaper's intrinsic size. Only `fps`
-    // still has a hard floor since `0` is the unset sentinel on the
-    // wire.
-    let fps = if fps == 0 { 30 } else { fps };
+    // derive that axis from the wallpaper's intrinsic size.
     // SPAWN_VERSION 3: source plugin's `extras(entry)` Lua callback
     // returns the CLI argv dict. Plugins that haven't migrated fall
     // back to entry.metadata inside `call_extras`.
@@ -113,6 +104,7 @@ async fn apply_wallpaper_inner(
         .lock()
         .await
         .call_extras(&entry.plugin_name, &entry)
+        .await
     {
         Ok(m) => m,
         Err(e) => {
@@ -123,14 +115,20 @@ async fn apply_wallpaper_inner(
             entry.metadata.clone()
         }
     };
+    // Init.settings is the reconciled per-plugin section of the
+    // settings store; defaults and bound-checks are already enforced
+    // there (`Settings::reconcile` on startup, `coerce_and_validate`
+    // on `SettingsSet`). The D-Bus / scheduler / rotator entry points
+    // don't take per-call setting overrides, so this is the canonical
+    // source.
+    let spawn_settings = app.settings.plugin(&renderer_plugin_name).unwrap_or_default();
     let spawn_req = renderer_manager::SpawnRequest {
         wp_type: entry.wp_type.clone(),
         extras,
-        metadata: entry.metadata.clone(),
+        settings: spawn_settings,
         width,
         height,
         extent_mode: crate::settings::extent_mode::AS_GIVEN,
-        fps,
         test_pattern: false,
         renderer_name: None,
     };
@@ -187,7 +185,7 @@ pub async fn step(app: &Arc<AppState>, delta: i32) -> Result<String> {
             .step(delta)
             .ok_or_else(|| anyhow!("playlist is empty"))?
     };
-    apply_wallpaper_by_id(app, &next_id, 0, 0, 0).await?;
+    apply_wallpaper_by_id(app, &next_id, 0, 0).await?;
     // Reset the rotator deadline so the user gets the full quiet
     // window after a manual advance instead of being walked over by
     // the next auto tick.
@@ -342,7 +340,7 @@ pub async fn run_restore(app: &Arc<AppState>, restore_last: bool) -> Result<()> 
     if restore_last {
         if let Some(last_id) = app.settings.global().last_wallpaper.clone() {
             log::info!("restoring last wallpaper: {last_id}");
-            match apply_wallpaper_by_id(app, &last_id, 0, 0, 0).await {
+            match apply_wallpaper_by_id(app, &last_id, 0, 0).await {
                 Ok(_) => applied = Some(last_id),
                 Err(e) => {
                     log::warn!("failed to restore last wallpaper: {e:#}");
@@ -498,7 +496,7 @@ pub async fn auto_detect_libraries(
 
     let detected = {
         let sm = app.source_manager.lock().await;
-        sm.auto_detect_all()?
+        sm.auto_detect_all().await?
     };
     if detected.is_empty() {
         return Ok(Vec::new());
@@ -642,9 +640,17 @@ async fn refresh_sources_inner(app: &Arc<AppState>) -> Result<usize> {
     // itself. Read consumers (`WallpaperList`/`WallpaperApply`/
     // `SourceList`) go through `source_snapshot` instead and never park
     // behind this section.
+    //
+    // `scan_all` is async because Lua plugins can call mlua async
+    // functions (`ctx.library_meta_*`) that await sea-orm. We still
+    // run the scan inside `spawn_blocking` so the long CPU-bound
+    // filesystem walks don't block an async worker — `Handle::block_on`
+    // from inside `spawn_blocking` drives the async-Lua future to
+    // completion on this dedicated thread.
+    let handle = tokio::runtime::Handle::current();
     let snapshot: Vec<WallpaperEntry> = tokio::task::spawn_blocking(move || {
         let mut sm = source_mgr.blocking_lock();
-        sm.scan_all(&libs_for_scan)?;
+        handle.block_on(sm.scan_all(&libs_for_scan))?;
         Ok::<_, anyhow::Error>(sm.list().to_vec())
     })
     .await

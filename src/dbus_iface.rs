@@ -93,7 +93,7 @@ impl Daemon1 {
     }
 
     async fn apply_by_id(&self, id: String) -> zbus::fdo::Result<String> {
-        control::apply_wallpaper_by_id(&self.app, &id, 0, 0, 0)
+        control::apply_wallpaper_by_id(&self.app, &id, 0, 0)
             .await
             .map(|r| r.renderer_id)
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))

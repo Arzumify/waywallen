@@ -406,11 +406,10 @@ async fn spawn_control_kill_roundtrip() {
     let req = SpawnRequest {
         wp_type: "scene".into(),
         extras: std::collections::HashMap::new(),
-        metadata: std::collections::HashMap::new(),
+        settings: std::collections::HashMap::new(),
         width: 320,
         height: 240,
         extent_mode: 0,
-        fps: 15,
         test_pattern: false,
         renderer_name: None,
     };
