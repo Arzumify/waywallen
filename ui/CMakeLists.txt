@@ -78,6 +78,7 @@ set(SOURCES_NO_MOC
   src/query/health_query.cpp
   src/query/display_query.cpp
   src/query/library_query.cpp
+  src/query/settings_query.cpp
   src/thumb/service.cpp
 )
 
@@ -103,6 +104,7 @@ set(MOC_SOURCE_FILES
   src/query/health_query.cppm
   src/query/display_query.cppm
   src/query/library_query.cppm
+  src/query/settings_query.cppm
   src/thumb/service.cppm
 )
 set(MODULES
@@ -119,6 +121,8 @@ set(QML_FILES
   qml/component/StatusDot.qml
   qml/component/PagePopup.qml
   qml/component/ThumbnailImage.qml
+  qml/component/settings/SettingField.qml
+  qml/component/settings/PluginSettingsDialog.qml
   qml/page/WallpaperPage.qml
   qml/page/WallpaperCard.qml
   qml/page/StatusPage.qml

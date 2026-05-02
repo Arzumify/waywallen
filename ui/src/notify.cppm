@@ -67,6 +67,13 @@ Q_SIGNALS:
     /// `activeTaskCount` properties already reflect the new values
     /// when this fires.
     void statusChanged();
+    /// Daemon broadcast a `SettingsChanged` event after a successful
+    /// `SettingsSet` (or schema-driven startup reconciliation). UI
+    /// settings forms should re-fetch via `SettingsGetQuery` to pick
+    /// up writes from peer clients. The payload itself is intentionally
+    /// not relayed here — receivers re-query so they go through the
+    /// same parsing path as the initial load.
+    void settingsChanged();
 
 private:
     bool    m_scan_in_progress { false };

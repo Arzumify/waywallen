@@ -118,7 +118,7 @@ async fn handle_conn(
             gevt = global_rx.recv() => {
                 match gevt {
                     Ok(e) => {
-                        if let Some(pe) = global_event_to_pb(&e) {
+                        if let Some(pe) = global_event_to_pb(&e, &state) {
                             sink.send(Message::Binary(wrap_event(pe).encode_to_vec())).await?;
                         }
                         if matches!(e, GlobalEvent::StatusChanged) {
@@ -417,7 +417,7 @@ fn status_sync_event(state: &Arc<AppState>) -> pb::Event {
 /// Translate the subset of `GlobalEvent` variants the UI cares about
 /// into wire `pb::Event`s. Returns `None` for events that are
 /// daemon-internal (boot phase markers, restore lifecycle).
-fn global_event_to_pb(e: &GlobalEvent) -> Option<pb::Event> {
+fn global_event_to_pb(e: &GlobalEvent, state: &Arc<AppState>) -> Option<pb::Event> {
     match e {
         GlobalEvent::ScanStarted => Some(pb::Event {
             payload: Some(pb::event::Payload::WallpaperScanStarted(
@@ -445,6 +445,28 @@ fn global_event_to_pb(e: &GlobalEvent) -> Option<pb::Event> {
                 paths: paths.clone(),
             })),
         }),
+        GlobalEvent::SettingsChanged => {
+            let snap = state.settings.snapshot();
+            let layout_defaults = pb::LayoutPrefs {
+                fillmode: fillmode_to_pb(snap.global.layout.fillmode) as i32,
+                align: align_to_pb(snap.global.layout.align) as i32,
+                clear_rgba: snap.global.layout.clear_rgba.to_vec(),
+            };
+            Some(pb::Event {
+                payload: Some(pb::event::Payload::SettingsChanged(pb::SettingsChanged {
+                    global: Some(pb::GlobalSettings {
+                        default_width: snap.global.default_width,
+                        default_height: snap.global.default_height,
+                        layout_defaults: Some(layout_defaults),
+                    }),
+                    plugins: snap
+                        .plugins
+                        .into_iter()
+                        .map(|(k, v)| (k, pb::PluginSettings { values: v }))
+                        .collect(),
+                })),
+            })
+        }
         GlobalEvent::SourcesReady
         | GlobalEvent::DisplayReady
         | GlobalEvent::RestoreApplied(_)
@@ -570,12 +592,23 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
             let renderers = registry
                 .all_renderers()
                 .iter()
-                .map(|def| pb::RendererPluginInfo {
-                    name: def.name.clone(),
-                    bin: def.bin.to_string_lossy().into_owned(),
-                    types: def.types.iter().map(|t| t.to_string()).collect(),
-                    priority: def.priority,
-                    version: def.version.clone(),
+                .map(|def| {
+                    let mut settings: Vec<pb::SettingSchema> = def
+                        .settings
+                        .iter()
+                        .map(|(k, v)| crate::control_proto::setting_def_to_proto(k, v))
+                        .collect();
+                    // Stable order so UIs can rely on deterministic
+                    // layout: by manifest `order` then key name.
+                    settings.sort_by(|a, b| a.order.cmp(&b.order).then(a.key.cmp(&b.key)));
+                    pb::RendererPluginInfo {
+                        name: def.name.clone(),
+                        bin: def.bin.to_string_lossy().into_owned(),
+                        types: def.types.iter().map(|t| t.to_string()).collect(),
+                        priority: def.priority,
+                        version: def.version.clone(),
+                        settings,
+                    }
                 })
                 .collect();
             let supported_types = registry
@@ -948,7 +981,7 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
             // Full replace. Missing `global` falls back to current
             // values so callers can update plugins alone by sending
             // None for global.
-            let new_plugins: std::collections::HashMap<
+            let mut new_plugins: std::collections::HashMap<
                 String,
                 std::collections::HashMap<String, String>,
             > = r
@@ -956,6 +989,42 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
                 .into_iter()
                 .map(|(k, v)| (k, v.values))
                 .collect();
+
+            // Schema validation up-front. Reject the entire RPC if any
+            // declared key fails type / bounds / choices — partial
+            // commits would leave the toml in a state that doesn't
+            // match what the caller asked for.
+            {
+                let registry = state.renderer_manager.registry();
+                for (plugin_name, kv) in new_plugins.iter_mut() {
+                    let Some(def) = registry
+                        .all_renderers()
+                        .into_iter()
+                        .find(|d| &d.name == plugin_name)
+                    else {
+                        continue;
+                    };
+                    if def.settings.is_empty() {
+                        continue;
+                    }
+                    for (k, v) in kv.iter_mut() {
+                        let Some(schema) = def.settings.get(k) else {
+                            continue;
+                        };
+                        match crate::plugin::renderer_registry::coerce_and_validate(k, v, schema) {
+                            Ok(coerced) => *v = coerced,
+                            Err(e) => {
+                                return error_response(
+                                    rid,
+                                    pb::Status::InvalidArgument,
+                                    format!("settings_set: {plugin_name}.{e}"),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
             // Snapshot the previous per-plugin settings so we can diff
             // against the new ones and dispatch ApplySettings to any
             // live renderer whose plugin name matches.
@@ -1071,6 +1140,9 @@ async fn dispatch(state: &Arc<AppState>, req: pb::Request) -> pb::Response {
                     }
                 }
             }
+            // Push the merged post-write state to all WS subscribers so
+            // a second UI bound to the same daemon stays in sync.
+            state.events.publish(GlobalEvent::SettingsChanged);
             ok(rid, Res::SettingsSet(pb::Empty {}))
         }
 

@@ -4,6 +4,7 @@ import QtQuick.Layouts
 import QtQuick.Templates as T
 import Qcm.Material as MD
 import waywallen.ui as W
+import "../component/settings"
 
 MD.Page {
     id: root
@@ -12,7 +13,7 @@ MD.Page {
     showBackground: false
     title: 'Status'
 
-    readonly property bool anyQuerying: healthQuery.querying || rendererQuery.querying || pluginQuery.querying || sourceQuery.querying
+    readonly property bool anyQuerying: healthQuery.querying || rendererQuery.querying || pluginQuery.querying || sourceQuery.querying || settingsQuery.querying
 
     component SectionTitle: MD.Text {
         typescale: MD.Token.typescale.title_medium
@@ -48,6 +49,37 @@ MD.Page {
         Component.onCompleted: reload()
     }
 
+    W.SettingsGetQuery {
+        id: settingsQuery
+        Component.onCompleted: reload()
+    }
+
+    // Re-fetch settings whenever a peer or our own write triggers a
+    // SettingsChanged broadcast. The open dialog's `syncCurrent` keeps
+    // local pending edits intact.
+    Connections {
+        target: W.Notify
+        function onSettingsChanged() {
+            settingsQuery.reload();
+        }
+    }
+
+    Connections {
+        target: settingsQuery
+        function onPluginsChanged() {
+            if (pluginSettingsDialog.opened) {
+                const p = settingsQuery.plugins[pluginSettingsDialog.pluginName];
+                pluginSettingsDialog.syncCurrent(p);
+            }
+        }
+    }
+
+    PluginSettingsDialog {
+        id: pluginSettingsDialog
+        pluginName: ""
+        schemaList: []
+    }
+
     W.SourceListQuery {
         id: sourceQuery
         Component.onCompleted: reload()
@@ -58,6 +90,7 @@ MD.Page {
         rendererQuery.reload();
         pluginQuery.reload();
         sourceQuery.reload();
+        settingsQuery.reload();
     }
 
     function rendererLabel(d) {
@@ -234,7 +267,10 @@ MD.Page {
                         model: pluginQuery.renderers
 
                         delegate: MD.ListItem {
+                            id: pluginItem
                             required property var modelData
+
+                            readonly property bool hasSettings: (modelData.settings && modelData.settings.length > 0) === true
 
                             width: ListView.view.width
                             radius: 12
@@ -245,10 +281,27 @@ MD.Page {
                                 size: 24
                                 color: MD.Token.color.on_surface_variant
                             }
-                            trailing: MD.Text {
-                                text: (modelData.version || "v0.0.0")
-                                typescale: MD.Token.typescale.label_small
-                                color: MD.Token.color.on_surface_variant
+                            trailing: RowLayout {
+                                spacing: 4
+                                MD.Text {
+                                    text: (pluginItem.modelData.version || "v0.0.0")
+                                    typescale: MD.Token.typescale.label_small
+                                    color: MD.Token.color.on_surface_variant
+                                }
+                                MD.IconButton {
+                                    visible: pluginItem.hasSettings
+                                    icon.name: MD.Token.icon.settings
+                                    onClicked: {
+                                        pluginSettingsDialog.pluginName = pluginItem.modelData.name;
+                                        pluginSettingsDialog.schemaList = pluginItem.modelData.settings || [];
+                                        pluginSettingsDialog.allCurrentPlugins = settingsQuery.plugins || ({});
+                                        pluginSettingsDialog.currentGlobal = settingsQuery.global || ({});
+                                        const p = settingsQuery.plugins ? settingsQuery.plugins[pluginItem.modelData.name] : undefined;
+                                        pluginSettingsDialog.currentValues = p || ({});
+                                        pluginSettingsDialog.pendingValues = ({});
+                                        pluginSettingsDialog.open();
+                                    }
+                                }
                             }
                         }
                     }

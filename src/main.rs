@@ -255,6 +255,7 @@ async fn async_main() -> anyhow::Result<()> {
     let settings_store =
         settings::SettingsStore::load_or_default(settings::default_config_path()).await;
     router.attach_settings(settings_store.clone());
+    settings_store.reconcile(renderer_mgr.registry());
     let db_path = settings::default_db_path();
     let db = model::connect(&db_path)
         .await

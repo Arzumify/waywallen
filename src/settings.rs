@@ -445,6 +445,134 @@ impl SettingsStore {
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }
+
+    /// Bring the in-memory plugin tables in line with the loaded
+    /// renderer registry's manifest schemas:
+    ///
+    /// - declared keys missing from the user's toml are filled with
+    ///   the manifest's `default`;
+    /// - keys present in the toml but absent from the manifest are
+    ///   dropped (with a warn) — they're stale leftovers from a
+    ///   plugin removal/rename;
+    /// - declared keys whose persisted value violates `min`/`max`/
+    ///   `choices` get reset to default and warned about — the
+    ///   daemon refuses to start serving an out-of-range value just
+    ///   because it was on disk.
+    ///
+    /// Marks the store dirty when reconciliation altered anything so
+    /// the cleaned-up table flushes to disk on the next debounce
+    /// cycle. Returns `true` when a flush is needed (caller may also
+    /// want to publish a `SettingsChanged` event so any already-
+    /// connected WS client sees the merged truth).
+    pub fn reconcile(
+        &self,
+        registry: &crate::plugin::renderer_registry::RendererRegistry,
+    ) -> bool {
+        use crate::plugin::renderer_registry::{
+            check_setting_bounds, SettingDef, SettingType,
+        };
+
+        let mut changed = false;
+        let mut g = self.inner.write().expect("settings poisoned");
+
+        // Pre-compute manifest schemas keyed by plugin name so we can
+        // also iterate the user table and warn on truly-unknown
+        // plugins (versus a known plugin with an unknown key).
+        let manifests: HashMap<String, &HashMap<String, SettingDef>> = registry
+            .all_renderers()
+            .into_iter()
+            .map(|d| (d.name.clone(), &d.settings))
+            .collect();
+
+        // 1) Reconcile each known plugin's table.
+        for (plugin_name, schema) in &manifests {
+            if schema.is_empty() {
+                continue;
+            }
+            let entry = g.plugins.entry(plugin_name.clone()).or_default();
+
+            // Drop keys that aren't in the manifest anymore.
+            let stale: Vec<String> = entry
+                .keys()
+                .filter(|k| !schema.contains_key(*k))
+                .cloned()
+                .collect();
+            for k in stale {
+                log::warn!(
+                    "settings: dropping unknown key '{plugin_name}.{k}' \
+                     (no longer in manifest schema)"
+                );
+                entry.remove(&k);
+                changed = true;
+            }
+
+            // Fill in / reset bad values for declared keys.
+            for (key, def) in schema.iter() {
+                let needs_default = match entry.get(key) {
+                    None => true,
+                    Some(v) => match check_setting_bounds(key, v, def) {
+                        Ok(()) => false,
+                        Err(e) => {
+                            log::warn!(
+                                "settings: '{plugin_name}.{key}' = {v:?} \
+                                 violates schema ({e}); resetting to default"
+                            );
+                            true
+                        }
+                    },
+                };
+                if needs_default {
+                    let default = match def.ty {
+                        SettingType::U32 => match &def.default {
+                            toml::Value::Integer(i) if *i >= 0 => i.to_string(),
+                            toml::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        },
+                        SettingType::F32 => match &def.default {
+                            toml::Value::Float(f) => f.to_string(),
+                            toml::Value::Integer(i) => (*i as f32).to_string(),
+                            toml::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        },
+                        SettingType::Bool => match &def.default {
+                            toml::Value::Boolean(b) => b.to_string(),
+                            toml::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        },
+                        SettingType::String => match &def.default {
+                            toml::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        },
+                    };
+                    if entry.get(key) != Some(&default) {
+                        entry.insert(key.clone(), default);
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        // 2) Warn on whole plugins the user has settings for that the
+        //    daemon doesn't know about. Keep them in memory — the
+        //    plugin may come back on the next start (e.g. user just
+        //    moved a manifest) — and they're harmless because nothing
+        //    consumes them. Only the per-key drop above is destructive.
+        for plugin_name in g.plugins.keys() {
+            if !manifests.contains_key(plugin_name) {
+                log::warn!(
+                    "settings: plugin '{plugin_name}' has persisted values \
+                     but no matching renderer manifest is loaded; \
+                     leaving as-is"
+                );
+            }
+        }
+
+        if changed {
+            self.dirty.store(true, Ordering::SeqCst);
+            self.notify.notify_one();
+        }
+        changed
+    }
 }
 
 #[cfg(test)]
@@ -558,5 +686,157 @@ baz = "7"
         let written = tokio::fs::read_to_string(&path).await.unwrap();
         let parsed: Settings = toml::from_str(&written).unwrap();
         assert_eq!(parsed.global.default_width, 2560);
+    }
+
+    // --- reconcile() tests --------------------------------------------
+
+    use crate::plugin::renderer_registry::{
+        RendererDef, RendererRegistry, SettingDef, SettingType,
+    };
+    use std::path::PathBuf;
+
+    fn schema_setting(
+        ty: SettingType,
+        default: toml::Value,
+        identity: bool,
+    ) -> SettingDef {
+        SettingDef {
+            ty,
+            default,
+            identity,
+            label_key: None,
+            description_key: None,
+            min: None,
+            max: None,
+            step: None,
+            choices: None,
+            group: None,
+            order: None,
+        }
+    }
+
+    fn registry_with_video() -> RendererRegistry {
+        let mut r = RendererRegistry::new();
+        let mut s: HashMap<String, SettingDef> = HashMap::new();
+        s.insert(
+            "loop_file".into(),
+            schema_setting(
+                SettingType::String,
+                toml::Value::String("inf".into()),
+                false,
+            ),
+        );
+        s.insert(
+            "volume".into(),
+            SettingDef {
+                min: Some(toml::Value::Integer(0)),
+                max: Some(toml::Value::Integer(100)),
+                ..schema_setting(SettingType::U32, toml::Value::Integer(100), false)
+            },
+        );
+        r.register(RendererDef {
+            name: "waywallen-video".into(),
+            bin: PathBuf::from("/dev/null"),
+            types: vec!["video".into()],
+            priority: 100,
+            version: "v0.0.0".into(),
+            spawn_version: Some(1),
+            extras: Vec::new(),
+            settings: s,
+        });
+        r
+    }
+
+    fn make_store_with(plugins: HashMap<String, HashMap<String, String>>) -> Arc<SettingsStore> {
+        Arc::new(SettingsStore {
+            inner: Arc::new(StdRwLock::new(Settings {
+                global: GlobalSettings::default(),
+                plugins,
+            })),
+            notify: Arc::new(Notify::new()),
+            path: PathBuf::from("/dev/null"),
+            flush_lock: tokio::sync::Mutex::new(()),
+            dirty: AtomicBool::new(false),
+        })
+    }
+
+    #[test]
+    fn reconcile_fills_missing_defaults() {
+        let store = make_store_with(HashMap::new());
+        let changed = store.reconcile(&registry_with_video());
+        assert!(changed, "expected reconcile to fill defaults");
+        let snap = store.snapshot();
+        let video = snap.plugins.get("waywallen-video").expect("video table");
+        assert_eq!(video.get("loop_file").map(String::as_str), Some("inf"));
+        assert_eq!(video.get("volume").map(String::as_str), Some("100"));
+    }
+
+    #[test]
+    fn reconcile_drops_unknown_keys() {
+        let mut plugins = HashMap::new();
+        let mut video = HashMap::new();
+        video.insert("loop_file".into(), "inf".into());
+        video.insert("volume".into(), "50".into());
+        video.insert("ghost".into(), "should-disappear".into());
+        plugins.insert("waywallen-video".into(), video);
+
+        let store = make_store_with(plugins);
+        let changed = store.reconcile(&registry_with_video());
+        assert!(changed);
+        let snap = store.snapshot();
+        let video = snap.plugins.get("waywallen-video").unwrap();
+        assert!(!video.contains_key("ghost"), "unknown key must be dropped");
+        assert_eq!(video.get("volume").map(String::as_str), Some("50"));
+    }
+
+    #[test]
+    fn reconcile_resets_out_of_range_to_default() {
+        let mut plugins = HashMap::new();
+        let mut video = HashMap::new();
+        video.insert("loop_file".into(), "inf".into());
+        video.insert("volume".into(), "999".into());
+        plugins.insert("waywallen-video".into(), video);
+
+        let store = make_store_with(plugins);
+        let changed = store.reconcile(&registry_with_video());
+        assert!(changed);
+        let snap = store.snapshot();
+        let video = snap.plugins.get("waywallen-video").unwrap();
+        assert_eq!(video.get("volume").map(String::as_str), Some("100"));
+    }
+
+    #[test]
+    fn reconcile_no_change_returns_false() {
+        let mut plugins = HashMap::new();
+        let mut video = HashMap::new();
+        video.insert("loop_file".into(), "inf".into());
+        video.insert("volume".into(), "100".into());
+        plugins.insert("waywallen-video".into(), video);
+
+        let store = make_store_with(plugins);
+        let changed = store.reconcile(&registry_with_video());
+        assert!(!changed, "all keys present and valid → no change");
+    }
+
+    #[test]
+    fn reconcile_keeps_unknown_plugin_section() {
+        // A plugin we don't know about should stay untouched (might
+        // be a renamed/missing manifest the user'll re-add).
+        let mut plugins = HashMap::new();
+        let mut wescene = HashMap::new();
+        wescene.insert("foo".into(), "bar".into());
+        plugins.insert("waywallen-wescene".into(), wescene);
+
+        let store = make_store_with(plugins);
+        store.reconcile(&registry_with_video());
+        let snap = store.snapshot();
+        assert!(snap.plugins.contains_key("waywallen-wescene"));
+        assert_eq!(
+            snap.plugins
+                .get("waywallen-wescene")
+                .and_then(|m| m.get("foo"))
+                .map(String::as_str),
+            Some("bar")
+        );
     }
 }

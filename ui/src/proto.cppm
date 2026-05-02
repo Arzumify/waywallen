@@ -35,6 +35,7 @@ using proto::RendererKillRequest;
 using proto::RendererPluginListRequest;
 using proto::RendererPluginListResponse;
 using proto::RendererPluginInfo;
+using proto::SettingSchema;
 
 using proto::WallpaperEntry;
 using proto::WallpaperListRequest;
@@ -63,4 +64,11 @@ using proto::LibraryAutoDetectResponse;
 using proto::LibrarySnapshot;
 using proto::LibraryChanged;
 using proto::LibraryRemoved;
+
+using proto::GlobalSettings;
+using proto::PluginSettings;
+using proto::SettingsGetRequest;
+using proto::SettingsGetResponse;
+using proto::SettingsSetRequest;
+using proto::SettingsChanged;
 } // namespace waywallen::control::v1

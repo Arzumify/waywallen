@@ -177,6 +177,38 @@ message RendererPluginInfo {
   repeated string types = 3;
   uint32 priority = 4;
   string version = 5;
+  // Per-setting schema entries derived from the manifest's
+  // `[renderer.settings.*]` table. UIs use these to render typed
+  // input widgets; daemon enforces validation independently before
+  // accepting a `SettingsSet`.
+  repeated SettingSchema settings = 6;
+}
+
+// Wire encoding of one `[renderer.settings.<key>]` row. All
+// numerics/defaults are stringified so the message stays uniform with
+// `PluginSettings.values` (also string→string). Empty `min`/`max`/`step`
+// = unset.
+message SettingSchema {
+  string key = 1;
+  SettingValueType type = 2;
+  string default_value = 3;
+  bool identity = 4;
+  string label_key = 5;
+  string description_key = 6;
+  string min = 7;
+  string max = 8;
+  string step = 9;
+  repeated string choices = 10;
+  string group = 11;
+  int32 order = 12;
+}
+
+enum SettingValueType {
+  SETTING_VALUE_TYPE_UNSPECIFIED = 0;
+  SETTING_VALUE_TYPE_U32 = 1;
+  SETTING_VALUE_TYPE_F32 = 2;
+  SETTING_VALUE_TYPE_STRING = 3;
+  SETTING_VALUE_TYPE_BOOL = 4;
 }
 
 // ---------------------------------------------------------------------------
@@ -423,6 +455,7 @@ message Event {
     WallpaperScanCompleted wallpaper_scan_completed  = 11;
     LibrariesAdded         libraries_added           = 12;
     StatusSync             status_sync               = 13;
+    SettingsChanged        settings_changed          = 14;
   }
 }
 
@@ -543,6 +576,16 @@ message SettingsGetResponse {
 // Full replace. The daemon overwrites global and the plugin map with
 // what's sent here. Plugins not present in the request are removed.
 message SettingsSetRequest {
+  GlobalSettings global = 1;
+  map<string, PluginSettings> plugins = 2;
+}
+
+// Server-initiated push: the persisted settings just changed. Carries
+// the full post-write state so a UI can rebind without a follow-up
+// `SettingsGetRequest`. Sent after every successful `SettingsSet` and
+// after schema-driven startup reconciliation that filled in defaults
+// or dropped unknown keys.
+message SettingsChanged {
   GlobalSettings global = 1;
   map<string, PluginSettings> plugins = 2;
 }

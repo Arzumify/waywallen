@@ -52,6 +52,8 @@ Notify::Notify(QObject* parent): QObject(parent) {
                             m_active_task_count = new_tasks;
                             Q_EMIT statusChanged();
                         }
+                    } else if (evt.hasSettingsChanged()) {
+                        Q_EMIT settingsChanged();
                     }
                 },
                 Qt::QueuedConnection);

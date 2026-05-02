@@ -61,6 +61,13 @@ pub enum GlobalEvent {
     /// transient notifications (`ScanStarted`/`ScanCompleted`) are
     /// for one-shot reactions like toasts.
     StatusChanged,
+    /// The persisted settings table just changed (either via
+    /// `SettingsSet` RPC or via startup reconciliation that filled
+    /// defaults / dropped unknown keys). Carries no payload — the
+    /// `ws_server` re-snapshots `state.settings` to build the
+    /// outgoing `SettingsChanged` event so all subscribers see the
+    /// same merged truth.
+    SettingsChanged,
 }
 
 pub struct EventBus {

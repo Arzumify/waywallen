@@ -1589,11 +1589,7 @@ mod init_handshake_tests {
         let mut ps = HashMap::new();
         ps.insert(
             "loop_file".to_string(),
-            SettingDef {
-                ty: SettingType::String,
-                default: toml::Value::String("inf".into()),
-                identity: false,
-            },
+            SettingDef::new(SettingType::String, toml::Value::String("inf".into()), false),
         );
         RendererDef {
             name: "waywallen-mpv".into(),
@@ -1848,19 +1844,11 @@ mod reuse_tests {
         let mut ps = HashMap::new();
         ps.insert(
             "loop_file".to_string(),
-            SettingDef {
-                ty: SettingType::String,
-                default: toml::Value::String("inf".into()),
-                identity: false,
-            },
+            SettingDef::new(SettingType::String, toml::Value::String("inf".into()), false),
         );
         ps.insert(
             "hwdec".to_string(),
-            SettingDef {
-                ty: SettingType::String,
-                default: toml::Value::String("auto".into()),
-                identity: false,
-            },
+            SettingDef::new(SettingType::String, toml::Value::String("auto".into()), false),
         );
         RendererDef {
             name: "waywallen-mpv".into(),

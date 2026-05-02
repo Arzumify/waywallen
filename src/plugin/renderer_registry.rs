@@ -63,6 +63,62 @@ pub struct SettingDef {
     /// (Step 4 work).
     #[serde(default = "default_true")]
     pub identity: bool,
+    /// i18n key the UI binds to for the field label
+    /// (e.g. `"settings.video.loop_file"`). Optional — old manifests
+    /// without this stay valid; the UI falls back to the raw key name.
+    #[serde(default)]
+    pub label_key: Option<String>,
+    /// Optional i18n key for a short helper / tooltip line.
+    #[serde(default)]
+    pub description_key: Option<String>,
+    /// Numeric lower bound (inclusive) for `U32`/`F32` settings.
+    /// Ignored on string/bool. Out-of-range values from `SettingsSet`
+    /// are rejected; out-of-range values found at startup fall back
+    /// to `default` with a warning.
+    #[serde(default)]
+    pub min: Option<toml::Value>,
+    /// Numeric upper bound (inclusive). Same semantics as `min`.
+    #[serde(default)]
+    pub max: Option<toml::Value>,
+    /// Optional UI hint for slider/spinner step. Daemon does not
+    /// enforce step alignment (would block legitimate fine-grained
+    /// values); UIs can choose to snap.
+    #[serde(default)]
+    pub step: Option<toml::Value>,
+    /// Allowed string values. Only valid for `String` settings;
+    /// values outside the list are rejected by `SettingsSet` and
+    /// reset to default at startup.
+    #[serde(default)]
+    pub choices: Option<Vec<String>>,
+    /// Logical group key. UI groups settings sharing this name into
+    /// the same panel section. `None` = ungrouped.
+    #[serde(default)]
+    pub group: Option<String>,
+    /// Sort order within a group. Lower goes first. `0` for unspecified.
+    #[serde(default)]
+    pub order: Option<i32>,
+}
+
+impl SettingDef {
+    /// Bare-minimum constructor — fills the optional schema metadata
+    /// (`label_key`, `min`, `choices`, …) with `None`. Real manifests
+    /// flow through `serde::Deserialize` and never touch this; tests
+    /// and ad-hoc programmatic builds use it as a base.
+    pub fn new(ty: SettingType, default: toml::Value, identity: bool) -> Self {
+        Self {
+            ty,
+            default,
+            identity,
+            label_key: None,
+            description_key: None,
+            min: None,
+            max: None,
+            step: None,
+            choices: None,
+            group: None,
+            order: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -120,7 +176,7 @@ pub struct ValidatedMetadata {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ValidationError {
     /// Required `path` key was missing from metadata or had an empty
     /// value.
@@ -131,6 +187,21 @@ pub enum ValidationError {
         key: String,
         expected: SettingType,
         got: String,
+    },
+    /// Numeric setting value fell outside the manifest's `[min, max]`
+    /// envelope.
+    OutOfRange {
+        key: String,
+        got: String,
+        min: Option<String>,
+        max: Option<String>,
+    },
+    /// String setting value didn't match any entry in the manifest's
+    /// `choices` allowlist.
+    BadChoice {
+        key: String,
+        got: String,
+        choices: Vec<String>,
     },
 }
 
@@ -143,6 +214,14 @@ impl std::fmt::Display for ValidationError {
             ValidationError::BadSettingType { key, expected, got } => write!(
                 f,
                 "plugin setting '{key}' expected type {expected:?}, got {got:?}"
+            ),
+            ValidationError::OutOfRange { key, got, min, max } => write!(
+                f,
+                "plugin setting '{key}' value {got:?} out of range (min={min:?}, max={max:?})"
+            ),
+            ValidationError::BadChoice { key, got, choices } => write!(
+                f,
+                "plugin setting '{key}' value {got:?} not in allowed choices {choices:?}"
             ),
         }
     }
@@ -235,7 +314,11 @@ pub fn validate_metadata(
             match md.get(key) {
                 Some(raw) => match coerce_setting(raw, schema.ty) {
                     Some(coerced) => {
-                        out.insert(key.clone(), coerced);
+                        if let Err(e) = check_setting_bounds(key, &coerced, schema) {
+                            errors.push(e);
+                        } else {
+                            out.insert(key.clone(), coerced);
+                        }
                     }
                     None => errors.push(ValidationError::BadSettingType {
                         key: key.clone(),
@@ -278,6 +361,121 @@ pub fn validate_metadata(
         settings,
         warnings,
     })
+}
+
+/// Validate one already-typecast setting value against the manifest's
+/// optional `min` / `max` / `choices` envelope. Returns `Ok(())` when
+/// the value is in range or no constraints apply. Used both by
+/// `validate_metadata` (per-spawn metadata path) and by the
+/// `SettingsSet` RPC handler (incoming user edits).
+pub fn check_setting_bounds(
+    key: &str,
+    coerced: &str,
+    schema: &SettingDef,
+) -> std::result::Result<(), ValidationError> {
+    match schema.ty {
+        SettingType::U32 => {
+            let v: u32 = coerced.parse().map_err(|_| ValidationError::BadSettingType {
+                key: key.to_string(),
+                expected: SettingType::U32,
+                got: coerced.to_string(),
+            })?;
+            if let Some(min_v) = schema.min.as_ref().and_then(toml_to_u32) {
+                if v < min_v {
+                    return Err(out_of_range(key, coerced, schema));
+                }
+            }
+            if let Some(max_v) = schema.max.as_ref().and_then(toml_to_u32) {
+                if v > max_v {
+                    return Err(out_of_range(key, coerced, schema));
+                }
+            }
+            Ok(())
+        }
+        SettingType::F32 => {
+            let v: f32 = coerced.parse().map_err(|_| ValidationError::BadSettingType {
+                key: key.to_string(),
+                expected: SettingType::F32,
+                got: coerced.to_string(),
+            })?;
+            if let Some(min_v) = schema.min.as_ref().and_then(toml_to_f32) {
+                if v < min_v {
+                    return Err(out_of_range(key, coerced, schema));
+                }
+            }
+            if let Some(max_v) = schema.max.as_ref().and_then(toml_to_f32) {
+                if v > max_v {
+                    return Err(out_of_range(key, coerced, schema));
+                }
+            }
+            Ok(())
+        }
+        SettingType::String => {
+            if let Some(choices) = schema.choices.as_ref() {
+                if !choices.iter().any(|c| c == coerced) {
+                    return Err(ValidationError::BadChoice {
+                        key: key.to_string(),
+                        got: coerced.to_string(),
+                        choices: choices.clone(),
+                    });
+                }
+            }
+            Ok(())
+        }
+        SettingType::Bool => Ok(()),
+    }
+}
+
+/// Top-level entry for `SettingsSet`: typecheck a raw user value
+/// against the manifest schema and run bounds validation. Returns the
+/// canonicalised string on success.
+pub fn coerce_and_validate(
+    key: &str,
+    raw: &str,
+    schema: &SettingDef,
+) -> std::result::Result<String, ValidationError> {
+    let coerced = coerce_setting(raw, schema.ty).ok_or_else(|| ValidationError::BadSettingType {
+        key: key.to_string(),
+        expected: schema.ty,
+        got: raw.to_string(),
+    })?;
+    check_setting_bounds(key, &coerced, schema)?;
+    Ok(coerced)
+}
+
+fn out_of_range(key: &str, coerced: &str, schema: &SettingDef) -> ValidationError {
+    ValidationError::OutOfRange {
+        key: key.to_string(),
+        got: coerced.to_string(),
+        min: schema.min.as_ref().map(toml_value_to_display),
+        max: schema.max.as_ref().map(toml_value_to_display),
+    }
+}
+
+fn toml_value_to_display(v: &toml::Value) -> String {
+    match v {
+        toml::Value::Integer(i) => i.to_string(),
+        toml::Value::Float(f) => f.to_string(),
+        toml::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn toml_to_u32(v: &toml::Value) -> Option<u32> {
+    match v {
+        toml::Value::Integer(i) if *i >= 0 => u32::try_from(*i).ok(),
+        toml::Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+fn toml_to_f32(v: &toml::Value) -> Option<f32> {
+    match v {
+        toml::Value::Integer(i) => Some(*i as f32),
+        toml::Value::Float(f) => Some(*f as f32),
+        toml::Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
 }
 
 /// Try to interpret a raw `String` as a value of `ty`. Returns the
@@ -476,6 +674,22 @@ pub fn manifest_has_schema(def: &RendererDef) -> bool {
 mod schema_tests {
     use super::*;
 
+    fn test_setting(ty: SettingType, default: toml::Value, identity: bool) -> SettingDef {
+        SettingDef {
+            ty,
+            default,
+            identity,
+            label_key: None,
+            description_key: None,
+            min: None,
+            max: None,
+            step: None,
+            choices: None,
+            group: None,
+            order: None,
+        }
+    }
+
     fn def_no_schema() -> RendererDef {
         RendererDef {
             name: "no-schema".into(),
@@ -509,19 +723,11 @@ mod schema_tests {
         let mut ps = HashMap::new();
         ps.insert(
             "loop_file".to_string(),
-            SettingDef {
-                ty: SettingType::String,
-                default: toml::Value::String("inf".into()),
-                identity: false,
-            },
+            test_setting(SettingType::String, toml::Value::String("inf".into()), false),
         );
         ps.insert(
             "hwdec".to_string(),
-            SettingDef {
-                ty: SettingType::String,
-                default: toml::Value::String("auto".into()),
-                identity: false,
-            },
+            test_setting(SettingType::String, toml::Value::String("auto".into()), false),
         );
         RendererDef {
             name: "waywallen-mpv".into(),
@@ -628,11 +834,7 @@ mod schema_tests {
         let mut def = def_mpv();
         def.settings.insert(
             "ratio".to_string(),
-            SettingDef {
-                ty: SettingType::F32,
-                default: toml::Value::Float(1.0),
-                identity: false,
-            },
+            test_setting(SettingType::F32, toml::Value::Float(1.0), false),
         );
         let mut md = HashMap::new();
         md.insert("path".to_string(), "/tmp/clip.mp4".to_string());
@@ -652,11 +854,7 @@ mod schema_tests {
         let mut def = def_mpv();
         def.settings.insert(
             "fps".to_string(),
-            SettingDef {
-                ty: SettingType::U32,
-                default: toml::Value::Integer(30),
-                identity: true,
-            },
+            test_setting(SettingType::U32, toml::Value::Integer(30), true),
         );
         let mut md = HashMap::new();
         md.insert("path".to_string(), "/tmp/clip.mp4".to_string());
@@ -694,5 +892,89 @@ mod schema_tests {
         assert_eq!(v.primary_value, "/tmp/clip.mp4");
         assert_eq!(v.settings.get("hwdec").map(|s| s.as_str()), Some("vaapi"));
         assert_eq!(v.settings.get("loop_file").map(|s| s.as_str()), Some("inf"));
+    }
+
+    #[test]
+    fn coerce_and_validate_u32_in_range() {
+        let s = SettingDef {
+            min: Some(toml::Value::Integer(0)),
+            max: Some(toml::Value::Integer(100)),
+            ..test_setting(SettingType::U32, toml::Value::Integer(50), false)
+        };
+        assert_eq!(coerce_and_validate("volume", "75", &s).unwrap(), "75");
+        // boundaries inclusive
+        assert_eq!(coerce_and_validate("volume", "0", &s).unwrap(), "0");
+        assert_eq!(coerce_and_validate("volume", "100", &s).unwrap(), "100");
+    }
+
+    #[test]
+    fn coerce_and_validate_u32_out_of_range_errors() {
+        let s = SettingDef {
+            min: Some(toml::Value::Integer(0)),
+            max: Some(toml::Value::Integer(100)),
+            ..test_setting(SettingType::U32, toml::Value::Integer(50), false)
+        };
+        let err = coerce_and_validate("volume", "500", &s).expect_err("must error");
+        assert!(matches!(err, ValidationError::OutOfRange { ref key, .. } if key == "volume"));
+    }
+
+    #[test]
+    fn coerce_and_validate_f32_bounds() {
+        let s = SettingDef {
+            min: Some(toml::Value::Float(0.0)),
+            max: Some(toml::Value::Float(1.5)),
+            ..test_setting(SettingType::F32, toml::Value::Float(1.0), false)
+        };
+        assert!(coerce_and_validate("ratio", "0.75", &s).is_ok());
+        assert!(matches!(
+            coerce_and_validate("ratio", "2.0", &s),
+            Err(ValidationError::OutOfRange { .. })
+        ));
+        assert!(matches!(
+            coerce_and_validate("ratio", "-0.1", &s),
+            Err(ValidationError::OutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn coerce_and_validate_choices_hit_and_miss() {
+        let s = SettingDef {
+            choices: Some(vec!["auto".into(), "vaapi".into(), "nvdec".into()]),
+            ..test_setting(SettingType::String, toml::Value::String("auto".into()), false)
+        };
+        assert_eq!(coerce_and_validate("hwdec", "vaapi", &s).unwrap(), "vaapi");
+        let err = coerce_and_validate("hwdec", "ssh", &s).expect_err("must error");
+        assert!(matches!(
+            err,
+            ValidationError::BadChoice { ref key, .. } if key == "hwdec"
+        ));
+    }
+
+    #[test]
+    fn coerce_and_validate_bad_type_errors() {
+        let s = test_setting(SettingType::U32, toml::Value::Integer(0), false);
+        let err = coerce_and_validate("fps", "lots", &s).expect_err("must error");
+        assert!(matches!(err, ValidationError::BadSettingType { .. }));
+    }
+
+    #[test]
+    fn validate_metadata_rejects_out_of_range() {
+        // Schema-bearing renderer with a bounded u32 setting — make
+        // sure the spawn-time validator path (not just SettingsSet)
+        // also enforces bounds.
+        let mut def = def_mpv();
+        def.settings.insert(
+            "volume".into(),
+            SettingDef {
+                min: Some(toml::Value::Integer(0)),
+                max: Some(toml::Value::Integer(100)),
+                ..test_setting(SettingType::U32, toml::Value::Integer(50), false)
+            },
+        );
+        let mut md = HashMap::new();
+        md.insert("path".into(), "/tmp/clip.mp4".into());
+        md.insert("volume".into(), "999".into());
+        let errs = validate_metadata(&def, &md).expect_err("must error");
+        assert!(errs.iter().any(|e| matches!(e, ValidationError::OutOfRange { .. })));
     }
 }

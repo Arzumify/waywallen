@@ -6,3 +6,4 @@ export import :query.source;
 export import :query.library;
 export import :query.health;
 export import :query.display;
+export import :query.settings;
