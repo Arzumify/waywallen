@@ -93,8 +93,6 @@ function M.scan(ctx)
                         preview = nil,
                         library_root = dir,
                         metadata = {
-                            video = path,
-                            path = path,
                         },
                         -- Cheap stat-only metadata. Width/height/format are
                         -- filled by the daemon's background media probe.

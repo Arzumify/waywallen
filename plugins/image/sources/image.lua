@@ -89,8 +89,6 @@ function M.scan(ctx)
                         preview = path,
                         library_root = dir,
                         metadata = {
-                            image = path,
-                            path = path,
                         },
                     })
                 end
