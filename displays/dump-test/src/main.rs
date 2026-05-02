@@ -234,6 +234,7 @@ fn do_handshake(stream: &UnixStream, cli: &Cli, vk: &vk_consumer::VkContext) -> 
         stream,
         &Request::RegisterDisplay {
             name: cli.name.clone(),
+            instance_id: String::new(),
             width: 1920,
             height: 1080,
             refresh_mhz: 60_000,

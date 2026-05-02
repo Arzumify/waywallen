@@ -97,6 +97,7 @@ async fn handshake_up_to_display_accepted() {
             &stream,
             &Request::RegisterDisplay {
                 name: "DP-test".to_string(),
+                instance_id: String::new(),
                 width: 1920,
                 height: 1080,
                 refresh_mhz: 60_000,
@@ -309,6 +310,7 @@ fn run_client(sock: &PathBuf, name: &str, n_frames: usize) -> anyhow::Result<usi
         &stream,
         &Request::RegisterDisplay {
             name: name.to_string(),
+            instance_id: String::new(),
             width: 640,
             height: 480,
             refresh_mhz: 60_000,
@@ -577,6 +579,7 @@ async fn renderer_produces_real_sync_fds() {
             &stream,
             &Request::RegisterDisplay {
                 name: "e2e-display".to_string(),
+                instance_id: String::new(),
                 width: 640,
                 height: 480,
                 refresh_mhz: 60_000,

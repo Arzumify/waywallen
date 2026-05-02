@@ -27,6 +27,10 @@ pub type DisplayId = u64;
 pub struct DisplayInfo {
     pub id: DisplayId,
     pub name: String,
+    /// Stable consumer-provided identifier; `None` for legacy clients
+    /// that did not populate the v4 `instance_id` field. Drives the
+    /// settings lookup key (see `Router::settings_key`).
+    pub instance_id: Option<String>,
     pub width: u32,
     pub height: u32,
     pub refresh_mhz: u32,
@@ -128,6 +132,7 @@ impl Scheduler {
             DisplayInfo {
                 id,
                 name,
+                instance_id: None,
                 width,
                 height,
                 refresh_mhz,

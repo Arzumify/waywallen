@@ -829,6 +829,10 @@ fn run_uds_session(sock: &Path, binding: &OutputBinding) -> Result<()> {
             &stream,
             &ProtoRequest::RegisterDisplay {
                 name: binding.display_name.clone(),
+                // layer-shell is a "system" backend with no per-DE
+                // persistent storage of its own; it always sends empty
+                // and the daemon falls back to keying settings by name.
+                instance_id: String::new(),
                 width,
                 height,
                 refresh_mhz: 60_000,

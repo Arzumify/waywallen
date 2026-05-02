@@ -102,7 +102,7 @@
     "modifier_negotiation_v1"    — consumer_caps + bind_failed plumbing.
   Optional features (reserved): "color_management", "hdr"
 -->
-<protocol name="waywallen_display" version="3">
+<protocol name="waywallen_display" version="4">
 
   <!-- ==================================================================
        REQUESTS  (display -> manager)
@@ -151,9 +151,18 @@
 
     `properties` is an open-ended kv list for forward compat. v1 defines
     no keys — any unknown key is silently ignored by the server.
+
+    `instance_id` (added in v4) is a stable identifier persisted by the
+    consumer (e.g. UUID4 stored in KDE/GNOME extension config) that
+    survives reconnects and DE restarts. It is used by the manager as
+    the key into its per-display settings store; the empty string
+    means the consumer has no stable id, in which case the manager
+    falls back to indexing settings by `name` (legacy v3 behavior).
+    The manager treats the value as opaque — it is not parsed.
   -->
   <request name="register_display" opcode="2">
     <arg name="name" type="string"/>
+    <arg name="instance_id" type="string"/>
     <arg name="width" type="u32"/>
     <arg name="height" type="u32"/>
     <arg name="refresh_mhz" type="u32"/>

@@ -87,6 +87,11 @@ pub enum DisplayOutEvent {
 /// Initial-registration payload from `display_endpoint::do_handshake`.
 pub struct DisplayRegistration {
     pub name: String,
+    /// Stable identifier persisted by the consumer (e.g. UUID4 stored in
+    /// the KDE/GNOME extension config). When `Some`, used as the key
+    /// into [`SettingsStore::displays`]; on `None` the router falls back
+    /// to the v3 behavior of indexing settings by `name`.
+    pub instance_id: Option<String>,
     pub width: u32,
     pub height: u32,
     pub refresh_mhz: u32,
@@ -297,18 +302,38 @@ impl Router {
         }
     }
 
-    /// Resolve effective layout for a display name, defaulting to
-    /// identity (Stretched + Center) when settings haven't been
-    /// attached (tests, very early boot).
-    fn resolved_layout(&self, name: &str) -> ResolvedLayout {
-        match self.settings.get() {
-            Some(s) => s.resolved_layout(name),
-            None => ResolvedLayout {
+    /// Resolve effective layout for a display, defaulting to identity
+    /// (Stretched + Center) when settings haven't been attached (tests,
+    /// very early boot).
+    ///
+    /// Lookup precedence (v4):
+    ///   1. `[display.<instance_id>]` if the consumer advertised one,
+    ///   2. `[display.<name>]` as legacy fallback (v3 clients + un-
+    ///      migrated TOML entries).
+    fn resolved_layout(&self, info: &DisplayInfo) -> ResolvedLayout {
+        let Some(s) = self.settings.get() else {
+            return ResolvedLayout {
                 fillmode: FillMode::default(),
                 align: Default::default(),
                 clear_rgba: [0.0, 0.0, 0.0, 1.0],
-            },
+            };
+        };
+        if let Some(iid) = info.instance_id.as_deref() {
+            if s.display_prefs(iid).is_some() {
+                return s.resolved_layout(iid);
+            }
+            // No instance_id-keyed entry yet — fall back to the legacy
+            // name-keyed entry so old config keeps working until the
+            // one-shot migration in `register_display` runs.
         }
+        s.resolved_layout(&info.name)
+    }
+
+    /// Settings TOML key used for this display's persistent prefs.
+    /// Prefers the v4 stable `instance_id`; falls back to `name` for
+    /// legacy v3 clients (or v4 clients that explicitly sent empty).
+    fn settings_key_for(info: &DisplayInfo) -> &str {
+        info.instance_id.as_deref().unwrap_or(&info.name)
     }
 
     /// Set or clear per-display layout fields. `None` for a field
@@ -334,8 +359,25 @@ impl Router {
             );
             return;
         };
+        // Resolve the live display first so we know whether it has a
+        // stable v4 `instance_id` to key persistent settings under.
+        // Falls back to `display_name` for legacy v3 clients (or when
+        // the display is currently disconnected — the RPC still lets
+        // the user edit prefs by name).
+        let target_id = self.find_display_by_name(&display_name).await;
+        let key = match target_id {
+            Some(did) => {
+                let inner = self.inner.lock().await;
+                inner
+                    .displays
+                    .get(&did)
+                    .and_then(|s| s.info.instance_id.clone())
+                    .unwrap_or_else(|| display_name.clone())
+            }
+            None => display_name.clone(),
+        };
         settings.update(|s| {
-            let entry = s.displays.entry(display_name.clone()).or_default();
+            let entry = s.displays.entry(key.clone()).or_default();
             if clear_fillmode {
                 entry.fillmode = None;
             }
@@ -356,10 +398,9 @@ impl Router {
             }
             // Prune empty entry to keep the on-disk file tidy.
             if entry.is_empty() {
-                s.displays.remove(&display_name);
+                s.displays.remove(&key);
             }
         });
-        let target_id = self.find_display_by_name(&display_name).await;
         if let Some(did) = target_id {
             self.resync_display_set_config(did).await;
             if let Some(snap) = self.snapshot_display(did).await {
@@ -393,7 +434,7 @@ impl Router {
         inner.next_config_generation += 1;
         let cfg_gen = inner.next_config_generation;
         let info = inner.displays.get(&display_id).unwrap().info.clone();
-        let layout = self.resolved_layout(&info.name);
+        let layout = self.resolved_layout(&info);
         let cfg = project_link(&link, &renderer, &info, cfg_gen, &layout);
         if let Some(state) = inner.displays.get(&display_id) {
             let _ = state.tx.send(DisplayOutEvent::SetConfig(cfg));
@@ -557,6 +598,26 @@ impl Router {
         self: &Arc<Self>,
         reg: DisplayRegistration,
     ) -> DisplayHandle {
+        // One-time legacy migration: if the consumer advertised a v4
+        // `instance_id` and there's still only a name-keyed entry from
+        // v3 days, copy it to the instance_id key so subsequent
+        // resolves hit the new key. The old name key is kept (don't
+        // delete) so a roll-back to a v3 client still finds its prefs.
+        if let (Some(iid), Some(settings)) = (reg.instance_id.as_deref(), self.settings.get().cloned()) {
+            if settings.display_prefs(iid).is_none() {
+                if let Some(legacy) = settings.display_prefs(&reg.name) {
+                    let iid_owned = iid.to_string();
+                    settings.update(|s| {
+                        s.displays.entry(iid_owned).or_insert(legacy);
+                    });
+                    log::info!(
+                        "display settings: migrated [display.{}] → [display.{}]",
+                        reg.name,
+                        iid
+                    );
+                }
+            }
+        }
         let (tx, rx) = mpsc::unbounded_channel();
         let (display_id, auto_linked) = {
             let mut inner = self.inner.lock().await;
@@ -565,6 +626,7 @@ impl Router {
             let info = DisplayInfo {
                 id,
                 name: reg.name,
+                instance_id: reg.instance_id,
                 width: reg.width,
                 height: reg.height,
                 refresh_mhz: reg.refresh_mhz,
@@ -1170,7 +1232,7 @@ impl Router {
             }
             inner.next_config_generation += 1;
             let cfg_gen = inner.next_config_generation;
-            let layout = self.resolved_layout(&info.name);
+            let layout = self.resolved_layout(&info);
             let cfg = project_link(&link, &renderer, &info, cfg_gen, &layout);
             Some((link.display_id, cfg))
         };
@@ -1526,7 +1588,7 @@ impl Router {
         if let Some((link, renderer, new_g)) = target {
             inner.next_config_generation += 1;
             let cfg_gen = inner.next_config_generation;
-            let layout = self.resolved_layout(&info.name);
+            let layout = self.resolved_layout(&info);
             let cfg = project_link(&link, &renderer, &info, cfg_gen, &layout);
             let new_r = link.renderer_id.clone();
             let s = inner.displays.get_mut(&display_id).unwrap();
@@ -1637,6 +1699,7 @@ mod tests {
     fn reg(name: &str, w: u32, h: u32) -> DisplayRegistration {
         DisplayRegistration {
             name: name.into(),
+            instance_id: None,
             width: w,
             height: h,
             refresh_mhz: 60_000,
@@ -2216,6 +2279,7 @@ mod tests {
         DisplayInfo {
             id: 1,
             name: name.into(),
+            instance_id: None,
             width: w,
             height: h,
             refresh_mhz: 60_000,

@@ -222,6 +222,7 @@ async fn do_handshake(
         .context("recv register_display")?;
     let Request::RegisterDisplay {
         name,
+        instance_id,
         width,
         height,
         refresh_mhz,
@@ -235,11 +236,14 @@ async fn do_handshake(
             reg.opcode()
         ));
     };
+    let instance_id = if instance_id.is_empty() { None } else { Some(instance_id) };
     log::info!(
-        "display register: {name} {width}x{height}@{refresh_mhz}mHz drm_render={drm_render_major}:{drm_render_minor}"
+        "display register: {name} (instance_id={}) {width}x{height}@{refresh_mhz}mHz drm_render={drm_render_major}:{drm_render_minor}",
+        instance_id.as_deref().unwrap_or("<none>")
     );
     Ok(DisplayRegistration {
         name,
+        instance_id,
         width,
         height,
         refresh_mhz,

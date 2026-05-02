@@ -52,8 +52,8 @@ mod tests {
 
     #[test]
     fn protocol_identity() {
-        assert_eq!(PROTOCOL_NAME, "waywallen-display-v3");
-        assert_eq!(PROTOCOL_VERSION, 3);
+        assert_eq!(PROTOCOL_NAME, "waywallen-display-v4");
+        assert_eq!(PROTOCOL_VERSION, 4);
     }
 
     #[test]
@@ -70,6 +70,7 @@ mod tests {
     fn request_register_roundtrip() {
         roundtrip_req(Request::RegisterDisplay {
             name: "DP-1".to_string(),
+            instance_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(),
             width: 1920,
             height: 1080,
             refresh_mhz: 60000,

@@ -163,6 +163,7 @@ fn run_session(sock_path: &Path, args: &Args) -> Result<()> {
         &stream,
         &Request::RegisterDisplay {
             name: args.name.clone(),
+            instance_id: String::new(),
             width: args.width,
             height: args.height,
             refresh_mhz: args.refresh_mhz,
