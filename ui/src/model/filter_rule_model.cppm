@@ -28,11 +28,9 @@ public:
     Q_SIGNAL void apply();
     Q_SIGNAL void reset();
 
-    Q_INVOKABLE QString toJson() const;
-    Q_SLOT void         fromJson(const QString&);
-
-    auto toJsonDocument() const -> QJsonDocument;
-    void fromJsonDocument(const QJsonDocument&);
+    Q_INVOKABLE void    replaceState(
+           const QList<waywallen::control::v1::WallpaperFilterRule>& filters,
+           const QList<waywallen::control::v1::FilterLogic>& filterLogics);
 
     auto dirty() const noexcept -> bool { return m_dirty; }
     void setDirty(bool v);

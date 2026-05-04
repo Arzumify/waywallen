@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tokio::sync::Notify;
 
 use crate::display_layout::{Align, FillMode};
@@ -163,11 +163,19 @@ pub struct GlobalSettings {
     /// no per-display override. Drives the daemon-side projection of
     /// `set_config` rects.
     pub layout: LayoutDefaults,
-    /// Compact JSON blob carrying the UI's wallpaper-browser filter
-    /// editor state. The daemon persists it verbatim and hands it back
-    /// over `SettingsGet/SettingsChanged`; execution still uses the
-    /// structured filter rules sent on `WallpaperList`.
-    pub wallpaper_filter_json: String,
+    /// Structured wallpaper-browser filter state. Kept typed in
+    /// memory, but serialized into the config file as a JSON string
+    /// for compact persistence and backwards compatibility with older
+    /// `wallpaper_filter_json = "..."`
+    /// snapshots.
+    #[serde(
+        default,
+        rename = "wallpaper_filter_json",
+        alias = "wallpaper_filter",
+        serialize_with = "serialize_wallpaper_filter_state",
+        deserialize_with = "deserialize_wallpaper_filter_state"
+    )]
+    pub wallpaper_filter: WallpaperFilterState,
 }
 
 impl Default for GlobalSettings {
@@ -180,9 +188,86 @@ impl Default for GlobalSettings {
             playlist_mode: "sequential".to_string(),
             rotation_secs: 0,
             layout: LayoutDefaults::default(),
-            wallpaper_filter_json: String::new(),
+            wallpaper_filter: WallpaperFilterState::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct WallpaperFilterState {
+    pub filters: Vec<WallpaperFilterRuleState>,
+    pub filter_logics: Vec<FilterLogicState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct FilterLogicState {
+    pub op: i32,
+    pub group_a: i32,
+    pub group_b: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct WallpaperFilterRuleState {
+    pub r#type: i32,
+    pub group: i32,
+    pub string_filter: Option<WallpaperStringFilterState>,
+    pub int_filter: Option<WallpaperIntFilterState>,
+    pub aspect_filter: Option<WallpaperAspectFilterState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct WallpaperStringFilterState {
+    pub value: String,
+    pub condition: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct WallpaperIntFilterState {
+    pub value: i64,
+    pub condition: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct WallpaperAspectFilterState {
+    pub value: i32,
+    pub condition: i32,
+}
+
+fn serialize_wallpaper_filter_state<S>(
+    state: &WallpaperFilterState,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    let json = serde_json::to_string(state).map_err(serde::ser::Error::custom)?;
+    serializer.serialize_str(&json)
+}
+
+fn deserialize_wallpaper_filter_state<'de, D>(
+    deserializer: D,
+) -> Result<WallpaperFilterState, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Json(String),
+        Structured(WallpaperFilterState),
+    }
+
+    let repr = Repr::deserialize(deserializer)?;
+    Ok(match repr {
+        Repr::Structured(state) => state,
+        Repr::Json(json) => serde_json::from_str(&json).unwrap_or_default(),
+    })
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

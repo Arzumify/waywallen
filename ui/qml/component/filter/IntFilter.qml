@@ -13,8 +13,9 @@ W.BaseFilter {
     function syncFromFilter() {
         if (!filter.hasIntFilter)
             filter.intFilter = subfilter;
-        condition = filter.intFilter.condition;
-        value = filter.intFilter.value;
+        const active = filter.hasIntFilter ? filter.intFilter : subfilter;
+        condition = active.condition;
+        value = active.value;
     }
 
     function commitToFilter() {

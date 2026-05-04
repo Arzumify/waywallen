@@ -48,7 +48,8 @@ qt_standard_project_setup()
 
 # ---------------------------------------------------------------------------
 # Control-plane protobuf (shared schema with the Rust backend).
-# Generates C++/QML types from ../proto/control.proto via qt_add_protobuf.
+# Generates C++/QML types from ../proto/control.proto and ../proto/filter.proto
+# via qt_add_protobuf.
 # ---------------------------------------------------------------------------
 set(WAYWALLEN_PROTO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../proto")
 qt_add_protobuf(waywallen-control
@@ -56,6 +57,7 @@ qt_add_protobuf(waywallen-control
     QML_URI waywallen.control
     PROTO_FILES
         "${WAYWALLEN_PROTO_DIR}/control.proto"
+        "${WAYWALLEN_PROTO_DIR}/filter.proto"
     PROTO_INCLUDES
         "${WAYWALLEN_PROTO_DIR}"
 )

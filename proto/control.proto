@@ -2,6 +2,8 @@ syntax = "proto3";
 
 package waywallen.control.v1;
 
+import "filter.proto";
+
 // ---------------------------------------------------------------------------
 // Envelope
 // ---------------------------------------------------------------------------
@@ -276,107 +278,13 @@ message WallpaperEntry {
   string format = 10;
 }
 
-enum WallpaperAspect {
-  WALLPAPER_ASPECT_UNSPECIFIED = 0;
-  WALLPAPER_ASPECT_LANDSCAPE = 1;
-  WALLPAPER_ASPECT_PORTRAIT = 2;
-  WALLPAPER_ASPECT_SQUARE = 3;
-}
-
-enum WallpaperFilterType {
-  WALLPAPER_FILTER_TYPE_UNSPECIFIED = 0;
-  WALLPAPER_FILTER_TYPE_NAME = 1;
-  WALLPAPER_FILTER_TYPE_WP_TYPE = 2;
-  WALLPAPER_FILTER_TYPE_LIBRARY = 3;
-  WALLPAPER_FILTER_TYPE_FORMAT = 4;
-  WALLPAPER_FILTER_TYPE_WIDTH = 5;
-  WALLPAPER_FILTER_TYPE_HEIGHT = 6;
-  WALLPAPER_FILTER_TYPE_SIZE = 7;
-  WALLPAPER_FILTER_TYPE_ASPECT = 8;
-}
-
-enum StringCondition {
-  STRING_CONDITION_UNSPECIFIED = 0;
-  STRING_CONDITION_IS = 1;
-  STRING_CONDITION_IS_NOT = 2;
-  STRING_CONDITION_CONTAINS = 3;
-  STRING_CONDITION_CONTAINS_NOT = 4;
-}
-
-enum IntCondition {
-  INT_CONDITION_UNSPECIFIED = 0;
-  INT_CONDITION_EQUAL = 1;
-  INT_CONDITION_EQUAL_NOT = 2;
-  INT_CONDITION_LESS = 3;
-  INT_CONDITION_LESS_EQUAL = 4;
-  INT_CONDITION_GREATER = 5;
-  INT_CONDITION_GREATER_EQUAL = 6;
-}
-
-enum TypeCondition {
-  TYPE_CONDITION_UNSPECIFIED = 0;
-  TYPE_CONDITION_IS = 1;
-  TYPE_CONDITION_IS_NOT = 2;
-}
-
-enum LogicOp {
-  LOGIC_OP_UNSPECIFIED = 0;
-  LOGIC_OP_AND = 1;
-  LOGIC_OP_OR = 2;
-}
-
-message FilterLogic {
-  LogicOp op = 1;
-  int32 group_a = 2;
-  int32 group_b = 3;
-}
-
-message WallpaperStringFilter {
-  string value = 1;
-  StringCondition condition = 2;
-}
-
-message WallpaperIntFilter {
-  int64 value = 1;
-  IntCondition condition = 2;
-}
-
-message WallpaperAspectFilter {
-  WallpaperAspect value = 1;
-  TypeCondition condition = 2;
-}
-
-message WallpaperFilterRule {
-  WallpaperFilterType type = 1;
-  int32 group = 2;
-  oneof payload {
-    WallpaperStringFilter string_filter = 101;
-    WallpaperIntFilter int_filter = 102;
-    WallpaperAspectFilter aspect_filter = 103;
-  }
-}
-
-message WallpaperFilter {
-  repeated string wp_types = 1;
-  repeated string tags_any = 2;
-  repeated string tags_all = 3;
-  repeated string libraries = 4;
-  repeated string formats = 5;
-  string name_like = 6;
-  uint32 min_width = 7;
-  uint32 min_height = 8;
-  int64 min_size = 9;
-  int64 max_size = 10;
-  WallpaperAspect aspect = 11;
-}
-
 message WallpaperListRequest {
   string wp_type = 1; // empty = all
   // Page-based pagination. page is 0-indexed; page_size = 0 means "no
   // pagination, return all entries matching wp_type".
   uint32 page = 2;
   uint32 page_size = 3;
-  WallpaperFilter filter = 4;
+  reserved 4;
   repeated WallpaperFilterRule filters = 5;
   repeated FilterLogic filter_logics = 6;
 }
@@ -723,11 +631,11 @@ message GlobalSettings {
   // designates. Ignored when `render_size_policy = NATIVE`.
   uint32 target_extent = 4;
   RenderSizePolicy render_size_policy = 5;
-  // UI-owned wallpaper browser filter model, serialized as compact
-  // JSON so the daemon can persist the exact editor state without
-  // understanding every rule variant. The list RPC still carries the
-  // structured `filters` / `filter_logics` fields used for execution.
-  string wallpaper_filter_json = 6;
+  // Structured wallpaper-browser filter state. The daemon persists it
+  // internally as JSON, but the control plane stays structured so the
+  // UI never has to serialize/parse the editor state itself.
+  repeated WallpaperFilterRule wallpaper_filters = 6;
+  repeated FilterLogic wallpaper_filter_logics = 7;
 
   // Note: fps is per-plugin (in PluginSettings) — different renderer
   // engines have different sane defaults, so it's not a global field.

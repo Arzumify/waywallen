@@ -70,4 +70,4 @@ cpack --preset clang-release-rpm
 
 Packages stage into `/usr` (`CPACK_PACKAGING_INSTALL_PREFIX`) regardless of the dev-time `CMAKE_INSTALL_PREFIX`. Runtime dependencies are auto-derived (`CPACK_DEBIAN_PACKAGE_SHLIBDEPS=ON`, `CPACK_RPM_PACKAGE_AUTOREQ=ON`).
 
-The protocol XMLs (`protocol/*.xml`) and `proto/control.proto` are build-time codegen inputs and are not shipped in the package. Read them from the source tree if you need to implement a third-party client.
+The protocol XMLs (`protocol/*.xml`) and `proto/control.proto` / `proto/filter.proto` are build-time codegen inputs and are not shipped in the package. Read them from the source tree if you need to implement a third-party client.

@@ -46,7 +46,16 @@ auto global_to_map(const proto::GlobalSettings& g) -> QVariantMap {
     QVariantMap m;
     m[u"targetExtent"_s]     = g.targetExtent();
     m[u"renderSizePolicy"_s] = static_cast<int>(g.renderSizePolicy());
-    m[u"wallpaperFilterJson"_s] = g.wallpaperFilterJson();
+    QVariantList wallpaper_filters;
+    for (const auto& filter : g.wallpaperFilters()) {
+        wallpaper_filters.append(QVariant::fromValue(filter));
+    }
+    m[u"wallpaperFilters"_s] = wallpaper_filters;
+    QVariantList wallpaper_filter_logics;
+    for (const auto& logic : g.wallpaperFilterLogics()) {
+        wallpaper_filter_logics.append(QVariant::fromValue(logic));
+    }
+    m[u"wallpaperFilterLogics"_s] = wallpaper_filter_logics;
     if (g.hasLayoutDefaults()) {
         m[u"layoutDefaults"_s] = layout_to_map(g.layoutDefaults());
     }
@@ -71,7 +80,16 @@ auto map_to_global(const QVariantMap& m) -> proto::GlobalSettings {
     g.setTargetExtent(m.value(u"targetExtent"_s).toUInt());
     g.setRenderSizePolicy(
         static_cast<proto::RenderSizePolicy>(m.value(u"renderSizePolicy"_s).toInt()));
-    g.setWallpaperFilterJson(m.value(u"wallpaperFilterJson"_s).toString());
+    QList<proto::WallpaperFilterRule> wallpaper_filters;
+    for (const auto& value : m.value(u"wallpaperFilters"_s).toList()) {
+        wallpaper_filters.append(value.value<proto::WallpaperFilterRule>());
+    }
+    g.setWallpaperFilters(wallpaper_filters);
+    QList<proto::FilterLogic> wallpaper_filter_logics;
+    for (const auto& value : m.value(u"wallpaperFilterLogics"_s).toList()) {
+        wallpaper_filter_logics.append(value.value<proto::FilterLogic>());
+    }
+    g.setWallpaperFilterLogics(wallpaper_filter_logics);
     // Round-trip layout_defaults so a single-plugin SettingsSet doesn't
     // wipe the daemon's current LayoutPrefs (fillmode / align /
     // clear_rgba). UI never edits these — it just forwards them.

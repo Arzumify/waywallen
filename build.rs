@@ -39,11 +39,16 @@ fn main() {
     );
 
     // Control plane protobufs (prost).
-    let proto_path = manifest_dir.join("proto/control.proto");
-    println!("cargo:rerun-if-changed={}", proto_path.display());
+    let proto_paths = [
+        manifest_dir.join("proto/control.proto"),
+        manifest_dir.join("proto/filter.proto"),
+    ];
+    for proto_path in &proto_paths {
+        println!("cargo:rerun-if-changed={}", proto_path.display());
+    }
     prost_build::Config::new()
-        .compile_protos(&[proto_path], &[manifest_dir.join("proto")])
-        .expect("prost-build failed on proto/control.proto");
+        .compile_protos(&proto_paths, &[manifest_dir.join("proto")])
+        .expect("prost-build failed on control/filter protos");
 }
 
 fn gen_rust(xml_path: &Path, out_file: &Path) {

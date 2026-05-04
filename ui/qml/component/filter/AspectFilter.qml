@@ -13,8 +13,9 @@ W.BaseFilter {
     function syncFromFilter() {
         if (!filter.hasAspectFilter)
             filter.aspectFilter = subfilter;
-        condition = filter.aspectFilter.condition;
-        value = filter.aspectFilter.value;
+        const active = filter.hasAspectFilter ? filter.aspectFilter : subfilter;
+        condition = active.condition;
+        value = active.value;
     }
 
     function commitToFilter() {

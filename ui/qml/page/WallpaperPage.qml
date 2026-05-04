@@ -49,7 +49,9 @@ MD.Page {
     W.SettingsGetQuery {
         id: filterSettingsGet
         onGlobalChanged: {
-            wallpaperFilterModel.reset();
+            wallpaperFilterModel.replaceState(
+                        global.wallpaperFilters || [],
+                        global.wallpaperFilterLogics || []);
             wallpaperFilterModel.doQuery();
         }
         Component.onCompleted: reload()
@@ -70,14 +72,17 @@ MD.Page {
         onApply: {
             doQuery();
             const nextGlobal = Object.assign({}, filterSettingsGet.global);
-            nextGlobal.wallpaperFilterJson = toJson();
+            nextGlobal.wallpaperFilters = items();
+            nextGlobal.wallpaperFilterLogics = filterLogics;
             filterSettingsSet.global = nextGlobal;
             filterSettingsSet.plugins = filterSettingsGet.plugins;
             filterSettingsSet.reload();
         }
 
         onReset: {
-            fromJson(filterSettingsGet.global.wallpaperFilterJson || "");
+            replaceState(
+                        filterSettingsGet.global.wallpaperFilters || [],
+                        filterSettingsGet.global.wallpaperFilterLogics || []);
             doQuery();
         }
     }

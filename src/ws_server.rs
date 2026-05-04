@@ -21,7 +21,10 @@ use crate::model::repo;
 use crate::playlist;
 use crate::renderer_manager;
 use crate::routing::{DisplaySnapshot, LibrarySnapshot, RendererSnapshot, RouterEvent};
-use crate::settings::SettingsStore;
+use crate::settings::{
+    FilterLogicState, SettingsStore, WallpaperAspectFilterState, WallpaperFilterRuleState,
+    WallpaperFilterState, WallpaperIntFilterState, WallpaperStringFilterState,
+};
 use crate::tasks;
 use crate::AppState;
 
@@ -47,25 +50,83 @@ pub async fn serve(state: Arc<AppState>, addr: &str) -> Result<()> {
     fut.await
 }
 
-fn wallpaper_filter_from_pb(f: &pb::WallpaperFilter) -> playlist::Filter {
-    let mut out = playlist::Filter::default();
-    out.wp_types = f.wp_types.clone();
-    out.tags_any = f.tags_any.clone();
-    out.tags_all = f.tags_all.clone();
-    out.libraries = f.libraries.clone();
-    out.formats = f.formats.clone();
-    out.name_like = (!f.name_like.is_empty()).then(|| f.name_like.clone());
-    out.min_width = (f.min_width > 0).then_some(f.min_width);
-    out.min_height = (f.min_height > 0).then_some(f.min_height);
-    out.min_size = (f.min_size > 0).then_some(f.min_size);
-    out.max_size = (f.max_size > 0).then_some(f.max_size);
-    out.aspect = match pb::WallpaperAspect::try_from(f.aspect) {
-        Ok(pb::WallpaperAspect::Landscape) => Some(playlist::AspectClass::Landscape),
-        Ok(pb::WallpaperAspect::Portrait) => Some(playlist::AspectClass::Portrait),
-        Ok(pb::WallpaperAspect::Square) => Some(playlist::AspectClass::Square),
-        _ => None,
+fn settings_filter_state_from_pb(
+    filters: &[pb::WallpaperFilterRule],
+    logics: &[pb::FilterLogic],
+) -> WallpaperFilterState {
+    WallpaperFilterState {
+        filters: filters.iter().map(settings_rule_from_pb).collect(),
+        filter_logics: logics
+            .iter()
+            .map(|logic| FilterLogicState {
+                op: logic.op,
+                group_a: logic.group_a,
+                group_b: logic.group_b,
+            })
+            .collect(),
+    }
+}
+
+fn settings_rule_from_pb(rule: &pb::WallpaperFilterRule) -> WallpaperFilterRuleState {
+    WallpaperFilterRuleState {
+        r#type: rule.r#type,
+        group: rule.group,
+        string_filter: rule.payload.as_ref().and_then(|payload| match payload {
+            pb::wallpaper_filter_rule::Payload::StringFilter(f) => {
+                Some(WallpaperStringFilterState {
+                    value: f.value.clone(),
+                    condition: f.condition,
+                })
+            }
+            _ => None,
+        }),
+        int_filter: rule.payload.as_ref().and_then(|payload| match payload {
+            pb::wallpaper_filter_rule::Payload::IntFilter(f) => Some(WallpaperIntFilterState {
+                value: f.value,
+                condition: f.condition,
+            }),
+            _ => None,
+        }),
+        aspect_filter: rule.payload.as_ref().and_then(|payload| match payload {
+            pb::wallpaper_filter_rule::Payload::AspectFilter(f) => {
+                Some(WallpaperAspectFilterState {
+                    value: f.value,
+                    condition: f.condition,
+                })
+            }
+            _ => None,
+        }),
+    }
+}
+
+fn pb_rule_from_settings(rule: WallpaperFilterRuleState) -> pb::WallpaperFilterRule {
+    let payload = if let Some(f) = rule.string_filter {
+        Some(pb::wallpaper_filter_rule::Payload::StringFilter(
+            pb::WallpaperStringFilter {
+                value: f.value,
+                condition: f.condition,
+            },
+        ))
+    } else if let Some(f) = rule.int_filter {
+        Some(pb::wallpaper_filter_rule::Payload::IntFilter(
+            pb::WallpaperIntFilter {
+                value: f.value,
+                condition: f.condition,
+            },
+        ))
+    } else {
+        rule.aspect_filter.map(|f| {
+            pb::wallpaper_filter_rule::Payload::AspectFilter(pb::WallpaperAspectFilter {
+                value: f.value,
+                condition: f.condition,
+            })
+        })
     };
-    out
+    pb::WallpaperFilterRule {
+        r#type: rule.r#type,
+        group: rule.group,
+        payload,
+    }
 }
 
 fn wallpaper_rule_matches_string(actual: &str, filter: &pb::WallpaperStringFilter) -> bool {
@@ -661,6 +722,7 @@ fn global_event_to_pb(e: &GlobalEvent, state: &Arc<AppState>) -> Option<pb::Even
         }),
         GlobalEvent::SettingsChanged => {
             let snap = state.settings.snapshot();
+            let filter_state = snap.global.wallpaper_filter.clone();
             let layout_defaults = pb::LayoutPrefs {
                 fillmode: fillmode_to_pb(snap.global.layout.fillmode) as i32,
                 align: align_to_pb(snap.global.layout.align) as i32,
@@ -672,7 +734,20 @@ fn global_event_to_pb(e: &GlobalEvent, state: &Arc<AppState>) -> Option<pb::Even
                         target_extent: snap.global.target_extent,
                         render_size_policy: render_size_policy_to_pb(snap.global.render_size_policy)
                             as i32,
-                        wallpaper_filter_json: snap.global.wallpaper_filter_json,
+                        wallpaper_filters: filter_state
+                            .filters
+                            .into_iter()
+                            .map(pb_rule_from_settings)
+                            .collect(),
+                        wallpaper_filter_logics: filter_state
+                            .filter_logics
+                            .into_iter()
+                            .map(|logic| pb::FilterLogic {
+                                op: logic.op,
+                                group_a: logic.group_a,
+                                group_b: logic.group_b,
+                            })
+                            .collect(),
                         layout_defaults: Some(layout_defaults),
                     }),
                     plugins: snap
@@ -900,16 +975,6 @@ async fn dispatch_inner(
                         .into_iter()
                         .filter(|e| wallpaper_rules_match(e, &r.filters, &r.filter_logics))
                         .collect()
-                } else if let Some(filter_pb) = r.filter.as_ref() {
-                    let filter = wallpaper_filter_from_pb(filter_pb);
-                    if filter.is_match_all() {
-                        raw_entries
-                    } else {
-                        raw_entries
-                            .into_iter()
-                            .filter(|e| filter.matches(e))
-                            .collect()
-                    }
                 } else {
                     raw_entries
                 };
@@ -1194,6 +1259,7 @@ async fn dispatch_inner(
 
         Req::SettingsGet(_) => {
             let snap = state.settings.snapshot();
+            let filter_state = snap.global.wallpaper_filter.clone();
             let layout_defaults = pb::LayoutPrefs {
                 fillmode: fillmode_to_pb(snap.global.layout.fillmode) as i32,
                 align: align_to_pb(snap.global.layout.align) as i32,
@@ -1204,7 +1270,20 @@ async fn dispatch_inner(
                     target_extent: snap.global.target_extent,
                     render_size_policy: render_size_policy_to_pb(snap.global.render_size_policy)
                         as i32,
-                    wallpaper_filter_json: snap.global.wallpaper_filter_json,
+                    wallpaper_filters: filter_state
+                        .filters
+                        .into_iter()
+                        .map(pb_rule_from_settings)
+                        .collect(),
+                    wallpaper_filter_logics: filter_state
+                        .filter_logics
+                        .into_iter()
+                        .map(|logic| pb::FilterLogic {
+                            op: logic.op,
+                            group_a: logic.group_a,
+                            group_b: logic.group_b,
+                        })
+                        .collect(),
                     layout_defaults: Some(layout_defaults),
                 }),
                 plugins: snap
@@ -1259,6 +1338,7 @@ async fn dispatch_inner(
             // against the new ones and dispatch ApplySettings to any
             // live renderer whose plugin name matches.
             let previous_plugins = state.settings.snapshot().plugins;
+            let previous_filter = state.settings.snapshot().global.wallpaper_filter;
             // Snapshot pre-mutation layout defaults so we know whether
             // to re-sync display set_configs after the write.
             let prev_layout = state.settings.snapshot().global.layout.clone();
@@ -1266,7 +1346,10 @@ async fn dispatch_inner(
                 if let Some(g) = r.global.as_ref() {
                     s.global.target_extent = g.target_extent;
                     s.global.render_size_policy = render_size_policy_from_pb(g.render_size_policy);
-                    s.global.wallpaper_filter_json = g.wallpaper_filter_json.clone();
+                    s.global.wallpaper_filter = settings_filter_state_from_pb(
+                        &g.wallpaper_filters,
+                        &g.wallpaper_filter_logics,
+                    );
                     if let Some(ld) = g.layout_defaults.as_ref() {
                         if let Some(fm) = fillmode_from_pb(ld.fillmode) {
                             s.global.layout.fillmode = fm;
@@ -1281,6 +1364,14 @@ async fn dispatch_inner(
                 }
                 s.plugins = new_plugins.clone();
             });
+            let new_filter = state.settings.snapshot().global.wallpaper_filter.clone();
+            if new_filter != previous_filter {
+                log::debug!(
+                    "wallpaper filter updated: old={:?}, new={:?}",
+                    previous_filter,
+                    new_filter
+                );
+            }
             let new_layout = state.settings.snapshot().global.layout.clone();
             if new_layout != prev_layout {
                 state.router.resync_all_set_configs().await;
@@ -1665,41 +1756,10 @@ fn entry_to_pb(
 
 #[cfg(test)]
 mod tests {
-    use super::{wallpaper_filter_from_pb, wallpaper_rules_match};
+    use super::wallpaper_rules_match;
     use crate::control_proto as pb;
-    use crate::playlist::AspectClass;
     use crate::wallpaper_type::WallpaperEntry;
     use std::collections::HashMap;
-
-    #[test]
-    fn pb_wallpaper_filter_converts_to_playlist_filter() {
-        let pb = pb::WallpaperFilter {
-            wp_types: vec!["video".into()],
-            tags_any: vec!["anime".into()],
-            tags_all: vec!["landscape".into()],
-            libraries: vec!["/lib".into()],
-            formats: vec!["mp4".into()],
-            name_like: "city".into(),
-            min_width: 1920,
-            min_height: 1080,
-            min_size: 1024,
-            max_size: 4096,
-            aspect: pb::WallpaperAspect::Landscape as i32,
-        };
-
-        let f = wallpaper_filter_from_pb(&pb);
-        assert_eq!(f.wp_types, vec!["video"]);
-        assert_eq!(f.tags_any, vec!["anime"]);
-        assert_eq!(f.tags_all, vec!["landscape"]);
-        assert_eq!(f.libraries, vec!["/lib"]);
-        assert_eq!(f.formats, vec!["mp4"]);
-        assert_eq!(f.name_like.as_deref(), Some("city"));
-        assert_eq!(f.min_width, Some(1920));
-        assert_eq!(f.min_height, Some(1080));
-        assert_eq!(f.min_size, Some(1024));
-        assert_eq!(f.max_size, Some(4096));
-        assert_eq!(f.aspect, Some(AspectClass::Landscape));
-    }
 
     #[test]
     fn grouped_wallpaper_rules_support_or_between_groups() {

@@ -100,13 +100,20 @@ MD.ItemDelegate {
 
         MD.SmallIconButton {
             icon.name: MD.Token.icon.close
-            onClicked: ListView.view.model.removeRow(root.index)
+            onClicked: {
+                const view = root.ListView.view;
+                if (!view || !view.model)
+                    return;
+                view.model.removeRow(root.index);
+            }
         }
     }
 
     background: MD.Rectangle {
         corners: {
             const view = root.ListView.view;
+            if (!view || !view.model)
+                return 0;
             const model = view.model;
             void(view.count);
             return MD.Util.listCorners(model.rowIndexInGroup(root.index),

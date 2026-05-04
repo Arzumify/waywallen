@@ -209,91 +209,18 @@ void FilterRuleModel::sortByGroup() {
     fromVariantlist(values);
 }
 
-QString FilterRuleModel::toJson() const {
-    return toJsonDocument().toJson(QJsonDocument::JsonFormat::Compact);
-}
-
-void FilterRuleModel::fromJson(const QString& json) {
-    if (json.trimmed().isEmpty()) {
-        fromJsonDocument(QJsonDocument());
-        return;
-    }
-    fromJsonDocument(QJsonDocument::fromJson(json.toUtf8()));
-}
-
-auto FilterRuleModel::toJsonDocument() const -> QJsonDocument {
-    auto object = QJsonObject {};
-    object.insert("filters", kstore::qvariant_to_josn(items()));
-
-    QJsonArray groups;
-    const int groupRole = roleForName_("group");
-    if (groupRole >= 0) {
-        for (int i = 0; i < rowCount(); ++i) {
-            groups.append(data(index(i, 0), groupRole).toInt());
-        }
-    }
-    object.insert("groups", groups);
-
-    QJsonArray logics;
-    for (const auto& logic : m_filter_logics) {
-        QJsonObject item;
-        item.insert("op", static_cast<int>(logic.op()));
-        item.insert("group_a", (int)logic.groupA());
-        item.insert("group_b", (int)logic.groupB());
-        logics.append(item);
-    }
-    object.insert("filter_logics", logics);
-    return QJsonDocument(object);
-}
-
-void FilterRuleModel::fromJsonDocument(const QJsonDocument& doc) {
-    if (doc.isNull() || !doc.isObject()) {
-        fromVariantlist({});
-        setFilterLogics({});
-        sortByGroup();
-        return;
-    }
-
-    const auto object = doc.object();
-    const auto filters = object.value("filters").toArray();
-    const auto type = m_oper->rawItemMeta()->metaType();
-
+void FilterRuleModel::replaceState(
+    const QList<control::v1::WallpaperFilterRule>& filters,
+    const QList<control::v1::FilterLogic>& filterLogics) {
     QVariantList values;
     values.reserve(filters.size());
-    for (const auto& value : filters) {
-        values.push_back(kstore::qvariant_from_josn(type, value));
+    for (const auto& filter : filters) {
+        values.push_back(QVariant::fromValue(filter));
     }
     fromVariantlist(values);
-
-    if (object.contains("groups")) {
-        const auto groups = object.value("groups").toArray();
-        const int role = roleForName_("group");
-        if (role >= 0) {
-            const int count = std::min<int>(groups.size(), rowCount());
-            for (int i = 0; i < count; ++i) {
-                QVariant value = item(i);
-                const auto metaType = value.metaType();
-                const auto metaObject = metaType.metaObject();
-                if (!metaObject) continue;
-                const int groupIndex = metaObject->indexOfProperty("group");
-                if (groupIndex < 0) continue;
-                metaObject->property(groupIndex).writeOnGadget(value.data(), groups.at(i).toInt());
-                setItem(i, value);
-            }
-        }
-    }
-
-    QList<control::v1::FilterLogic> logics;
-    for (const auto& value : object.value("filter_logics").toArray()) {
-        const auto item = value.toObject();
-        control::v1::FilterLogic logic;
-        logic.setOp(static_cast<control::v1::LogicOp>(item.value("op").toInt()));
-        logic.setGroupA(item.value("group_a").toInt());
-        logic.setGroupB(item.value("group_b").toInt());
-        logics.append(logic);
-    }
-    setFilterLogics(logics);
+    setFilterLogics(filterLogics);
     sortByGroup();
+    setDirty(false);
 }
 
 void FilterRuleModel::setDirty(bool v) {
