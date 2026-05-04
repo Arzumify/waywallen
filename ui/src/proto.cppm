@@ -78,4 +78,17 @@ using proto::LayoutPrefs;
 using proto::FillModeGadget::FillMode;
 using proto::AlignGadget::Align;
 using proto::RenderSizePolicyGadget::RenderSizePolicy;
+
+using proto::WallpaperFilter;
+using proto::WallpaperFilterRule;
+using proto::WallpaperFilterTypeGadget::WallpaperFilterType;
+using proto::WallpaperStringFilter;
+using proto::WallpaperIntFilter;
+using proto::WallpaperAspectFilter;
+using proto::StringConditionGadget::StringCondition;
+using proto::IntConditionGadget::IntCondition;
+using proto::TypeConditionGadget::TypeCondition;
+using proto::LogicOpGadget::LogicOp;
+using proto::FilterLogic;
+using proto::WallpaperAspectGadget::WallpaperAspect;
 } // namespace waywallen::control::v1

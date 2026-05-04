@@ -11,7 +11,6 @@ MD.Page {
 
     W.WallpaperListQuery {
         id: wallpaperQuery
-        Component.onCompleted: reload()
     }
 
     W.WallpaperScanQuery {
@@ -45,6 +44,55 @@ MD.Page {
 
     W.LibraryAutoDetectQuery {
         id: autoDetectQuery
+    }
+
+    W.SettingsGetQuery {
+        id: filterSettingsGet
+        onGlobalChanged: {
+            wallpaperFilterModel.reset();
+            wallpaperFilterModel.doQuery();
+        }
+        Component.onCompleted: reload()
+    }
+
+    W.SettingsSetQuery {
+        id: filterSettingsSet
+    }
+
+    W.WallpaperFilterRuleModel {
+        id: wallpaperFilterModel
+
+        function doQuery() {
+            if (!wallpaperQuery.replaceFilterState(items(), filterLogics))
+                wallpaperQuery.reload();
+        }
+
+        onApply: {
+            doQuery();
+            const nextGlobal = Object.assign({}, filterSettingsGet.global);
+            nextGlobal.wallpaperFilterJson = toJson();
+            filterSettingsSet.global = nextGlobal;
+            filterSettingsSet.plugins = filterSettingsGet.plugins;
+            filterSettingsSet.reload();
+        }
+
+        onReset: {
+            fromJson(filterSettingsGet.global.wallpaperFilterJson || "");
+            doQuery();
+        }
+    }
+
+    W.WallpaperFilterDialog {
+        id: filterDialog
+        parent: T.Overlay.overlay
+        model: wallpaperFilterModel
+    }
+
+    Connections {
+        target: W.Notify
+        function onSettingsChanged() {
+            filterSettingsGet.reload();
+        }
     }
 
     // Renderers that advertise the selected wallpaper's wp_type, sorted
@@ -116,7 +164,18 @@ MD.Page {
                         actions: [
                             MD.Action {
                                 icon.name: MD.Token.icon.filter_list
-                                text: 'Filters'
+                                text: wallpaperQuery.hasActiveFilters ? 'Filters on' : 'Filters'
+                                onTriggered: filterDialog.open()
+                            },
+                            MD.Action {
+                                icon.name: MD.Token.icon.clear_all
+                                text: 'Clear filters'
+                                enabled: wallpaperQuery.hasActiveFilters
+                                onTriggered: {
+                                    wallpaperFilterModel.removeRows(0, wallpaperFilterModel.rowCount());
+                                    wallpaperFilterModel.filterLogics = [];
+                                    wallpaperFilterModel.apply();
+                                }
                             },
                             MD.Action {
                                 icon.name: MD.Token.icon.hard_drive

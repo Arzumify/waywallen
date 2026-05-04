@@ -46,6 +46,7 @@ auto global_to_map(const proto::GlobalSettings& g) -> QVariantMap {
     QVariantMap m;
     m[u"targetExtent"_s]     = g.targetExtent();
     m[u"renderSizePolicy"_s] = static_cast<int>(g.renderSizePolicy());
+    m[u"wallpaperFilterJson"_s] = g.wallpaperFilterJson();
     if (g.hasLayoutDefaults()) {
         m[u"layoutDefaults"_s] = layout_to_map(g.layoutDefaults());
     }
@@ -70,6 +71,7 @@ auto map_to_global(const QVariantMap& m) -> proto::GlobalSettings {
     g.setTargetExtent(m.value(u"targetExtent"_s).toUInt());
     g.setRenderSizePolicy(
         static_cast<proto::RenderSizePolicy>(m.value(u"renderSizePolicy"_s).toInt()));
+    g.setWallpaperFilterJson(m.value(u"wallpaperFilterJson"_s).toString());
     // Round-trip layout_defaults so a single-plugin SettingsSet doesn't
     // wipe the daemon's current LayoutPrefs (fillmode / align /
     // clear_rgba). UI never edits these — it just forwards them.

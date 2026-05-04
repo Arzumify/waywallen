@@ -11,5 +11,6 @@ export import :renderer;
 export import :msg.store;
 export import :model.store_item;
 export import :model.list_models;
+export import :model.filter_rule;
 export import :query;
 export import :thumb.service;

@@ -72,6 +72,7 @@ set(SOURCES_NO_MOC
   src/msg/store.cpp
   src/model/store_item.cpp
   src/model/list_models.cpp
+  src/model/filter_rule_model.cpp
   src/query/wallpaper_query.cpp
   src/query/renderer_query.cpp
   src/query/source_query.cpp
@@ -98,6 +99,7 @@ set(MOC_SOURCE_FILES
   src/msg/store.cppm
   src/model/store_item.cppm
   src/model/list_models.cppm
+  src/model/filter_rule_model.cppm
   src/query/wallpaper_query.cppm
   src/query/renderer_query.cppm
   src/query/source_query.cppm
@@ -121,8 +123,15 @@ set(QML_FILES
   qml/component/StatusDot.qml
   qml/component/PagePopup.qml
   qml/component/ThumbnailImage.qml
+  qml/component/filter/BaseFilter.qml
+  qml/component/filter/StringFilter.qml
+  qml/component/filter/IntFilter.qml
+  qml/component/filter/AspectFilter.qml
+  qml/component/filter/EmptyFilter.qml
+  qml/component/filter/WallpaperFilter.qml
   qml/component/settings/SettingField.qml
   qml/component/settings/PluginSettingsPopup.qml
+  qml/dialog/WallpaperFilterDialog.qml
   qml/page/WallpaperPage.qml
   qml/page/WallpaperCard.qml
   qml/page/StatusPage.qml
