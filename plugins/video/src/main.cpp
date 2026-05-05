@@ -11,17 +11,13 @@
 // unchanged from Iter 0.
 
 import rstd;
+import wavsen.video;
 
 #include <waywallen-bridge/bridge.h>
 #include <waywallen-bridge/extent_resolve.h>
 #include <waywallen-bridge/ipc_v1.h>
 #include <waywallen-bridge/pool.h>
 #include <waywallen-bridge/probe_vk.h>
-
-#include <presenter.hpp>
-#include <vk_device.hpp>
-#include <video_decoder.hpp>
-#include <yuv_to_rgba.hpp>
 
 #include <atomic>
 #include <cerrno>

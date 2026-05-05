@@ -29,7 +29,7 @@ Renderer::Renderer(const proto::RendererInstance& info, QObject* parent)
       m_pid(info.pid()) {}
 
 void Renderer::updateFrom(const proto::RendererInstance& info) {
-    assert(info.rendererId() == m_id, "Renderer::updateFrom id mismatch");
+    rstd_assert(info.rendererId() == m_id, "Renderer::updateFrom id mismatch");
 
     if (m_fps != info.fps()) {
         m_fps = info.fps();

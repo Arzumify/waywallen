@@ -17,8 +17,8 @@ namespace proto = waywallen::control::v1;
 
 auto app_instance(waywallen::App* in = nullptr) -> waywallen::App* {
     static waywallen::App* instance { in };
-    assert(instance != nullptr, "app object not inited");
-    assert(in == nullptr || instance == in, "there should be only one app object");
+    rstd_assert(instance != nullptr, "app object not inited");
+    rstd_assert(in == nullptr || instance == in, "there should be only one app object");
     return instance;
 }
 
@@ -159,7 +159,7 @@ void App::init() {
         }
     }
 
-    assert(d->m_main_win, "main window must exist");
+    rstd_assert(d->m_main_win, "main window must exist");
 }
 
 auto App::engine() const -> QQmlApplicationEngine* {

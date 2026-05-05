@@ -7,6 +7,7 @@
 //   - libav decode pipeline
 
 import rstd;
+import wavsen.video;
 
 #include <waywallen-bridge/bridge.h>
 #include <waywallen-bridge/drm_fourcc.h>
@@ -15,7 +16,6 @@ import rstd;
 #include <waywallen-bridge/probe_vk.h>
 
 #include "av_image.hpp"
-#include <vk_device.hpp>
 
 #include <atomic>
 #include <cerrno>

@@ -35,7 +35,7 @@
     }
   },
   {
-    "commit": "ce977c9aac9e06b2ef7bceef11f91dd2cd82c78c",
+    "commit": "5878b2058eb67adb615f691889d93e3ab13ba7d2",
     "dest": "build/_flatpak_deps/rstd-src",
     "disable-shallow-clone": true,
     "type": "git",
@@ -46,7 +46,7 @@
     }
   },
   {
-    "commit": "60f1e6d6682f61030768c587483cb8fac8a70aeb",
+    "commit": "404868aa2aa4481e262f25d8f7d053f42b61b7b8",
     "dest": "build/_flatpak_deps/ncrequest-src",
     "disable-shallow-clone": true,
     "type": "git",
@@ -57,11 +57,11 @@
     }
   },
   {
-    "commit": "ce977c9aac9e06b2ef7bceef11f91dd2cd82c78c",
+    "commit": "3eb48e6cba947e6fb8d79e2faee3ac1d375872ac",
     "dest": "build/_flatpak_deps/wavsen-src",
     "disable-shallow-clone": true,
     "type": "git",
-    "url": "https://github.com/hypengw/wavsec.git",
+    "url": "https://github.com/hypengw/wavsen.git",
     "x-cmake": {
       "name": "wavsen",
       "exclude_from_all": true
@@ -79,7 +79,7 @@
     }
   },
   {
-    "commit": "c86f77291e4e4a7138291c4642f595041d58dae1",
+    "commit": "e9984a0dc57a4abecf5795a067ff4132bcb9489d",
     "dest": "build/_flatpak_deps/QExtra-src",
     "disable-shallow-clone": true,
     "type": "git",

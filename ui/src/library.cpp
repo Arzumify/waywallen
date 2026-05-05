@@ -27,7 +27,7 @@ Library::Library(const proto::LibraryInstance& info, QObject* parent)
       m_plugin_name(info.pluginName()) {}
 
 void Library::updateFrom(const proto::LibraryInstance& info) {
-    assert(info.id_proto() == m_id, "Library::updateFrom id mismatch");
+    rstd_assert(info.id_proto() == m_id, "Library::updateFrom id mismatch");
 
     if (m_path != info.path()) {
         m_path = info.path();

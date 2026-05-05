@@ -74,7 +74,7 @@ Display::Display(const proto::DisplayInfo& info, QObject* parent)
       m_layout_override(layoutOverrideFromPb(info)) {}
 
 void Display::updateFrom(const proto::DisplayInfo& info) {
-    assert(info.displayId() == m_id, "Display::updateFrom id mismatch");
+    rstd_assert(info.displayId() == m_id, "Display::updateFrom id mismatch");
 
     if (m_name != info.name()) {
         m_name = info.name();
