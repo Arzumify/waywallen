@@ -11,6 +11,7 @@ dependencies:
   # Qt6 >= 6.10 (UI uses Quick / DBus / Protobuf; Wayland platform plugin is a separate package)
   - qt6-main>=6.10
   - qt6-wayland>=6.10
+  - freetype
 
   # Used to build qtgrpc from source (conda-forge has no Qt6 Protobuf package)
   - libprotobuf
