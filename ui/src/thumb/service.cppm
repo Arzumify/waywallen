@@ -52,7 +52,7 @@ private:
 /// Background thumbnail generator. Resolves cache hits from
 /// `$XDG_CACHE_HOME/thumbnails/x-large/` per the freedesktop Thumbnail
 /// Managing Standard, and dispatches misses to a `QThreadPool` for
-/// QImageReader / waywallen::ff decode + atomic PNG write.
+/// QImageReader / wavsen::decode decode + atomic PNG write.
 ///
 /// QML-singleton; per-card requests are `ThumbnailRequest` objects that
 /// register themselves with the service on each input change.

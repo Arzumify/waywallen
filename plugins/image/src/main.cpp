@@ -6,6 +6,8 @@
 //   - Staging buffer + command buffer (uploads RGBA into a bridge slot)
 //   - libav decode pipeline
 
+import rstd;
+
 #include <waywallen-bridge/bridge.h>
 #include <waywallen-bridge/drm_fourcc.h>
 #include <waywallen-bridge/ipc_v1.h>
@@ -186,7 +188,7 @@ static void maybe_dump_producer_frame(const HostState& host,
     std::fclose(sf);
 }
 
-bool upload_to_slot(HostState& host, waywallen::ffvk::Producer& producer,
+bool upload_to_slot(HostState& host, wavsen::video::Producer& producer,
                     const ww_pool_directive_t& directive,
                     uint32_t slot_index) {
     ww_pool_slot_t s {};
@@ -208,17 +210,17 @@ bool upload_to_slot(HostState& host, waywallen::ffvk::Producer& producer,
     maybe_dump_producer_frame(host, directive, s,
                               g_dump_seq.fetch_add(1, std::memory_order_relaxed));
 
-    std::string uerr;
-    int sync_fd = producer.upload_into(
+    auto upload_res = producer.upload_into(
         reinterpret_cast<VkImage>(s.vk_image),
         s.width, s.height,
-        host.rgba_data, host.rgba_size, &uerr);
-    if (sync_fd < 0) {
+        host.rgba_data, host.rgba_size);
+    if (upload_res.is_err()) {
         std::fprintf(stderr,
                      "waywallen-image-renderer: upload_into failed: %s\n",
-                     uerr.c_str());
+                     std::move(upload_res).unwrap_err().message.c_str());
         return false;
     }
+    int sync_fd = std::move(upload_res).unwrap();
     if (int rc = ww_bridge_pool_submit_slot(host.pool, host.sock, slot_index, sync_fd);
         rc != 0) {
         std::fprintf(stderr,
@@ -231,7 +233,7 @@ bool upload_to_slot(HostState& host, waywallen::ffvk::Producer& producer,
 /* Apply a directive received from the daemon. After bridge brings the
  * slots up, upload our cached RGBA into slot 0 and submit one frame.
  * Static images: a single submit per (re-)negotiation is enough. */
-void apply_negotiate_request(HostState& host, waywallen::ffvk::Producer& producer,
+void apply_negotiate_request(HostState& host, wavsen::video::Producer& producer,
                              const ww_pool_directive_t& d) {
     int rc = ww_bridge_pool_apply_directive(host.pool, host.sock, &d);
     if (rc != 0) {
@@ -351,13 +353,13 @@ void reader_loop(HostState& host) {
 // a `socketpair(AF_UNIX)`, ask it to advertise, then drain the
 // `format_caps` message on the other end and decode it.
 static int print_caps_json(const Options& opt) {
-    std::string verr;
-    auto producer = waywallen::ffvk::Producer::create(opt.width, opt.height, &verr);
-    if (!producer) {
+    auto producer_res = wavsen::video::Producer::create(opt.width, opt.height);
+    if (producer_res.is_err()) {
         std::fprintf(stderr, "waywallen-image-renderer: vk_producer: %s\n",
-                     verr.c_str());
+                     std::move(producer_res).unwrap_err().message.c_str());
         return 1;
     }
+    auto producer = std::move(producer_res).unwrap();
 
     int sv[2] = { -1, -1 };
     if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
@@ -508,13 +510,13 @@ int main(int argc, char** argv) {
     }
 
     if (opt.vulkan_probe) {
-        std::string verr;
-        auto prod = waywallen::ffvk::Producer::create(opt.width, opt.height, &verr);
-        if (!prod) {
+        auto prod_res = wavsen::video::Producer::create(opt.width, opt.height);
+        if (prod_res.is_err()) {
             std::fprintf(stderr, "waywallen-image-renderer: vk_producer: %s\n",
-                         verr.c_str());
+                         std::move(prod_res).unwrap_err().message.c_str());
             return 1;
         }
+        auto prod = std::move(prod_res).unwrap();
         std::fprintf(stderr,
                      "waywallen-image-renderer: vulkan_probe ok "
                      "drm_render=%u:%u\n",
@@ -598,9 +600,11 @@ int main(int argc, char** argv) {
     opt.width  = rgba_buf.width;
     opt.height = rgba_buf.height;
 
-    std::string verr;
-    auto producer = waywallen::ffvk::Producer::create(opt.width, opt.height, &verr);
-    if (!producer) die("vk_producer: " + verr);
+    auto producer_res = wavsen::video::Producer::create(opt.width, opt.height);
+    if (producer_res.is_err()) {
+        die("vk_producer: " + std::move(producer_res).unwrap_err().message);
+    }
+    auto producer = std::move(producer_res).unwrap();
 
     /* GPU info diagnostic (uses bridge probe_vk dispatch table). */
     ww_bridge_vk_dt_t vdt {};

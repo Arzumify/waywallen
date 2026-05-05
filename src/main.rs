@@ -223,7 +223,7 @@ async fn async_main() -> anyhow::Result<()> {
         resolve_ui_path(cli.ui_path.clone())
     };
 
-    // Single-instance gate. 
+    // Single-instance gate.
     let dbus_conn = dbus_iface::acquire_or_handoff(ui_bin.as_deref()).await;
     log::info!("DBus name acquired: {}", dbus_iface::BUS_NAME);
 

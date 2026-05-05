@@ -32,17 +32,8 @@ if("${QT_INSTALL_QML}" STREQUAL "")
   set(QT_INSTALL_QML "${CMAKE_INSTALL_LIBDIR}/qt6/qml")
 endif()
 
-# FetchContent driver. To enable the flatpak-aware dependency provider
-# (source redirect + transitive auto-record), pass on the cmake command line:
-#   -DCMAKE_PROJECT_TOP_LEVEL_INCLUDES=cmake/FetchDepsProvider.cmake
-include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/FetchDeps.cmake)
-fetchdeps(${CMAKE_CURRENT_SOURCE_DIR}/deps.json)
-
-# Shared C++ ffmpeg middle layer (provides waywallen::ffmpeg for the UI's
-# thumbnail generator and, in future, an ffmpeg-based renderer plugin).
-# Added here because rstd::rstd must already exist via fetchdeps above.
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../libs/ffmpeg
-                 ${CMAKE_BINARY_DIR}/waywallen-ffmpeg)
+include(${CMAKE_SOURCE_DIR}/cmake/FetchDeps.cmake)
+fetchdeps(${CMAKE_SOURCE_DIR}/deps.json)
 
 qt_standard_project_setup()
 
@@ -229,7 +220,7 @@ target_link_libraries(waywallen-qml
     qml_material::qml_material
     ncrequest
     qextra
-    waywallen::ffmpeg
+    wavsen::decode
 )
 
 qt_add_executable(${PROJECT_NAME} MANUAL_FINALIZATION src/main.cpp)

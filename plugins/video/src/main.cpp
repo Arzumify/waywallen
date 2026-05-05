@@ -2,13 +2,15 @@
 //
 // Iter 0/1: sw decode → CPU swscale to RGBA → staging upload of RGBA.
 // Iter 2 (this file): sw decode → CPU swscale to NV12 → GPU NV12→RGBA
-// via a compute shader (`waywallen::ffvk::YuvToRgba`). NV12 upload is
+// via a compute shader (`wavsen::video::YuvToRgba`). NV12 upload is
 // 1.5 bytes/pixel vs RGBA's 4, so PCIe bandwidth drops ~60%; the YUV→RGB
 // math also moves off the CPU. Iter 4 swaps the sw-decode front end for
 // FFmpeg's vulkan hwdevice, after which the pipeline is end-to-end GPU.
 //
 // IPC plumbing (Init handshake, reader thread, negotiate handoff) is
 // unchanged from Iter 0.
+
+import rstd;
 
 #include <waywallen-bridge/bridge.h>
 #include <waywallen-bridge/extent_resolve.h>
@@ -198,23 +200,34 @@ int run_selftest(const Options& opt) {
     uint32_t even_w = opt.width  + (opt.width  & 1u);
     uint32_t even_h = opt.height + (opt.height & 1u);
 
-    std::string verr;
-    auto producer = waywallen::ffvk::Producer::create_with_render_node(
-        even_w, even_h, opt.render_node, &verr);
-    if (!producer) { std::fprintf(stderr, "selftest vk: %s\n", verr.c_str()); return 1; }
-    auto yuv = waywallen::ffvk::YuvToRgba::create(
-        producer->instance(), producer->physical_device(), producer->device(),
-        producer->queue_family_index(), producer->queue(),
-        even_w, even_h, &verr);
-    if (!yuv) { std::fprintf(stderr, "selftest yuv: %s\n", verr.c_str()); return 1; }
-
-    waywallen::ffvk::DecodeError derr;
-    auto decoder = waywallen::ffvk::VideoDecoder::open_with_vk(
-        opt.video_path, even_w, even_h, /*loop=*/false, *producer, &derr);
-    if (!decoder) {
-        std::fprintf(stderr, "selftest decode: %s\n", derr.message.c_str());
+    auto producer_res = wavsen::video::Producer::create_with_render_node(
+        even_w, even_h, opt.render_node);
+    if (producer_res.is_err()) {
+        std::fprintf(stderr, "selftest vk: %s\n",
+                     std::move(producer_res).unwrap_err().message.c_str());
         return 1;
     }
+    auto producer = std::move(producer_res).unwrap();
+
+    auto yuv_res = wavsen::video::YuvToRgba::create(
+        producer->instance(), producer->physical_device(), producer->device(),
+        producer->queue_family_index(), producer->queue(),
+        even_w, even_h);
+    if (yuv_res.is_err()) {
+        std::fprintf(stderr, "selftest yuv: %s\n",
+                     std::move(yuv_res).unwrap_err().message.c_str());
+        return 1;
+    }
+    auto yuv = std::move(yuv_res).unwrap();
+
+    auto decoder_res = wavsen::video::VideoDecoder::open_with_vk(
+        opt.video_path, even_w, even_h, /*loop=*/false, *producer);
+    if (decoder_res.is_err()) {
+        std::fprintf(stderr, "selftest decode: %s\n",
+                     std::move(decoder_res).unwrap_err().message.c_str());
+        return 1;
+    }
+    auto decoder = std::move(decoder_res).unwrap();
 
     /* Allocate a private RGBA8 VkImage to convert into. */
     VkImage         dst_img = VK_NULL_HANDLE;
@@ -267,16 +280,18 @@ int run_selftest(const Options& opt) {
     /* Decode one frame, convert it. */
     int sync_fd = -1;
     if (decoder->using_vk_frames()) {
-        waywallen::ffvk::VkFrameView vkv {};
-        auto fs = decoder->next_vk_frame(vkv, &derr);
-        if (fs != waywallen::ffvk::FrameStatus::ok) {
-            std::fprintf(stderr, "selftest next_vk_frame: %s\n", derr.message.c_str());
+        wavsen::video::VkFrameView vkv {};
+        auto fs_res = decoder->next_vk_frame(vkv);
+        if (fs_res.is_err()) {
+            std::fprintf(stderr, "selftest next_vk_frame: %s\n",
+                         std::move(fs_res).unwrap_err().message.c_str());
             return 1;
         }
-        const auto cm = waywallen::ffvk::make_color_matrix(
-            static_cast<waywallen::ffvk::ColorSpace>(vkv.colorspace),
-            static_cast<waywallen::ffvk::ColorRange>(vkv.color_range));
-        waywallen::ffvk::YuvToRgba::VkFrameImports im {};
+        if (std::move(fs_res).unwrap() != wavsen::video::NextFrame::Ok) return 1;
+        const auto cm = wavsen::video::make_color_matrix(
+            static_cast<wavsen::video::ColorSpace>(vkv.colorspace),
+            static_cast<wavsen::video::ColorRange>(vkv.color_range));
+        wavsen::video::YuvToRgba::VkFrameImports im {};
         im.y_image          = vkv.img[0];
         im.uv_image         = vkv.plane_count > 1 ? vkv.img[1] : VK_NULL_HANDLE;
         im.y_sem            = vkv.sem[0];
@@ -290,24 +305,35 @@ int run_selftest(const Options& opt) {
         im.src_w             = vkv.width;
         im.src_h             = vkv.height;
         im.bit_depth         = vkv.bit_depth;
-        std::string yerr;
-        sync_fd = yuv->convert_av_vk_frame(im, dst_img, even_w, even_h, cm, &yerr);
-        if (sync_fd < 0) std::fprintf(stderr, "selftest convert: %s\n", yerr.c_str());
+        auto cv_res = yuv->convert_av_vk_frame(im, dst_img, even_w, even_h, cm);
+        if (cv_res.is_err()) {
+            std::fprintf(stderr, "selftest convert: %s\n",
+                         std::move(cv_res).unwrap_err().message.c_str());
+            sync_fd = -1;
+        } else {
+            sync_fd = std::move(cv_res).unwrap();
+        }
     } else {
-        waywallen::ffvk::Nv12Frame frame;
-        auto fs = decoder->next_frame(frame, &derr);
-        if (fs != waywallen::ffvk::FrameStatus::ok) {
-            std::fprintf(stderr, "selftest next_frame: %s\n", derr.message.c_str());
+        wavsen::video::Nv12Frame frame;
+        auto fs_res = decoder->next_frame(frame);
+        if (fs_res.is_err()) {
+            std::fprintf(stderr, "selftest next_frame: %s\n",
+                         std::move(fs_res).unwrap_err().message.c_str());
             return 1;
         }
-        const auto cm = waywallen::ffvk::make_color_matrix(
-            static_cast<waywallen::ffvk::ColorSpace>(frame.colorspace),
-            static_cast<waywallen::ffvk::ColorRange>(frame.color_range));
-        std::string yerr;
-        sync_fd = yuv->convert_nv12(dst_img, even_w, even_h,
-                                    frame.data.data(), frame.data.size(),
-                                    cm, &yerr);
-        if (sync_fd < 0) std::fprintf(stderr, "selftest convert: %s\n", yerr.c_str());
+        if (std::move(fs_res).unwrap() != wavsen::video::NextFrame::Ok) return 1;
+        const auto cm = wavsen::video::make_color_matrix(
+            static_cast<wavsen::video::ColorSpace>(frame.colorspace),
+            static_cast<wavsen::video::ColorRange>(frame.color_range));
+        auto cv_res = yuv->convert_nv12(dst_img, even_w, even_h,
+                                        frame.data.data(), frame.data.size(), cm);
+        if (cv_res.is_err()) {
+            std::fprintf(stderr, "selftest convert: %s\n",
+                         std::move(cv_res).unwrap_err().message.c_str());
+            sync_fd = -1;
+        } else {
+            sync_fd = std::move(cv_res).unwrap();
+        }
     }
 
     /* Wait for the conversion to complete via the sync_fd. We can poll
@@ -397,11 +423,14 @@ int main(int argc, char** argv) {
      * VideoDecoder. */
     uint32_t native_w = 0, native_h = 0;
     {
-        waywallen::ffvk::DecodeError perr;
-        if (!waywallen::ffvk::VideoDecoder::probe_native(
-                opt.video_path, &native_w, &native_h, &perr)) {
-            die("probe_native " + opt.video_path + ": " + perr.message);
+        auto probe_res = wavsen::video::VideoDecoder::probe_native(opt.video_path);
+        if (probe_res.is_err()) {
+            die("probe_native " + opt.video_path + ": "
+                + std::move(probe_res).unwrap_err().message);
         }
+        auto probe = std::move(probe_res).unwrap();
+        native_w   = probe.width;
+        native_h   = probe.height;
     }
     ww_resolve_extent(init_extent_w, init_extent_h, init_extent_mode,
                       native_w, native_h, &opt.width, &opt.height);
@@ -412,19 +441,24 @@ int main(int argc, char** argv) {
     uint32_t even_h = opt.height + (opt.height & 1u);
 
     /* --- Vulkan device first, so the decoder can share it --- */
-    std::string verr;
-    auto producer = waywallen::ffvk::Producer::create_with_render_node(
-        even_w, even_h, opt.render_node, &verr);
-    if (!producer) die("vk producer: " + verr);
+    auto producer_res = wavsen::video::Producer::create_with_render_node(
+        even_w, even_h, opt.render_node);
+    if (producer_res.is_err()) {
+        die("vk producer: " + std::move(producer_res).unwrap_err().message);
+    }
+    auto producer = std::move(producer_res).unwrap();
 
     /* --- Decoder: prefer the shared-VkDevice path that yields AVVkFrames
      *   directly (zero host bounce). On any setup failure the open helper
      *   falls back internally to FFmpeg-managed hwdevice + transfer_data,
      *   which still works through the sw `next_frame` path. */
-    waywallen::ffvk::DecodeError derr;
-    auto decoder = waywallen::ffvk::VideoDecoder::open_with_vk(
-        opt.video_path, even_w, even_h, opt.loop_file, *producer, &derr);
-    if (!decoder) die("decode " + opt.video_path + ": " + derr.message);
+    auto decoder_res = wavsen::video::VideoDecoder::open_with_vk(
+        opt.video_path, even_w, even_h, opt.loop_file, *producer);
+    if (decoder_res.is_err()) {
+        die("decode " + opt.video_path + ": "
+            + std::move(decoder_res).unwrap_err().message);
+    }
+    auto decoder = std::move(decoder_res).unwrap();
     host.loop_value.store(opt.loop_file, std::memory_order_release);
 
     ww_bridge_vk_dt_t vdt {};
@@ -432,14 +466,17 @@ int main(int argc, char** argv) {
     ww_bridge_vk_log_gpu_info("waywallen-video-renderer", &vdt,
                               producer->physical_device());
 
-    auto yuv = waywallen::ffvk::YuvToRgba::create(
+    auto yuv_res = wavsen::video::YuvToRgba::create(
         producer->instance(),
         producer->physical_device(),
         producer->device(),
         producer->queue_family_index(),
         producer->queue(),
-        even_w, even_h, &verr);
-    if (!yuv) die("yuv_to_rgba: " + verr);
+        even_w, even_h);
+    if (yuv_res.is_err()) {
+        die("yuv_to_rgba: " + std::move(yuv_res).unwrap_err().message);
+    }
+    auto yuv = std::move(yuv_res).unwrap();
 
     /* --- Bridge pool --- */
     ww_pool_vulkan_init_t pool_init {};
@@ -507,9 +544,9 @@ int main(int argc, char** argv) {
 
     /* --- Main loop ----------------------------------------------------- */
     uint32_t  slot = 0;
-    waywallen::ffvk::Presenter presenter;  // Iter 3: PTS-driven pacing.
-    waywallen::ffvk::Nv12Frame frame;
-    waywallen::ffvk::VkFrameView vkv {};
+    wavsen::video::Presenter presenter;  // Iter 3: PTS-driven pacing.
+    wavsen::video::Nv12Frame frame;
+    wavsen::video::VkFrameView vkv {};
 
     while (!host.shutdown.load(std::memory_order_acquire)) {
         {
@@ -544,19 +581,19 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        waywallen::ffvk::DecodeError de;
         double frame_pts = -1.0;
-        waywallen::ffvk::FrameStatus fs = decoder->using_vk_frames()
-            ? decoder->next_vk_frame(vkv, &de)
-            : decoder->next_frame(frame, &de);
-        if (fs == waywallen::ffvk::FrameStatus::error) {
+        auto fs_res = decoder->using_vk_frames()
+            ? decoder->next_vk_frame(vkv)
+            : decoder->next_frame(frame);
+        if (fs_res.is_err()) {
             std::fprintf(stderr,
                          "waywallen-video-renderer: decode error: %s\n",
-                         de.message.c_str());
+                         std::move(fs_res).unwrap_err().message.c_str());
             signal_shutdown(host);
             break;
         }
-        if (fs == waywallen::ffvk::FrameStatus::eof) {
+        const auto fs = std::move(fs_res).unwrap();
+        if (fs == wavsen::video::NextFrame::Eof) {
             std::fprintf(stderr,
                          "waywallen-video-renderer: clean EOF (loop=off); idling until shutdown\n");
             std::unique_lock<std::mutex> lk(host.neg_mu);
@@ -595,15 +632,15 @@ int main(int argc, char** argv) {
             break;
         }
 
-        std::string yerr;
         int sync_fd = -1;
         const uint32_t cs_id = decoder->using_vk_frames() ? vkv.colorspace : frame.colorspace;
         const uint32_t cr_id = decoder->using_vk_frames() ? vkv.color_range : frame.color_range;
-        const auto color_matrix = waywallen::ffvk::make_color_matrix(
-            static_cast<waywallen::ffvk::ColorSpace>(cs_id),
-            static_cast<waywallen::ffvk::ColorRange>(cr_id));
+        const auto color_matrix = wavsen::video::make_color_matrix(
+            static_cast<wavsen::video::ColorSpace>(cs_id),
+            static_cast<wavsen::video::ColorRange>(cr_id));
+        rstd::Result<int, wavsen::video::Error> cv_res = rstd::Ok(-1);
         if (decoder->using_vk_frames()) {
-            waywallen::ffvk::YuvToRgba::VkFrameImports im {};
+            wavsen::video::YuvToRgba::VkFrameImports im {};
             im.y_image          = vkv.img[0];
             im.uv_image         = vkv.plane_count > 1 ? vkv.img[1] : VK_NULL_HANDLE;
             im.y_sem            = vkv.sem[0];
@@ -620,23 +657,24 @@ int main(int argc, char** argv) {
             im.src_w            = vkv.width;
             im.src_h            = vkv.height;
             im.bit_depth        = vkv.bit_depth;
-            sync_fd = yuv->convert_av_vk_frame(
+            cv_res = yuv->convert_av_vk_frame(
                 im, reinterpret_cast<VkImage>(s.vk_image),
-                s.width, s.height, color_matrix, &yerr);
+                s.width, s.height, color_matrix);
         } else {
-            sync_fd = yuv->convert_nv12(
+            cv_res = yuv->convert_nv12(
                 reinterpret_cast<VkImage>(s.vk_image),
                 s.width, s.height,
                 frame.data.data(), frame.data.size(),
-                color_matrix, &yerr);
+                color_matrix);
         }
-        if (sync_fd < 0) {
+        if (cv_res.is_err()) {
             std::fprintf(stderr,
                          "waywallen-video-renderer: yuv conversion failed: %s\n",
-                         yerr.c_str());
+                         std::move(cv_res).unwrap_err().message.c_str());
             signal_shutdown(host);
             break;
         }
+        sync_fd = std::move(cv_res).unwrap();
         if (int rc = ww_bridge_pool_submit_slot(host.pool, host.sock, slot, sync_fd);
             rc != 0) {
             std::fprintf(stderr,

@@ -7,7 +7,7 @@ module;
 module waywallen;
 
 import :thumb.service;
-import waywallen.ffmpeg;
+import wavsen.decode;
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -120,9 +120,9 @@ void ThumbnailJob::run() {
     QString error;
 
     if (m_is_video) {
-        ff::ThumbOptions opts;
+        wavsen::decode::ThumbOptions opts;
         opts.max_edge = kMaxEdge;
-        auto res = ff::extract_thumbnail(m_key.toStdString(), opts);
+        auto res = wavsen::decode::extract_thumbnail(m_key.toStdString(), opts);
         if (res.is_err()) {
             error = QString::fromStdString(std::move(res).unwrap_err().message);
         } else {
