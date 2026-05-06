@@ -20,6 +20,7 @@ mod probe;
 mod renderer_manager;
 mod routing;
 mod scheduler;
+mod self_test;
 mod settings;
 mod sync;
 mod tasks;
@@ -199,6 +200,15 @@ fn resolve_ui_path(explicit: Option<PathBuf>) -> Option<PathBuf> {
 }
 
 fn main() -> anyhow::Result<()> {
+    // `--test` is the user-runnable diagnostic path. Detect it before
+    // any daemon bootstrap (DBus, DB, plugins) so the test never
+    // touches the user's persisted state.
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.iter().any(|a| a == "--test") {
+        env_logger::init();
+        return self_test::run(argv);
+    }
+
     env_logger::init();
 
     // Explicit runtime + `shutdown_timeout` safety net: if any
