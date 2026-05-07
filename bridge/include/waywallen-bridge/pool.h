@@ -125,10 +125,20 @@ typedef struct ww_pool_vulkan_init {
     void    *(*get_instance_proc_addr)(void *instance, const char *name);
     const uint8_t *device_uuid;                    /* NULL or 16 bytes */
     const uint8_t *driver_uuid;                    /* NULL or 16 bytes */
+    /* Advisory fallback for the DRM render-node identity advertised
+     * to the daemon. Bridge always tries VK_EXT_physical_device_drm
+     * on the supplied physical_device first; these fields are used
+     * only when the extension isn't available (older drivers).
+     * Pass 0/0 to skip the fallback — empty values cause the daemon
+     * to treat topology as unknown for this producer. */
     uint32_t drm_render_major;
     uint32_t drm_render_minor;
     /* Optional render-node fd for drm_syncobj timeline export. If -1,
-     * bridge opens its own /dev/dri/renderD12X. */
+     * bridge opens `/dev/dri/renderD<minor>` for the queried minor
+     * (or falls back to first-openable when the minor isn't queryable).
+     * Pass an existing fd to make bridge dup it — useful when the
+     * producer already keeps the render node open and wants to share
+     * its kernel object table with bridge. */
     int      drm_render_fd;
     /* VkImageUsageFlags for VkImageCreateInfo.usage at slot allocation
      * time. */

@@ -19,10 +19,13 @@
 extern "C" {
 #endif
 
-/* Open the first /dev/dri/renderD12X that opens cleanly. Returns the
- * fd on success, or a negated errno on failure (no nodes openable).
- * Used by pool_vulkan when the plugin doesn't share a render fd. */
-int ww_drm_open_first_render_node(void);
+/* Open `/dev/dri/renderD<minor>` for the given DRM minor (must be in
+ * the render-node range 128..). Returns fd on success, -EINVAL if the
+ * minor is out of range, or a negated errno from open(2). The plugin
+ * is expected to know its own render-node minor — see
+ * ww_bridge_vk_query_render_node in probe_vk.h for the canonical way
+ * to derive it from a VkPhysicalDevice. */
+int ww_drm_open_render_node_by_minor(uint32_t minor);
 
 /* Create a fresh drm_syncobj. The new handle starts unsignaled at
  * timeline value 0. Use as both binary and timeline (the kernel

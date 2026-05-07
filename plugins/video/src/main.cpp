@@ -487,8 +487,18 @@ int main(int argc, char** argv) {
         reinterpret_cast<void *(*)(void *, const char *)>(vkGetInstanceProcAddr);
     pool_init.device_uuid           = producer->device_uuid();
     pool_init.driver_uuid           = producer->driver_uuid();
-    pool_init.drm_render_major      = producer->drm_render_major();
-    pool_init.drm_render_minor      = producer->drm_render_minor();
+    {
+        ww_bridge_vk_dt_t dt {};
+        ww_bridge_vk_dt_load(&dt, vkGetInstanceProcAddr, producer->instance());
+        if (int rc = ww_bridge_vk_query_render_node(
+                &dt, producer->physical_device(),
+                &pool_init.drm_render_major, &pool_init.drm_render_minor);
+            rc != 0) {
+            std::fprintf(stderr,
+                         "waywallen-video-renderer: drm render-node query failed (%d); "
+                         "topology will be unknown to daemon\n", rc);
+        }
+    }
     pool_init.drm_render_fd         = producer->drm_render_fd();
     /* The bridge's slot VkImage will be the dst of our compute shader's
      * storage-image binding, so it needs STORAGE usage in addition to

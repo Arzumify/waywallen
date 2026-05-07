@@ -558,6 +558,11 @@ static int backend_init(ww_pool_t *pool, const void *init_data) {
     }
 
     pool->backend_data = st;
+
+    /* The producer is responsible for filling drm_render_{major,minor}
+     * (e.g. via `ww_bridge_vk_query_render_node` from probe_vk.h);
+     * bridge does not query VK_EXT_physical_device_drm itself, to
+     * keep this struct stateless w.r.t. physical-device introspection. */
     pool->caps.drm_render_major = init->drm_render_major;
     pool->caps.drm_render_minor = init->drm_render_minor;
     if (init->device_uuid) {
@@ -572,7 +577,12 @@ static int backend_init(ww_pool_t *pool, const void *init_data) {
      * Vulkan path does NOT export the timeline through Vulkan — the
      * old VkProducer used VkSemaphore + OPAQUE_FD, but bridge owns
      * the syncobj directly via DRM ioctls (matches the EGL/GBM path
-     * and means the daemon's reaper sees one consistent fd kind). */
+     * and means the daemon's reaper sees one consistent fd kind).
+     *
+     * Resolution order: caller-supplied fd > queried renderD<minor> >
+     * first-openable render node. The middle step matters on multi-GPU
+     * boxes where "renderD128" may be a different device than the one
+     * the producer's VkPhysicalDevice lives on. */
     if (init->drm_render_fd >= 0) {
         /* dup so we don't double-close. */
         int dup_fd = dup(init->drm_render_fd);
@@ -585,10 +595,28 @@ static int backend_init(ww_pool_t *pool, const void *init_data) {
         }
         pool->drm_fd = dup_fd;
     } else {
-        int fd = ww_drm_open_first_render_node();
+        /* No caller fd → bridge opens the exact render node the
+         * producer advertised. We refuse to "guess" by walking
+         * /dev/dri/renderD12X — on multi-GPU hosts that lands on the
+         * wrong device and the daemon's topology check then silently
+         * computes wrong same-device decisions. Better to fail loudly
+         * here so the producer is forced to either share its fd or
+         * call ww_bridge_vk_query_render_node before pool_create. */
+        if (init->drm_render_minor == 0) {
+            fprintf(stderr,
+                    "ww_pool[vulkan]: drm_render_fd=-1 and drm_render_minor=0 "
+                    "— producer must populate drm_render_minor (use "
+                    "ww_bridge_vk_query_render_node from probe_vk.h) or share "
+                    "an already-opened drm_render_fd\n");
+            free(st);
+            pool->backend_data = NULL;
+            return -EINVAL;
+        }
+        int fd = ww_drm_open_render_node_by_minor(init->drm_render_minor);
         if (fd < 0) {
             fprintf(stderr,
-                    "ww_pool[vulkan]: no DRM render node openable for syncobj\n");
+                    "ww_pool[vulkan]: open(/dev/dri/renderD%u) failed: %d\n",
+                    init->drm_render_minor, fd);
             free(st);
             pool->backend_data = NULL;
             return fd;

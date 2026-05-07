@@ -53,18 +53,14 @@ struct ww_drm_syncobj_timeline_wait {
 #define WW_DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL        (1u << 0)
 #define WW_DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT (1u << 1)
 
-int ww_drm_open_first_render_node(void) {
-    static const char *paths[] = {
-        "/dev/dri/renderD128",
-        "/dev/dri/renderD129",
-        "/dev/dri/renderD130",
-        "/dev/dri/renderD131",
-    };
-    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); ++i) {
-        int fd = open(paths[i], O_RDWR | O_CLOEXEC);
-        if (fd >= 0) return fd;
-    }
-    return -ENODEV;
+int ww_drm_open_render_node_by_minor(uint32_t minor) {
+    if (minor < 128 || minor > 255) return -EINVAL;
+    char path[32];
+    int n = snprintf(path, sizeof(path), "/dev/dri/renderD%u", minor);
+    if (n < 0 || (size_t)n >= sizeof(path)) return -EINVAL;
+    int fd = open(path, O_RDWR | O_CLOEXEC);
+    if (fd < 0) return -errno;
+    return fd;
 }
 
 int ww_drm_syncobj_create(int drm_fd, uint32_t *out_handle) {

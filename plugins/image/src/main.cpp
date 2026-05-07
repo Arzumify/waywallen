@@ -382,8 +382,18 @@ static int print_caps_json(const Options& opt) {
         reinterpret_cast<void *(*)(void *, const char *)>(vkGetInstanceProcAddr);
     pool_init.device_uuid           = producer->device_uuid();
     pool_init.driver_uuid           = producer->driver_uuid();
-    pool_init.drm_render_major      = producer->drm_render_major();
-    pool_init.drm_render_minor      = producer->drm_render_minor();
+    {
+        ww_bridge_vk_dt_t dt {};
+        ww_bridge_vk_dt_load(&dt, vkGetInstanceProcAddr, producer->instance());
+        if (int rc = ww_bridge_vk_query_render_node(
+                &dt, producer->physical_device(),
+                &pool_init.drm_render_major, &pool_init.drm_render_minor);
+            rc != 0) {
+            std::fprintf(stderr,
+                         "waywallen-image-renderer: drm render-node query failed (%d); "
+                         "topology will be unknown to daemon\n", rc);
+        }
+    }
     pool_init.drm_render_fd         = producer->drm_render_fd();
     /* Image plugin uses vkCmdCopyBufferToImage (TRANSFER_DST feature)
      * to upload decoded pixels into the slot. */
@@ -643,8 +653,18 @@ int main(int argc, char** argv) {
         reinterpret_cast<void *(*)(void *, const char *)>(vkGetInstanceProcAddr);
     pool_init.device_uuid           = producer->device_uuid();
     pool_init.driver_uuid           = producer->driver_uuid();
-    pool_init.drm_render_major      = producer->drm_render_major();
-    pool_init.drm_render_minor      = producer->drm_render_minor();
+    {
+        ww_bridge_vk_dt_t dt {};
+        ww_bridge_vk_dt_load(&dt, vkGetInstanceProcAddr, producer->instance());
+        if (int rc = ww_bridge_vk_query_render_node(
+                &dt, producer->physical_device(),
+                &pool_init.drm_render_major, &pool_init.drm_render_minor);
+            rc != 0) {
+            std::fprintf(stderr,
+                         "waywallen-image-renderer: drm render-node query failed (%d); "
+                         "topology will be unknown to daemon\n", rc);
+        }
+    }
     pool_init.drm_render_fd         = producer->drm_render_fd();
     pool_init.image_usage_flags     = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     pool_init.format_feature_flags  = VK_FORMAT_FEATURE_TRANSFER_DST_BIT;

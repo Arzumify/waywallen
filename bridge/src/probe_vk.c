@@ -178,3 +178,32 @@ int ww_bridge_vk_resolve_render_node(const ww_bridge_vk_dt_t *dt,
     free(pds);
     return rc;
 }
+
+int ww_bridge_vk_query_render_node(const ww_bridge_vk_dt_t *dt,
+                                   VkPhysicalDevice phys,
+                                   uint32_t *out_major,
+                                   uint32_t *out_minor) {
+    if (out_major) *out_major = 0;
+    if (out_minor) *out_minor = 0;
+    if (!dt || phys == VK_NULL_HANDLE || !out_major || !out_minor) return -EINVAL;
+    if (!dt->vkGetPhysicalDeviceProperties2) return -ENOTSUP;
+
+    VkPhysicalDeviceDrmPropertiesEXT drm;
+    memset(&drm, 0, sizeof(drm));
+    drm.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRM_PROPERTIES_EXT;
+
+    VkPhysicalDeviceProperties2 p2;
+    memset(&p2, 0, sizeof(p2));
+    p2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    p2.pNext = &drm;
+    dt->vkGetPhysicalDeviceProperties2(phys, &p2);
+
+    if (!drm.hasRender) return -ENOENT;
+    if (drm.renderMajor < 0 || drm.renderMinor < 0) return -ERANGE;
+    if ((uint64_t)drm.renderMajor > UINT32_MAX
+        || (uint64_t)drm.renderMinor > UINT32_MAX) return -ERANGE;
+
+    *out_major = (uint32_t)drm.renderMajor;
+    *out_minor = (uint32_t)drm.renderMinor;
+    return 0;
+}

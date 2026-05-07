@@ -90,6 +90,32 @@ int ww_bridge_vk_resolve_render_node(const ww_bridge_vk_dt_t *dt,
                                      const char *render_node_path,
                                      uint8_t out_uuid[16]);
 
+/* Query VK_EXT_physical_device_drm for `phys` and write the render-node
+ * (major, minor) out. Plugins call this to fill
+ * `ww_pool_vulkan_init_t.drm_render_{major,minor}` so bridge can ship
+ * them in `Ready` / `format_caps`.
+ *
+ * `dt->vkGetPhysicalDeviceProperties2` must be resolved (Vulkan 1.1+
+ * or VK_KHR_get_physical_device_properties2 enabled on the instance);
+ * the DRM properties struct is chained into the standard properties2
+ * query and quietly ignored by drivers that don't advertise the
+ * extension.
+ *
+ * Returns:
+ *   0           on success.
+ *  -EINVAL      on NULL args.
+ *  -ENOTSUP     dt->vkGetPhysicalDeviceProperties2 is NULL.
+ *  -ENOENT      driver returned hasRender=0 (no DRM render-node binding;
+ *               typical for software renderers / nvidia<470 / WSL).
+ *  -ERANGE      reported renderMajor/renderMinor doesn't fit u32.
+ *
+ * On any non-zero return `*out_major` and `*out_minor` are written to 0.
+ */
+int ww_bridge_vk_query_render_node(const ww_bridge_vk_dt_t *dt,
+                                   VkPhysicalDevice phys,
+                                   uint32_t *out_major,
+                                   uint32_t *out_minor);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
