@@ -41,12 +41,7 @@ pub struct ApplyResult {
 /// using the fixed key `apply/global` — Iter 3 only serializes globally;
 /// per-display keys land when displays can be assigned distinct
 /// wallpapers.
-pub async fn apply_wallpaper_by_id(
-    app: &Arc<AppState>,
-    id: &str,
-    width: u32,
-    height: u32,
-) -> Result<ApplyResult> {
+pub async fn apply_wallpaper_by_id(app: &Arc<AppState>, id: &str) -> Result<ApplyResult> {
     let app_clone = app.clone();
     let id_owned = id.to_string();
     let (tx, rx) = tokio::sync::oneshot::channel::<Result<ApplyResult>>();
@@ -55,7 +50,7 @@ pub async fn apply_wallpaper_by_id(
         "apply/global",
         format!("apply/{id_owned}"),
         async move {
-            let res = apply_wallpaper_inner(&app_clone, &id_owned, width, height).await;
+            let res = apply_wallpaper_inner(&app_clone, &id_owned).await;
             // If the receiver is gone the caller already moved on (or
             // was itself cancelled); silently drop the result.
             let _ = tx.send(res);
@@ -68,12 +63,15 @@ pub async fn apply_wallpaper_by_id(
 
 /// The actual apply work — spawn renderer, relink displays, kill old
 /// renderers, update playlist. Caller is the unique apply task.
-async fn apply_wallpaper_inner(
-    app: &Arc<AppState>,
-    id: &str,
-    width: u32,
-    height: u32,
-) -> Result<ApplyResult> {
+async fn apply_wallpaper_inner(app: &Arc<AppState>, id: &str) -> Result<ApplyResult> {
+    // Render-target hint comes from settings.global; same path as the
+    // WS apply RPC. Hardcoding (0, 0, AS_GIVEN) here would let the
+    // renderer subprocess fall back to its built-in default and break
+    // the documented 1080p minimum.
+    let (width, height, extent_mode) = {
+        let g = app.settings.global();
+        crate::settings::resolve_extent(g.render_size_policy, g.target_extent)
+    };
     let entry = {
         let snap = app.source_snapshot.read().await;
         snap.get(id).cloned()
@@ -127,7 +125,7 @@ async fn apply_wallpaper_inner(
         settings: spawn_settings,
         width,
         height,
-        extent_mode: crate::settings::extent_mode::AS_GIVEN,
+        extent_mode,
         test_pattern: false,
         renderer_name: None,
     };
@@ -212,7 +210,7 @@ pub async fn step(app: &Arc<AppState>, delta: i32) -> Result<String> {
     };
 
     let entry_id = bridge_to_entry_id(app, &row).await?;
-    apply_wallpaper_by_id(app, &entry_id, 0, 0).await?;
+    apply_wallpaper_by_id(app, &entry_id).await?;
     // Reset the rotator deadline so the user gets the full quiet
     // window after a manual advance instead of being walked over by
     // the next auto tick.
@@ -372,7 +370,7 @@ pub async fn run_restore(app: &Arc<AppState>, restore_last: bool) -> Result<()> 
     if restore_last {
         if let Some(last_id) = app.settings.global().last_wallpaper.clone() {
             log::info!("restoring last wallpaper: {last_id}");
-            match apply_wallpaper_by_id(app, &last_id, 0, 0).await {
+            match apply_wallpaper_by_id(app, &last_id).await {
                 Ok(_) => applied = Some(last_id),
                 Err(e) => {
                     log::warn!("failed to restore last wallpaper: {e:#}");

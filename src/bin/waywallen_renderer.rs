@@ -54,10 +54,10 @@ struct Args {
 }
 
 fn default_width() -> u32 {
-    1280
+    1920
 }
 fn default_height() -> u32 {
-    720
+    1080
 }
 fn default_fps() -> u32 {
     60
@@ -66,16 +66,16 @@ fn default_fps() -> u32 {
 fn parse_args() -> Args {
     let mut args = Args {
         ipc: None,
-        width: 1280,
-        height: 720,
+        width: 1920,
+        height: 1080,
         fps: 60,
     };
     let mut iter = std::env::args().skip(1);
     while let Some(a) = iter.next() {
         match a.as_str() {
             "--ipc" => args.ipc = iter.next(),
-            "--width" => args.width = iter.next().and_then(|s| s.parse().ok()).unwrap_or(1280),
-            "--height" => args.height = iter.next().and_then(|s| s.parse().ok()).unwrap_or(720),
+            "--width" => args.width = iter.next().and_then(|s| s.parse().ok()).unwrap_or(1920),
+            "--height" => args.height = iter.next().and_then(|s| s.parse().ok()).unwrap_or(1080),
             "--fps" => args.fps = iter.next().and_then(|s| s.parse().ok()).unwrap_or(60),
             _ => {
                 let _ = iter.next();

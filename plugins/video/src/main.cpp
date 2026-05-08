@@ -38,8 +38,8 @@ struct Options {
     std::string ipc_path;
     std::string video_path;
     std::string render_node;   // e.g. "/dev/dri/renderD128"; empty → auto-pick
-    uint32_t    width  { 1280 };
-    uint32_t    height { 720 };
+    uint32_t    width  { 1920 };
+    uint32_t    height { 1080 };
     bool        loop_file { true };
     bool        selftest { false };
 };
