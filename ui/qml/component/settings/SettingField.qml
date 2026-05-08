@@ -87,8 +87,12 @@ ColumnLayout {
         return schema.type === root.kU32 ? 1 : 0.01;
     }
 
+    // Forward the user's edit but never write `root.value` ourselves —
+    // `value` stays bound to the parent's expression so external pushes
+    // (reset, daemon SettingsChanged) always reach us. The Connections
+    // inside each control component re-syncs the visual state when the
+    // user's prior interaction broke its declarative binding.
     function _emit(v) {
-        root.value = v;
         root.committed(schema.key, v);
     }
 
@@ -161,8 +165,16 @@ ColumnLayout {
         RowLayout {
             spacing: 8
             MD.Switch {
+                id: sw
                 checked: root.value === "true"
                 onToggled: root._emit(checked ? "true" : "false")
+                Connections {
+                    target: root
+                    function onValueChanged() {
+                        const c = root.value === "true";
+                        if (sw.checked !== c) sw.checked = c;
+                    }
+                }
             }
             Item {
                 Layout.fillWidth: true
@@ -192,6 +204,13 @@ ColumnLayout {
                         root._emit(value.toString());
                     }
                 }
+                Connections {
+                    target: root
+                    function onValueChanged() {
+                        const v = root._toFloat(root.value, slider.from);
+                        if (slider.value !== v) slider.value = v;
+                    }
+                }
             }
 
             MD.Text {
@@ -206,6 +225,7 @@ ColumnLayout {
     Component {
         id: numericField
         MD.TextField {
+            id: tf
             text: root.value
             placeholderText: root.label
             mdState.dense: true
@@ -221,24 +241,46 @@ ColumnLayout {
                 id: doubleValidator
                 notation: DoubleValidator.StandardNotation
             }
+
+            Connections {
+                target: root
+                function onValueChanged() {
+                    if (tf.text !== root.value) tf.text = root.value;
+                }
+            }
         }
     }
 
     Component {
         id: stringField
         MD.TextField {
+            id: stf
             text: root.value
             placeholderText: root.label
             onEditingFinished: root._emit(text)
+            Connections {
+                target: root
+                function onValueChanged() {
+                    if (stf.text !== root.value) stf.text = root.value;
+                }
+            }
         }
     }
 
     Component {
         id: choiceField
         MD.ComboBox {
+            id: cb
             model: root.schema.choices
             currentIndex: Math.max(0, root.schema.choices.indexOf(root.value))
             onActivated: root._emit(root.schema.choices[currentIndex])
+            Connections {
+                target: root
+                function onValueChanged() {
+                    const i = Math.max(0, root.schema.choices.indexOf(root.value));
+                    if (cb.currentIndex !== i) cb.currentIndex = i;
+                }
+            }
         }
     }
 
@@ -251,20 +293,36 @@ ColumnLayout {
             spacing: 6
 
             MD.FilterChip {
+                id: autoChip
                 text: "Auto"
                 checked: root.value === ""
                 onClicked: root._emit("")
+                Connections {
+                    target: root
+                    function onValueChanged() {
+                        const c = root.value === "";
+                        if (autoChip.checked !== c) autoChip.checked = c;
+                    }
+                }
             }
 
             Repeater {
                 model: W.App.gpuManager ? W.App.gpuManager.gpus : []
                 delegate: MD.FilterChip {
+                    id: gpuChip
                     required property var modelData
                     text: (modelData.driver || "drm")
                         + " " + modelData.renderMajor + ":" + modelData.renderMinor
                     checked: root.value === modelData.renderNode
                     enabled: modelData.renderNode.length > 0
                     onClicked: root._emit(modelData.renderNode)
+                    Connections {
+                        target: root
+                        function onValueChanged() {
+                            const c = root.value === gpuChip.modelData.renderNode;
+                            if (gpuChip.checked !== c) gpuChip.checked = c;
+                        }
+                    }
                 }
             }
         }

@@ -81,6 +81,7 @@ MD.Page {
         id: pluginSettingsPopup
         pluginName: ""
         schemaList: []
+        onResetRequested: settingsQuery.reload()
     }
 
     W.SourceListQuery {

@@ -20,6 +20,11 @@ MD.Popup {
     property var pendingValues: ({})
 
     signal applied
+    // Emitted when the user clicks Reset. The host page is expected to
+    // re-fetch settings from the daemon; the resulting `syncCurrent`
+    // will re-push the unmodified values through the binding chain so
+    // every field re-syncs.
+    signal resetRequested
 
     modal: true
     dim: true
@@ -69,6 +74,7 @@ MD.Popup {
 
     function reset() {
         root.pendingValues = ({});
+        root.resetRequested();
     }
 
     function _serialize(map) {
