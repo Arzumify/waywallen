@@ -10,8 +10,11 @@
 // IPC plumbing (Init handshake, reader thread, negotiate handoff) is
 // unchanged from Iter 0.
 
-import rstd;
+import rstd.cppstd;
+import rstd.log;
 import wavsen.video;
+
+#include <rstd/macro.hpp>
 
 #include <waywallen-bridge/bridge.h>
 #include <waywallen-bridge/extent_resolve.h>
@@ -19,18 +22,9 @@ import wavsen.video;
 #include <waywallen-bridge/pool.h>
 #include <waywallen-bridge/probe_vk.h>
 
-#include <atomic>
-#include <cerrno>
-#include <chrono>
-#include <condition_variable>
-#include <csignal>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <mutex>
-#include <string>
-#include <thread>
+#include <errno.h>
+#include <signal.h>
+#include <string.h>
 
 #include <sys/prctl.h>
 #include <sys/socket.h>
@@ -51,7 +45,7 @@ struct Options {
 };
 
 [[noreturn]] void die(const std::string& msg) {
-    std::fprintf(stderr, "waywallen-video-renderer: %s\n", msg.c_str());
+    rstd_error("waywallen-video-renderer: {}", msg);
     std::exit(1);
 }
 
@@ -113,8 +107,7 @@ void signal_shutdown(HostState& s) {
 void apply_control(HostState& host, ww_bridge_control_t& c) {
     switch (c.op) {
     case WW_EVT_IN_INIT:
-        std::fprintf(stderr,
-                     "waywallen-video-renderer: unexpected late Init; ignoring\n");
+        rstd_warn("waywallen-video-renderer: unexpected late Init; ignoring");
         break;
     case WW_EVT_IN_PLAY:
         host.paused.store(false, std::memory_order_release);
@@ -142,9 +135,8 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
             } else if (std::strcmp(key, "hwdec") == 0) {
                 // Iter 2 is sw decode + GPU YUV→RGB; honoured in Iter 4.
             } else {
-                std::fprintf(stderr,
-                             "waywallen-video-renderer: ApplySettings: unknown key '%s'; ignoring\n",
-                             key);
+                rstd_warn("waywallen-video-renderer: ApplySettings: unknown key '{}'; ignoring",
+                          static_cast<const char*>(key));
             }
         }
         ww_bridge_setting_changed_free(&as);
@@ -176,9 +168,8 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
         break;
     }
     default:
-        std::fprintf(stderr,
-                     "waywallen-video-renderer: unknown control op %d\n",
-                     static_cast<int>(c.op));
+        rstd_warn("waywallen-video-renderer: unknown control op {}",
+                  static_cast<int>(c.op));
         break;
     }
 }
@@ -190,8 +181,7 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
 // IPC, no daemon — strictly local. Returns 0 on success.
 int run_selftest(const Options& opt) {
     if (opt.video_path.empty()) {
-        std::fprintf(stderr,
-                     "waywallen-video-renderer: --selftest needs a video path\n");
+        rstd_error("waywallen-video-renderer: --selftest needs a video path");
         return 1;
     }
 
@@ -201,8 +191,8 @@ int run_selftest(const Options& opt) {
     auto producer_res = wavsen::video::Producer::create_with_render_node(
         even_w, even_h, opt.render_node);
     if (producer_res.is_err()) {
-        std::fprintf(stderr, "selftest vk: %s\n",
-                     std::move(producer_res).unwrap_err().message.c_str());
+        rstd_error("selftest vk: {}",
+                   std::move(producer_res).unwrap_err().message);
         return 1;
     }
     auto producer = std::move(producer_res).unwrap();
@@ -212,8 +202,8 @@ int run_selftest(const Options& opt) {
         producer->queue_family_index(), producer->queue(),
         even_w, even_h);
     if (yuv_res.is_err()) {
-        std::fprintf(stderr, "selftest yuv: %s\n",
-                     std::move(yuv_res).unwrap_err().message.c_str());
+        rstd_error("selftest yuv: {}",
+                   std::move(yuv_res).unwrap_err().message);
         return 1;
     }
     auto yuv = std::move(yuv_res).unwrap();
@@ -221,8 +211,8 @@ int run_selftest(const Options& opt) {
     auto decoder_res = wavsen::video::VideoDecoder::open_with_vk(
         opt.video_path, even_w, even_h, /*loop=*/false, *producer);
     if (decoder_res.is_err()) {
-        std::fprintf(stderr, "selftest decode: %s\n",
-                     std::move(decoder_res).unwrap_err().message.c_str());
+        rstd_error("selftest decode: {}",
+                   std::move(decoder_res).unwrap_err().message);
         return 1;
     }
     auto decoder = std::move(decoder_res).unwrap();
@@ -245,7 +235,7 @@ int run_selftest(const Options& opt) {
         ici.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
         ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         if (vkCreateImage(producer->device(), &ici, nullptr, &dst_img) != VK_SUCCESS) {
-            std::fprintf(stderr, "selftest vkCreateImage failed\n");
+            rstd_error("selftest vkCreateImage failed");
             return 1;
         }
         VkMemoryRequirements mr {};
@@ -261,7 +251,7 @@ int run_selftest(const Options& opt) {
             }
         }
         if (type == UINT32_MAX) {
-            std::fprintf(stderr, "selftest no DEVICE_LOCAL memory\n");
+            rstd_error("selftest no DEVICE_LOCAL memory");
             return 1;
         }
         VkMemoryAllocateInfo mai {};
@@ -270,7 +260,7 @@ int run_selftest(const Options& opt) {
         mai.memoryTypeIndex = type;
         if (vkAllocateMemory(producer->device(), &mai, nullptr, &dst_mem) != VK_SUCCESS
             || vkBindImageMemory(producer->device(), dst_img, dst_mem, 0) != VK_SUCCESS) {
-            std::fprintf(stderr, "selftest vkAllocateMemory/Bind failed\n");
+            rstd_error("selftest vkAllocateMemory/Bind failed");
             return 1;
         }
     }
@@ -281,8 +271,8 @@ int run_selftest(const Options& opt) {
         wavsen::video::VkFrameView vkv {};
         auto fs_res = decoder->next_vk_frame(vkv);
         if (fs_res.is_err()) {
-            std::fprintf(stderr, "selftest next_vk_frame: %s\n",
-                         std::move(fs_res).unwrap_err().message.c_str());
+            rstd_error("selftest next_vk_frame: {}",
+                       std::move(fs_res).unwrap_err().message);
             return 1;
         }
         if (std::move(fs_res).unwrap() != wavsen::video::NextFrame::Ok) return 1;
@@ -305,8 +295,8 @@ int run_selftest(const Options& opt) {
         im.bit_depth         = vkv.bit_depth;
         auto cv_res = yuv->convert_av_vk_frame(im, dst_img, even_w, even_h, cm);
         if (cv_res.is_err()) {
-            std::fprintf(stderr, "selftest convert: %s\n",
-                         std::move(cv_res).unwrap_err().message.c_str());
+            rstd_error("selftest convert: {}",
+                       std::move(cv_res).unwrap_err().message);
             sync_fd = -1;
         } else {
             sync_fd = std::move(cv_res).unwrap();
@@ -315,8 +305,8 @@ int run_selftest(const Options& opt) {
         wavsen::video::Nv12Frame frame;
         auto fs_res = decoder->next_frame(frame);
         if (fs_res.is_err()) {
-            std::fprintf(stderr, "selftest next_frame: %s\n",
-                         std::move(fs_res).unwrap_err().message.c_str());
+            rstd_error("selftest next_frame: {}",
+                       std::move(fs_res).unwrap_err().message);
             return 1;
         }
         if (std::move(fs_res).unwrap() != wavsen::video::NextFrame::Ok) return 1;
@@ -326,8 +316,8 @@ int run_selftest(const Options& opt) {
         auto cv_res = yuv->convert_nv12(dst_img, even_w, even_h,
                                         frame.data.data(), frame.data.size(), cm);
         if (cv_res.is_err()) {
-            std::fprintf(stderr, "selftest convert: %s\n",
-                         std::move(cv_res).unwrap_err().message.c_str());
+            rstd_error("selftest convert: {}",
+                       std::move(cv_res).unwrap_err().message);
             sync_fd = -1;
         } else {
             sync_fd = std::move(cv_res).unwrap();
@@ -344,11 +334,9 @@ int run_selftest(const Options& opt) {
     vkFreeMemory(producer->device(), dst_mem, nullptr);
 
     if (sync_fd < 0) return 1;
-    std::fprintf(stderr,
-                 "waywallen-video-renderer: --selftest ok "
-                 "(mode=%s, %ux%u)\n",
-                 decoder->using_vk_frames() ? "shared-vk" : "sw",
-                 even_w, even_h);
+    rstd_info("waywallen-video-renderer: --selftest ok (mode={}, {}x{})",
+              decoder->using_vk_frames() ? "shared-vk" : "sw",
+              even_w, even_h);
     return 0;
 }
 
@@ -358,8 +346,7 @@ void reader_loop(HostState& host) {
         int rc = ww_bridge_recv_control(host.sock, &msg);
         if (rc != 0) {
             if (!host.shutdown.load(std::memory_order_acquire)) {
-                std::fprintf(stderr,
-                             "waywallen-video-renderer: recv_control failed: %d\n", rc);
+                rstd_error("waywallen-video-renderer: recv_control failed: {}", rc);
             }
             signal_shutdown(host);
             return;
@@ -373,6 +360,10 @@ void reader_loop(HostState& host) {
 
 
 int main(int argc, char** argv) {
+    static rstd::log::EnvLogger _logger;
+    rstd::log::set_logger(_logger);
+    rstd::log::set_max_level(_logger.filter());
+
     Options opt = parse_args(argc, argv);
     if (opt.selftest) return run_selftest(opt);
     if (opt.ipc_path.empty()) die("--ipc <socket_path> is required");
@@ -382,7 +373,7 @@ int main(int argc, char** argv) {
     HostState host;
     host.sock = ww_bridge_connect(opt.ipc_path.c_str());
     if (host.sock < 0)
-        die("ww_bridge_connect: " + std::string(std::strerror(-host.sock)));
+        die("ww_bridge_connect: " + std::string(::strerror(-host.sock)));
 
     ww_bridge_init_t init {};
     if (int rc = ww_bridge_recv_init(host.sock, &init); rc < 0) {
@@ -494,9 +485,8 @@ int main(int argc, char** argv) {
                 &dt, producer->physical_device(),
                 &pool_init.drm_render_major, &pool_init.drm_render_minor);
             rc != 0) {
-            std::fprintf(stderr,
-                         "waywallen-video-renderer: drm render-node query failed (%d); "
-                         "topology will be unknown to daemon\n", rc);
+            rstd_warn("waywallen-video-renderer: drm render-node query failed ({}); "
+                      "topology will be unknown to daemon", rc);
         }
     }
     pool_init.drm_render_fd         = producer->drm_render_fd();
@@ -519,10 +509,9 @@ int main(int argc, char** argv) {
                                                | WW_MEM_HINT_HOST_VISIBLE);
         rc != 0)
         die("ww_bridge_pool_advertise_caps failed: " + std::to_string(rc));
-    std::fprintf(stderr,
-                 "waywallen-video-renderer: ready (%ux%u, loop=%d, GPU YUV→RGB), "
-                 "waiting for NegotiateBuffers\n",
-                 even_w, even_h, opt.loop_file ? 1 : 0);
+    rstd_info("waywallen-video-renderer: ready ({}x{}, loop={}, GPU YUV→RGB), "
+              "waiting for NegotiateBuffers",
+              even_w, even_h, opt.loop_file ? 1 : 0);
 
     std::thread reader([&]() { reader_loop(host); });
 
@@ -539,8 +528,7 @@ int main(int argc, char** argv) {
             lk.unlock();
             int rc = ww_bridge_pool_apply_directive(host.pool, host.sock, &d);
             if (rc != 0) {
-                std::fprintf(stderr,
-                             "waywallen-video-renderer: pool_apply_directive (initial) rc=%d\n", rc);
+                rstd_error("waywallen-video-renderer: pool_apply_directive (initial) rc={}", rc);
                 signal_shutdown(host);
             } else {
                 host.negotiated.store(true, std::memory_order_release);
@@ -548,10 +536,9 @@ int main(int argc, char** argv) {
         }
     }
 
-    std::fprintf(stderr,
-                 "waywallen-video-renderer: decoder mode = %s\n",
-                 decoder->using_vk_frames() ? "shared-VkDevice (zero-copy)"
-                                            : "sw → CPU NV12 → GPU upload");
+    rstd_info("waywallen-video-renderer: decoder mode = {}",
+              decoder->using_vk_frames() ? "shared-VkDevice (zero-copy)"
+                                         : "sw → CPU NV12 → GPU upload");
 
     /* --- Main loop ----------------------------------------------------- */
     uint32_t  slot = 0;
@@ -568,8 +555,7 @@ int main(int argc, char** argv) {
                 lk.unlock();
                 int rc = ww_bridge_pool_apply_directive(host.pool, host.sock, &d);
                 if (rc != 0) {
-                    std::fprintf(stderr,
-                                 "waywallen-video-renderer: pool_apply_directive (re) rc=%d\n", rc);
+                    rstd_error("waywallen-video-renderer: pool_apply_directive (re) rc={}", rc);
                     if (rc > 0) { signal_shutdown(host); break; }
                 }
                 slot = 0;
@@ -597,16 +583,14 @@ int main(int argc, char** argv) {
             ? decoder->next_vk_frame(vkv)
             : decoder->next_frame(frame);
         if (fs_res.is_err()) {
-            std::fprintf(stderr,
-                         "waywallen-video-renderer: decode error: %s\n",
-                         std::move(fs_res).unwrap_err().message.c_str());
+            rstd_error("waywallen-video-renderer: decode error: {}",
+                       std::move(fs_res).unwrap_err().message);
             signal_shutdown(host);
             break;
         }
         const auto fs = std::move(fs_res).unwrap();
         if (fs == wavsen::video::NextFrame::Eof) {
-            std::fprintf(stderr,
-                         "waywallen-video-renderer: clean EOF (loop=off); idling until shutdown\n");
+            rstd_info("waywallen-video-renderer: clean EOF (loop=off); idling until shutdown");
             std::unique_lock<std::mutex> lk(host.neg_mu);
             host.neg_cv.wait(lk, [&] {
                 return host.shutdown.load(std::memory_order_acquire)
@@ -622,23 +606,20 @@ int main(int argc, char** argv) {
 
         if (int rc = ww_bridge_pool_wait_slot_release(host.pool, slot, 250);
             rc != 0 && rc != -ETIME) {
-            std::fprintf(stderr,
-                         "waywallen-video-renderer: wait_slot_release(%u) rc=%d\n",
-                         slot, rc);
+            rstd_warn("waywallen-video-renderer: wait_slot_release({}) rc={}",
+                      slot, rc);
         }
 
         ww_pool_slot_t s {};
         if (int rc = ww_bridge_pool_acquire_slot(host.pool, slot, &s); rc != 0) {
-            std::fprintf(stderr,
-                         "waywallen-video-renderer: acquire_slot(%u) failed: %d\n",
-                         slot, rc);
+            rstd_error("waywallen-video-renderer: acquire_slot({}) failed: {}",
+                       slot, rc);
             signal_shutdown(host);
             break;
         }
         if (!s.vk_image) {
-            std::fprintf(stderr,
-                         "waywallen-video-renderer: slot %u has no VkImage handle\n",
-                         slot);
+            rstd_error("waywallen-video-renderer: slot {} has no VkImage handle",
+                       slot);
             signal_shutdown(host);
             break;
         }
@@ -679,17 +660,15 @@ int main(int argc, char** argv) {
                 color_matrix);
         }
         if (cv_res.is_err()) {
-            std::fprintf(stderr,
-                         "waywallen-video-renderer: yuv conversion failed: %s\n",
-                         std::move(cv_res).unwrap_err().message.c_str());
+            rstd_error("waywallen-video-renderer: yuv conversion failed: {}",
+                       std::move(cv_res).unwrap_err().message);
             signal_shutdown(host);
             break;
         }
         sync_fd = std::move(cv_res).unwrap();
         if (int rc = ww_bridge_pool_submit_slot(host.pool, host.sock, slot, sync_fd);
             rc != 0) {
-            std::fprintf(stderr,
-                         "waywallen-video-renderer: submit_slot rc=%d\n", rc);
+            rstd_error("waywallen-video-renderer: submit_slot rc={}", rc);
             signal_shutdown(host);
             break;
         }

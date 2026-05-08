@@ -6,8 +6,11 @@
 //   - Staging buffer + command buffer (uploads RGBA into a bridge slot)
 //   - libav decode pipeline
 
-import rstd;
+import rstd.cppstd;
+import rstd.log;
 import wavsen.video;
+
+#include <rstd/macro.hpp>
 
 #include <waywallen-bridge/bridge.h>
 #include <waywallen-bridge/drm_fourcc.h>
@@ -17,17 +20,9 @@ import wavsen.video;
 
 #include "av_image.hpp"
 
-#include <atomic>
-#include <cerrno>
-#include <condition_variable>
-#include <csignal>
-#include <cstdint>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <mutex>
-#include <string>
-#include <thread>
+#include <errno.h>
+#include <signal.h>
+#include <string.h>
 
 #include <sys/prctl.h>
 #include <sys/socket.h>
@@ -52,7 +47,7 @@ struct Options {
 };
 
 [[noreturn]] void die(const std::string& msg) {
-    std::fprintf(stderr, "waywallen-image-renderer: %s\n", msg.c_str());
+    rstd_error("waywallen-image-renderer: {}", msg);
     std::exit(1);
 }
 
@@ -134,17 +129,16 @@ static void maybe_dump_producer_frame(const HostState& host,
                   static_cast<unsigned long long>(d.modifier));
     FILE* f = std::fopen(path, "wb");
     if (!f) {
-        std::fprintf(stderr,
-                     "waywallen-image-renderer: dump open %s: %s\n",
-                     path, std::strerror(errno));
+        rstd_warn("waywallen-image-renderer: dump open {}: {}",
+                  static_cast<const char*>(path),
+                  static_cast<const char*>(::strerror(errno)));
         return;
     }
     size_t w = std::fwrite(host.rgba_data, 1, host.rgba_size, f);
     std::fclose(f);
     if (w != host.rgba_size) {
-        std::fprintf(stderr,
-                     "waywallen-image-renderer: dump short write %zu/%zu to %s\n",
-                     w, host.rgba_size, path);
+        rstd_warn("waywallen-image-renderer: dump short write {}/{} to {}",
+                  w, host.rgba_size, static_cast<const char*>(path));
         return;
     }
 
@@ -192,15 +186,13 @@ bool upload_to_slot(HostState& host, wavsen::video::Producer& producer,
     ww_pool_slot_t s {};
     if (int rc = ww_bridge_pool_acquire_slot(host.pool, slot_index, &s);
         rc != 0) {
-        std::fprintf(stderr,
-                     "waywallen-image-renderer: acquire_slot(%u) failed: %d\n",
-                     slot_index, rc);
+        rstd_error("waywallen-image-renderer: acquire_slot({}) failed: {}",
+                   slot_index, rc);
         return false;
     }
     if (!s.vk_image) {
-        std::fprintf(stderr,
-                     "waywallen-image-renderer: slot %u has no VkImage handle\n",
-                     slot_index);
+        rstd_error("waywallen-image-renderer: slot {} has no VkImage handle",
+                   slot_index);
         return false;
     }
 
@@ -213,16 +205,14 @@ bool upload_to_slot(HostState& host, wavsen::video::Producer& producer,
         s.width, s.height,
         host.rgba_data, host.rgba_size);
     if (upload_res.is_err()) {
-        std::fprintf(stderr,
-                     "waywallen-image-renderer: upload_into failed: %s\n",
-                     std::move(upload_res).unwrap_err().message.c_str());
+        rstd_error("waywallen-image-renderer: upload_into failed: {}",
+                   std::move(upload_res).unwrap_err().message);
         return false;
     }
     int sync_fd = std::move(upload_res).unwrap();
     if (int rc = ww_bridge_pool_submit_slot(host.pool, host.sock, slot_index, sync_fd);
         rc != 0) {
-        std::fprintf(stderr,
-                     "waywallen-image-renderer: submit_slot rc=%d\n", rc);
+        rstd_error("waywallen-image-renderer: submit_slot rc={}", rc);
         return false;
     }
     return true;
@@ -235,8 +225,7 @@ void apply_negotiate_request(HostState& host, wavsen::video::Producer& producer,
                              const ww_pool_directive_t& d) {
     int rc = ww_bridge_pool_apply_directive(host.pool, host.sock, &d);
     if (rc != 0) {
-        std::fprintf(stderr,
-                     "waywallen-image-renderer: pool_apply_directive failed: %d\n", rc);
+        rstd_error("waywallen-image-renderer: pool_apply_directive failed: {}", rc);
         if (rc > 0) signal_shutdown(host);
         return;
     }
@@ -245,11 +234,10 @@ void apply_negotiate_request(HostState& host, wavsen::video::Producer& producer,
         return;
     }
     host.negotiated.store(true, std::memory_order_release);
-    std::fprintf(stderr,
-                 "waywallen-image-renderer: NegotiateBuffers honored "
-                 "(path=%u mem_source=%u modifier=0x%016llx) — bind+frame emitted\n",
-                 d.category, d.mem_source,
-                 static_cast<unsigned long long>(d.modifier));
+    rstd_info("waywallen-image-renderer: NegotiateBuffers honored "
+              "(path={} mem_source={} modifier=0x{:016x}) — bind+frame emitted",
+              d.category, d.mem_source,
+              static_cast<unsigned long long>(d.modifier));
 }
 
 void apply_control(HostState& host, ww_bridge_control_t& c) {
@@ -259,8 +247,7 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
         // before the reader thread is even spawned. Anything that
         // arrives here is either a buggy daemon resending it or a
         // protocol violation; log and ignore to stay liberal.
-        std::fprintf(stderr,
-                     "waywallen-image-renderer: unexpected late Init; ignoring\n");
+        rstd_warn("waywallen-image-renderer: unexpected late Init; ignoring");
         break;
     case WW_EVT_IN_PLAY:
     case WW_EVT_IN_PAUSE:
@@ -281,11 +268,9 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
         ww_bridge_setting_changed_t as {};
         if (ww_bridge_setting_changed_from_control(&c, &as) == 0) {
             if (as.settings.count > 0) {
-                std::fprintf(stderr,
-                             "waywallen-image-renderer: ApplySettings "
-                             "with %u keys but no hot-reloadable settings; "
-                             "ignoring\n",
-                             as.settings.count);
+                rstd_warn("waywallen-image-renderer: ApplySettings with {} keys "
+                          "but no hot-reloadable settings; ignoring",
+                          as.settings.count);
             }
             ww_bridge_setting_changed_free(&as);
         }
@@ -316,9 +301,8 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
         break;
     }
     default:
-        std::fprintf(stderr,
-                     "waywallen-image-renderer: unknown control op %d\n",
-                     static_cast<int>(c.op));
+        rstd_warn("waywallen-image-renderer: unknown control op {}",
+                  static_cast<int>(c.op));
         break;
     }
 }
@@ -329,9 +313,7 @@ void reader_loop(HostState& host) {
         int rc = ww_bridge_recv_control(host.sock, &msg);
         if (rc != 0) {
             if (!host.shutdown.load(std::memory_order_acquire)) {
-                std::fprintf(stderr,
-                             "waywallen-image-renderer: recv_control failed: %d\n",
-                             rc);
+                rstd_error("waywallen-image-renderer: recv_control failed: {}", rc);
             }
             signal_shutdown(host);
             return;
@@ -358,17 +340,16 @@ void reader_loop(HostState& host) {
 static int print_caps_json(const Options& opt) {
     auto producer_res = wavsen::video::Producer::create(opt.width, opt.height);
     if (producer_res.is_err()) {
-        std::fprintf(stderr, "waywallen-image-renderer: vk_producer: %s\n",
-                     std::move(producer_res).unwrap_err().message.c_str());
+        rstd_error("waywallen-image-renderer: vk_producer: {}",
+                   std::move(producer_res).unwrap_err().message);
         return 1;
     }
     auto producer = std::move(producer_res).unwrap();
 
     int sv[2] = { -1, -1 };
     if (::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
-        std::fprintf(stderr,
-                     "waywallen-image-renderer: socketpair: %s\n",
-                     std::strerror(errno));
+        rstd_error("waywallen-image-renderer: socketpair: {}",
+                   static_cast<const char*>(::strerror(errno)));
         return 1;
     }
 
@@ -389,9 +370,8 @@ static int print_caps_json(const Options& opt) {
                 &dt, producer->physical_device(),
                 &pool_init.drm_render_major, &pool_init.drm_render_minor);
             rc != 0) {
-            std::fprintf(stderr,
-                         "waywallen-image-renderer: drm render-node query failed (%d); "
-                         "topology will be unknown to daemon\n", rc);
+            rstd_warn("waywallen-image-renderer: drm render-node query failed ({}); "
+                      "topology will be unknown to daemon", rc);
         }
     }
     pool_init.drm_render_fd         = producer->drm_render_fd();
@@ -403,8 +383,7 @@ static int print_caps_json(const Options& opt) {
     ww_pool_t* pool = nullptr;
     if (int rc = ww_bridge_pool_create(WW_POOL_BACKEND_VULKAN, &pool_init, &pool);
         rc != 0) {
-        std::fprintf(stderr,
-                     "waywallen-image-renderer: pool_create: %d\n", rc);
+        rstd_error("waywallen-image-renderer: pool_create: {}", rc);
         ::close(sv[0]); ::close(sv[1]);
         return 1;
     }
@@ -414,8 +393,7 @@ static int print_caps_json(const Options& opt) {
                                                WW_MEM_HINT_DEVICE_LOCAL
                                                | WW_MEM_HINT_HOST_VISIBLE);
         rc != 0) {
-        std::fprintf(stderr,
-                     "waywallen-image-renderer: advertise_caps: %d\n", rc);
+        rstd_error("waywallen-image-renderer: advertise_caps: {}", rc);
         ww_bridge_pool_destroy(pool);
         ::close(sv[0]); ::close(sv[1]);
         return 1;
@@ -435,8 +413,7 @@ static int print_caps_json(const Options& opt) {
         int rc = ww_bridge_recv_frame(sv[1], &op, &body, &body_len,
                                       fds, 2, &n_fds);
         if (rc != 0) {
-            std::fprintf(stderr,
-                         "waywallen-image-renderer: recv_frame: %d\n", rc);
+            rstd_error("waywallen-image-renderer: recv_frame: {}", rc);
             break;
         }
         for (size_t i = 0; i < n_fds; ++i) {
@@ -454,8 +431,7 @@ static int print_caps_json(const Options& opt) {
     ::close(sv[0]); ::close(sv[1]);
 
     if (!got_caps) {
-        std::fprintf(stderr,
-                     "waywallen-image-renderer: did not observe FormatCaps\n");
+        rstd_error("waywallen-image-renderer: did not observe FormatCaps");
         return 1;
     }
 
@@ -519,6 +495,10 @@ static int print_caps_json(const Options& opt) {
 // ---------------------------------------------------------------------------
 
 int main(int argc, char** argv) {
+    static rstd::log::EnvLogger _logger;
+    rstd::log::set_logger(_logger);
+    rstd::log::set_max_level(_logger.filter());
+
     Options opt = parse_args(argc, argv);
 
     if (opt.print_caps) {
@@ -528,15 +508,13 @@ int main(int argc, char** argv) {
     if (opt.vulkan_probe) {
         auto prod_res = wavsen::video::Producer::create(opt.width, opt.height);
         if (prod_res.is_err()) {
-            std::fprintf(stderr, "waywallen-image-renderer: vk_producer: %s\n",
-                         std::move(prod_res).unwrap_err().message.c_str());
+            rstd_error("waywallen-image-renderer: vk_producer: {}",
+                       std::move(prod_res).unwrap_err().message);
             return 1;
         }
         auto prod = std::move(prod_res).unwrap();
-        std::fprintf(stderr,
-                     "waywallen-image-renderer: vulkan_probe ok "
-                     "drm_render=%u:%u\n",
-                     prod->drm_render_major(), prod->drm_render_minor());
+        rstd_info("waywallen-image-renderer: vulkan_probe ok drm_render={}:{}",
+                  prod->drm_render_major(), prod->drm_render_minor());
         return 0;
     }
 
@@ -547,19 +525,16 @@ int main(int argc, char** argv) {
             ww_image::decode_to_rgba(opt.image_path, opt.width, opt.height,
                                      /* extent_mode = */ 0, &derr);
         if (buf.data.empty()) {
-            std::fprintf(stderr,
-                         "waywallen-image-renderer: decode failed: %s\n",
-                         derr.message.c_str());
+            rstd_error("waywallen-image-renderer: decode failed: {}", derr.message);
             return 1;
         }
         uint64_t sum = 0;
         for (uint8_t b : buf.data) sum += b;
-        std::fprintf(stderr,
-                     "waywallen-image-renderer: decoded %ux%u stride=%u "
-                     "bytes=%zu pixel_sum=%llu\n",
-                     buf.width, buf.height, buf.stride,
-                     buf.data.size(),
-                     static_cast<unsigned long long>(sum));
+        rstd_info("waywallen-image-renderer: decoded {}x{} stride={} "
+                  "bytes={} pixel_sum={}",
+                  buf.width, buf.height, buf.stride,
+                  buf.data.size(),
+                  static_cast<unsigned long long>(sum));
         return 0;
     }
 
@@ -577,7 +552,7 @@ int main(int argc, char** argv) {
     HostState host;
     host.sock = ww_bridge_connect(opt.ipc_path.c_str());
     if (host.sock < 0)
-        die("ww_bridge_connect: " + std::string(std::strerror(-host.sock)));
+        die("ww_bridge_connect: " + std::string(::strerror(-host.sock)));
 
     ww_bridge_init_t init {};
     if (int rc = ww_bridge_recv_init(host.sock, &init); rc < 0) {
@@ -660,9 +635,8 @@ int main(int argc, char** argv) {
                 &dt, producer->physical_device(),
                 &pool_init.drm_render_major, &pool_init.drm_render_minor);
             rc != 0) {
-            std::fprintf(stderr,
-                         "waywallen-image-renderer: drm render-node query failed (%d); "
-                         "topology will be unknown to daemon\n", rc);
+            rstd_warn("waywallen-image-renderer: drm render-node query failed ({}); "
+                      "topology will be unknown to daemon", rc);
         }
     }
     pool_init.drm_render_fd         = producer->drm_render_fd();
@@ -679,9 +653,8 @@ int main(int argc, char** argv) {
                                                WW_MEM_HINT_DEVICE_LOCAL | WW_MEM_HINT_HOST_VISIBLE);
         rc != 0)
         die("ww_bridge_pool_advertise_caps failed: " + std::to_string(rc));
-    std::fprintf(stderr,
-                 "waywallen-image-renderer: ready, advertised caps, "
-                 "waiting for NegotiateBuffers\n");
+    rstd_info("waywallen-image-renderer: ready, advertised caps, "
+              "waiting for NegotiateBuffers");
 
     std::thread reader([&]() { reader_loop(host); });
 
