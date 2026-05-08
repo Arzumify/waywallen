@@ -6,7 +6,7 @@
 
 <p align="center"><strong> Wallpaper Manager for Linux </strong></p>
 
-<a href="README.CN.md">中文 README</a>
+<a href="README.CN.md">中文 README</a> · <a href="https://discord.gg/6rx99hx9j">Discord</a>
 
 ---
 
