@@ -38,6 +38,7 @@ struct Options {
     std::string ipc_path;
     std::string video_path;
     std::string render_node;   // e.g. "/dev/dri/renderD128"; empty → auto-pick
+    std::string hwdec;         // selftest: "auto" | "vulkan" | "vaapi" | "none"
     uint32_t    width  { 1920 };
     uint32_t    height { 1080 };
     bool        loop_file { true };
@@ -65,6 +66,7 @@ Options parse_args(int argc, char** argv) {
         else if (a == "--path")        o.video_path = next();
         else if (a == "--no-loop")     o.loop_file = false;
         else if (a == "--render-node") o.render_node = next();
+        else if (a == "--hwdec")       o.hwdec = next();
         else if (a == "--selftest")    { o.selftest = true; o.video_path = next(); }
         // Tolerate other `--key value` extras by skipping the value.
         else if (a.size() >= 2 && a[0] == '-' && a[1] == '-' && i + 1 < argc) {
@@ -97,7 +99,40 @@ struct HostState {
 
     std::atomic<bool>       loop_pending { false };
     std::atomic<bool>       loop_value { true };
+
+    /* hwdec changes are applied at the next file/loop boundary, not
+     * mid-stream — store the pending value here. */
+    std::mutex              hwdec_mu;
+    std::string             pending_hwdec;
+    bool                    hwdec_pending { false };
 };
+
+wavsen::video::HwAccel parse_hwdec(const char* v) {
+    if (!v || !*v)                  return wavsen::video::HwAccel::Auto;
+    if (std::strcmp(v, "vulkan") == 0) return wavsen::video::HwAccel::Vulkan;
+    if (std::strcmp(v, "vaapi")  == 0) return wavsen::video::HwAccel::Vaapi;
+    if (std::strcmp(v, "none")   == 0) return wavsen::video::HwAccel::None;
+    return wavsen::video::HwAccel::Auto;
+}
+
+const char* hwdec_label(wavsen::video::HwAccel h) {
+    switch (h) {
+    case wavsen::video::HwAccel::Auto:   return "auto";
+    case wavsen::video::HwAccel::Vulkan: return "vulkan";
+    case wavsen::video::HwAccel::Vaapi:  return "vaapi";
+    case wavsen::video::HwAccel::None:   return "none";
+    }
+    return "?";
+}
+
+const char* kind_label(wavsen::video::FrameKind k) {
+    switch (k) {
+    case wavsen::video::FrameKind::Sw:           return "sw";
+    case wavsen::video::FrameKind::VulkanShared: return "vulkan-shared";
+    case wavsen::video::FrameKind::VaapiDrm:     return "vaapi-drm";
+    }
+    return "?";
+}
 
 void signal_shutdown(HostState& s) {
     s.shutdown.store(true, std::memory_order_release);
@@ -133,7 +168,9 @@ void apply_control(HostState& host, ww_bridge_control_t& c) {
                 host.loop_value.store(enabled, std::memory_order_release);
                 host.loop_pending.store(true, std::memory_order_release);
             } else if (std::strcmp(key, "hwdec") == 0) {
-                // Iter 2 is sw decode + GPU YUV→RGB; honoured in Iter 4.
+                std::lock_guard<std::mutex> lk(host.hwdec_mu);
+                host.pending_hwdec  = val;
+                host.hwdec_pending  = true;
             } else {
                 rstd_warn("waywallen-video-renderer: ApplySettings: unknown key '{}'; ignoring",
                           static_cast<const char*>(key));
@@ -208,14 +245,20 @@ int run_selftest(const Options& opt) {
     }
     auto yuv = std::move(yuv_res).unwrap();
 
+    wavsen::video::OpenOpts dec_opts {
+        parse_hwdec(opt.hwdec.empty() ? nullptr : opt.hwdec.c_str()),
+        opt.render_node,
+    };
     auto decoder_res = wavsen::video::VideoDecoder::open_with_vk(
-        opt.video_path, even_w, even_h, /*loop=*/false, *producer);
+        opt.video_path, even_w, even_h, /*loop=*/false, *producer, dec_opts);
     if (decoder_res.is_err()) {
         rstd_error("selftest decode: {}",
                    std::move(decoder_res).unwrap_err().message);
         return 1;
     }
     auto decoder = std::move(decoder_res).unwrap();
+    rstd_info("selftest: hwdec={}, decoder kind={}",
+              hwdec_label(dec_opts.hwaccel), kind_label(decoder->kind()));
 
     /* Allocate a private RGBA8 VkImage to convert into. */
     VkImage         dst_img = VK_NULL_HANDLE;
@@ -267,7 +310,8 @@ int run_selftest(const Options& opt) {
 
     /* Decode one frame, convert it. */
     int sync_fd = -1;
-    if (decoder->using_vk_frames()) {
+    const auto kind = decoder->kind();
+    if (kind == wavsen::video::FrameKind::VulkanShared) {
         wavsen::video::VkFrameView vkv {};
         auto fs_res = decoder->next_vk_frame(vkv);
         if (fs_res.is_err()) {
@@ -296,6 +340,30 @@ int run_selftest(const Options& opt) {
         auto cv_res = yuv->convert_av_vk_frame(im, dst_img, even_w, even_h, cm);
         if (cv_res.is_err()) {
             rstd_error("selftest convert: {}",
+                       std::move(cv_res).unwrap_err().message);
+            sync_fd = -1;
+        } else {
+            sync_fd = std::move(cv_res).unwrap();
+        }
+    } else if (kind == wavsen::video::FrameKind::VaapiDrm) {
+        wavsen::video::DrmFrameView drmv {};
+        auto fs_res = decoder->next_drm_frame(drmv);
+        if (fs_res.is_err()) {
+            rstd_error("selftest next_drm_frame: {}",
+                       std::move(fs_res).unwrap_err().message);
+            return 1;
+        }
+        if (std::move(fs_res).unwrap() != wavsen::video::NextFrame::Ok) return 1;
+        rstd_info("selftest drm_prime: {}x{}, modifier=0x{:x}, objects={}, layers={}",
+                  drmv.width, drmv.height,
+                  drmv.objects[0].format_modifier,
+                  drmv.object_count, drmv.layer_count);
+        const auto cm = wavsen::video::make_color_matrix(
+            static_cast<wavsen::video::ColorSpace>(drmv.colorspace),
+            static_cast<wavsen::video::ColorRange>(drmv.color_range));
+        auto cv_res = yuv->convert_drm_prime(drmv, dst_img, even_w, even_h, cm);
+        if (cv_res.is_err()) {
+            rstd_error("selftest convert (drm): {}",
                        std::move(cv_res).unwrap_err().message);
             sync_fd = -1;
         } else {
@@ -334,9 +402,8 @@ int run_selftest(const Options& opt) {
     vkFreeMemory(producer->device(), dst_mem, nullptr);
 
     if (sync_fd < 0) return 1;
-    rstd_info("waywallen-video-renderer: --selftest ok (mode={}, {}x{})",
-              decoder->using_vk_frames() ? "shared-vk" : "sw",
-              even_w, even_h);
+    rstd_info("waywallen-video-renderer: --selftest ok (kind={}, {}x{})",
+              kind_label(decoder->kind()), even_w, even_h);
     return 0;
 }
 
@@ -401,6 +468,10 @@ int main(int argc, char** argv) {
             opt.render_node = v;
         }
     }
+    wavsen::video::HwAccel hwaccel = wavsen::video::HwAccel::Auto;
+    if (const char* v = kv_get(init.settings, "hwdec")) {
+        hwaccel = parse_hwdec(v);
+    }
     ww_bridge_init_free(&init);
     if (opt.video_path.empty())
         die("--path <video-file> is required");
@@ -437,18 +508,23 @@ int main(int argc, char** argv) {
     }
     auto producer = std::move(producer_res).unwrap();
 
-    /* --- Decoder: prefer the shared-VkDevice path that yields AVVkFrames
-     *   directly (zero host bounce). On any setup failure the open helper
-     *   falls back internally to FFmpeg-managed hwdevice + transfer_data,
-     *   which still works through the sw `next_frame` path. */
+    /* --- Decoder: hwaccel chain per the `hwdec` setting (Auto =
+     *   Vulkan → VAAPI → SW). VAAPI takes the render_node path; on any
+     *   per-frame mapping failure we fall through to sw via the helper. */
+    wavsen::video::OpenOpts dec_opts {
+        hwaccel,
+        opt.render_node,
+    };
     auto decoder_res = wavsen::video::VideoDecoder::open_with_vk(
-        opt.video_path, even_w, even_h, opt.loop_file, *producer);
+        opt.video_path, even_w, even_h, opt.loop_file, *producer, dec_opts);
     if (decoder_res.is_err()) {
         die("decode " + opt.video_path + ": "
             + std::move(decoder_res).unwrap_err().message);
     }
     auto decoder = std::move(decoder_res).unwrap();
     host.loop_value.store(opt.loop_file, std::memory_order_release);
+    rstd_info("waywallen-video-renderer: hwdec={}, decoder kind={}",
+              hwdec_label(hwaccel), kind_label(decoder->kind()));
 
     ww_bridge_vk_dt_t vdt {};
     ww_bridge_vk_dt_load(&vdt, vkGetInstanceProcAddr, producer->instance());
@@ -537,14 +613,14 @@ int main(int argc, char** argv) {
     }
 
     rstd_info("waywallen-video-renderer: decoder mode = {}",
-              decoder->using_vk_frames() ? "shared-VkDevice (zero-copy)"
-                                         : "sw → CPU NV12 → GPU upload");
+              kind_label(decoder->kind()));
 
     /* --- Main loop ----------------------------------------------------- */
     uint32_t  slot = 0;
     wavsen::video::Presenter presenter;  // Iter 3: PTS-driven pacing.
     wavsen::video::Nv12Frame frame;
     wavsen::video::VkFrameView vkv {};
+    wavsen::video::DrmFrameView drmv {};
 
     while (!host.shutdown.load(std::memory_order_acquire)) {
         {
@@ -568,6 +644,46 @@ int main(int argc, char** argv) {
             presenter.reset();
         }
 
+        /* hwdec change requested — apply at this loop boundary by
+         * tearing down + reopening the decoder. The reopen runs the
+         * full hwaccel trial again with the new mode. */
+        {
+            std::string new_hwdec;
+            bool         do_reopen = false;
+            {
+                std::lock_guard<std::mutex> lk(host.hwdec_mu);
+                if (host.hwdec_pending) {
+                    new_hwdec  = host.pending_hwdec;
+                    host.hwdec_pending = false;
+                    do_reopen  = true;
+                }
+            }
+            if (do_reopen) {
+                wavsen::video::HwAccel new_h = parse_hwdec(new_hwdec.c_str());
+                if (new_h != hwaccel) {
+                    rstd_info("waywallen-video-renderer: hwdec change {} → {}, reopening decoder",
+                              hwdec_label(hwaccel), hwdec_label(new_h));
+                    decoder.reset();
+                    wavsen::video::OpenOpts new_opts { new_h, opt.render_node };
+                    auto re_res = wavsen::video::VideoDecoder::open_with_vk(
+                        opt.video_path, even_w, even_h,
+                        host.loop_value.load(std::memory_order_acquire),
+                        *producer, new_opts);
+                    if (re_res.is_err()) {
+                        rstd_error("waywallen-video-renderer: reopen failed: {}",
+                                   std::move(re_res).unwrap_err().message);
+                        signal_shutdown(host);
+                        break;
+                    }
+                    decoder = std::move(re_res).unwrap();
+                    hwaccel = new_h;
+                    presenter.reset();
+                    rstd_info("waywallen-video-renderer: reopened, kind={}",
+                              kind_label(decoder->kind()));
+                }
+            }
+        }
+
         if (host.paused.load(std::memory_order_acquire)) {
             std::unique_lock<std::mutex> lk(host.neg_mu);
             host.neg_cv.wait(lk, [&] {
@@ -579,11 +695,20 @@ int main(int argc, char** argv) {
         }
 
         double frame_pts = -1.0;
-        auto fs_res = decoder->using_vk_frames()
-            ? decoder->next_vk_frame(vkv)
-            : decoder->next_frame(frame);
+        const auto fkind = decoder->kind();
+        rstd::Result<wavsen::video::NextFrame, wavsen::video::Error> fs_res =
+            rstd::Ok(wavsen::video::NextFrame::Ok);
+        switch (fkind) {
+        case wavsen::video::FrameKind::VulkanShared:
+            fs_res = decoder->next_vk_frame(vkv); break;
+        case wavsen::video::FrameKind::VaapiDrm:
+            fs_res = decoder->next_drm_frame(drmv); break;
+        case wavsen::video::FrameKind::Sw:
+            fs_res = decoder->next_frame(frame); break;
+        }
         if (fs_res.is_err()) {
-            rstd_error("waywallen-video-renderer: decode error: {}",
+            rstd_error("waywallen-video-renderer: decode error (hwdec={}): {}",
+                       hwdec_label(hwaccel),
                        std::move(fs_res).unwrap_err().message);
             signal_shutdown(host);
             break;
@@ -599,7 +724,11 @@ int main(int argc, char** argv) {
             });
             continue;
         }
-        frame_pts = decoder->using_vk_frames() ? vkv.pts_seconds : frame.pts_seconds;
+        switch (fkind) {
+        case wavsen::video::FrameKind::VulkanShared: frame_pts = vkv.pts_seconds; break;
+        case wavsen::video::FrameKind::VaapiDrm:     frame_pts = drmv.pts_seconds; break;
+        case wavsen::video::FrameKind::Sw:           frame_pts = frame.pts_seconds; break;
+        }
 
         // PTS pacing: sleep until this frame is due. Drop if too late.
         if (!presenter.present_frame(frame_pts)) continue;
@@ -625,13 +754,18 @@ int main(int argc, char** argv) {
         }
 
         int sync_fd = -1;
-        const uint32_t cs_id = decoder->using_vk_frames() ? vkv.colorspace : frame.colorspace;
-        const uint32_t cr_id = decoder->using_vk_frames() ? vkv.color_range : frame.color_range;
+        uint32_t cs_id = 0, cr_id = 0;
+        switch (fkind) {
+        case wavsen::video::FrameKind::VulkanShared: cs_id = vkv.colorspace;  cr_id = vkv.color_range;  break;
+        case wavsen::video::FrameKind::VaapiDrm:     cs_id = drmv.colorspace; cr_id = drmv.color_range; break;
+        case wavsen::video::FrameKind::Sw:           cs_id = frame.colorspace; cr_id = frame.color_range; break;
+        }
         const auto color_matrix = wavsen::video::make_color_matrix(
             static_cast<wavsen::video::ColorSpace>(cs_id),
             static_cast<wavsen::video::ColorRange>(cr_id));
         rstd::Result<int, wavsen::video::Error> cv_res = rstd::Ok(-1);
-        if (decoder->using_vk_frames()) {
+        switch (fkind) {
+        case wavsen::video::FrameKind::VulkanShared: {
             wavsen::video::YuvToRgba::VkFrameImports im {};
             im.y_image          = vkv.img[0];
             im.uv_image         = vkv.plane_count > 1 ? vkv.img[1] : VK_NULL_HANDLE;
@@ -652,12 +786,20 @@ int main(int argc, char** argv) {
             cv_res = yuv->convert_av_vk_frame(
                 im, reinterpret_cast<VkImage>(s.vk_image),
                 s.width, s.height, color_matrix);
-        } else {
+            break;
+        }
+        case wavsen::video::FrameKind::VaapiDrm:
+            cv_res = yuv->convert_drm_prime(
+                drmv, reinterpret_cast<VkImage>(s.vk_image),
+                s.width, s.height, color_matrix);
+            break;
+        case wavsen::video::FrameKind::Sw:
             cv_res = yuv->convert_nv12(
                 reinterpret_cast<VkImage>(s.vk_image),
                 s.width, s.height,
                 frame.data.data(), frame.data.size(),
                 color_matrix);
+            break;
         }
         if (cv_res.is_err()) {
             rstd_error("waywallen-video-renderer: yuv conversion failed: {}",
