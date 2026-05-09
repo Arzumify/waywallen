@@ -21,6 +21,7 @@ use crate::events::GlobalEvent;
 use crate::error::{Error, Result, ResultExt};
 use crate::renderer_manager::{BindSnapshot, RendererHandle};
 use crate::routing::{DisplayHandle, DisplayOutEvent, DisplayRegistration, Router};
+use crate::display::layout::display_point_to_texture;
 use crate::scheduler::ProjectedConfig;
 use crate::sync::{drm_device, FrameRecord};
 
@@ -331,6 +332,11 @@ async fn run_frame_loop(
     // Bind arrives; reset on Unbind so a stale handle doesn't outlive
     // the link.
     let mut bound_renderer: Option<Arc<RendererHandle>> = None;
+    // Latest SetConfig pushed to this display. Used to inverse-map
+    // pointer coords from display-local pixels into renderer-texture
+    // pixels before forwarding. `None` between Unbind and the next
+    // SetConfig — pointer events that race that gap are dropped.
+    let mut latest_config: Option<ProjectedConfig> = None;
 
     let result = loop {
         tokio::select! {
@@ -351,11 +357,13 @@ async fn run_frame_loop(
                 }
                 Some(DisplayOutEvent::Unbind { buffer_generation }) => {
                     bound_renderer = None;
+                    latest_config = None;
                     if let Err(e) = send_unbind(&stream, buffer_generation).await {
                         break Err(e);
                     }
                 }
                 Some(DisplayOutEvent::SetConfig(cfg)) => {
+                    latest_config = Some(cfg.clone());
                     if let Err(e) = send_set_config(&stream, &cfg).await {
                         break Err(e);
                     }
@@ -420,32 +428,40 @@ async fn run_frame_loop(
                     break Ok(());
                 }
                 Some(Ok(Request::PointerMotion { x, y, timestamp_us, modifiers })) => {
-                    if let Some(r) = bound_renderer.as_ref() {
-                        // RendererManager.send_pointer_motion gates on the
-                        // renderer's manifest events list, so unsubscribed
-                        // renderers see nothing.
-                        if let Err(e) = router.renderer_manager()
-                            .send_pointer_motion(&r.id, x, y, timestamp_us, modifiers).await
-                        {
-                            log::debug!("display {display_id}: pointer_motion forward failed: {e}");
+                    if let (Some(r), Some(cfg)) = (bound_renderer.as_ref(), latest_config.as_ref()) {
+                        if let Some((tx, ty)) = display_point_to_texture(x, y, cfg) {
+                            // RendererManager.send_pointer_motion gates on the
+                            // renderer's manifest events list, so unsubscribed
+                            // renderers see nothing.
+                            if let Err(e) = router.renderer_manager()
+                                .send_pointer_motion(&r.id, tx, ty, timestamp_us, modifiers).await
+                            {
+                                log::debug!("display {display_id}: pointer_motion forward failed: {e}");
+                            }
                         }
                     }
                 }
                 Some(Ok(Request::PointerButton { x, y, button, state, timestamp_us, modifiers })) => {
-                    if let Some(r) = bound_renderer.as_ref() {
-                        if let Err(e) = router.renderer_manager()
-                            .send_pointer_button(&r.id, x, y, button, state, timestamp_us, modifiers).await
-                        {
-                            log::debug!("display {display_id}: pointer_button forward failed: {e}");
+                    if let (Some(r), Some(cfg)) = (bound_renderer.as_ref(), latest_config.as_ref()) {
+                        if let Some((tx, ty)) = display_point_to_texture(x, y, cfg) {
+                            if let Err(e) = router.renderer_manager()
+                                .send_pointer_button(&r.id, tx, ty, button, state, timestamp_us, modifiers).await
+                            {
+                                log::debug!("display {display_id}: pointer_button forward failed: {e}");
+                            }
                         }
                     }
                 }
                 Some(Ok(Request::PointerAxis { x, y, delta_x, delta_y, source, timestamp_us, modifiers })) => {
-                    if let Some(r) = bound_renderer.as_ref() {
-                        if let Err(e) = router.renderer_manager()
-                            .send_pointer_axis(&r.id, x, y, delta_x, delta_y, source, timestamp_us, modifiers).await
-                        {
-                            log::debug!("display {display_id}: pointer_axis forward failed: {e}");
+                    if let (Some(r), Some(cfg)) = (bound_renderer.as_ref(), latest_config.as_ref()) {
+                        if let Some((tx, ty)) = display_point_to_texture(x, y, cfg) {
+                            // delta_x/delta_y are scroll quantities, not
+                            // spatial; forward unchanged.
+                            if let Err(e) = router.renderer_manager()
+                                .send_pointer_axis(&r.id, tx, ty, delta_x, delta_y, source, timestamp_us, modifiers).await
+                            {
+                                log::debug!("display {display_id}: pointer_axis forward failed: {e}");
+                            }
                         }
                     }
                 }
