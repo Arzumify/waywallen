@@ -23,7 +23,8 @@ use crate::renderer_manager;
 use crate::routing::{DisplaySnapshot, LibrarySnapshot, RendererSnapshot, RouterEvent};
 use crate::settings::{
     FilterLogicState, SettingsStore, WallpaperAspectFilterState, WallpaperFilterRuleState,
-    WallpaperFilterState, WallpaperIntFilterState, WallpaperStringFilterState,
+    WallpaperFilterState, WallpaperIntFilterState, WallpaperSortRuleState,
+    WallpaperStringFilterState,
 };
 use crate::tasks;
 use crate::AppState;
@@ -541,6 +542,7 @@ fn global_event_to_pb(e: &GlobalEvent, state: &Arc<AppState>) -> Option<pb::Even
             let snap = state.settings.snapshot();
             let filter_state = snap.global.wallpaper_filter.clone();
             let (wallpaper_filters, wallpaper_filter_logics) = filter_state.to_pb();
+            let wallpaper_sorts = WallpaperSortRuleState::vec_to_pb(&snap.global.wallpaper_sorts);
             let layout_defaults = pb::LayoutPrefs {
                 fillmode: fillmode_to_pb(snap.global.layout.fillmode) as i32,
                 align: align_to_pb(snap.global.layout.align) as i32,
@@ -553,6 +555,7 @@ fn global_event_to_pb(e: &GlobalEvent, state: &Arc<AppState>) -> Option<pb::Even
                             as i32,
                         wallpaper_filters,
                         wallpaper_filter_logics,
+                        wallpaper_sorts,
                         layout_defaults: Some(layout_defaults),
                     }),
                     plugins: snap
@@ -1120,6 +1123,7 @@ async fn dispatch_inner(
             let snap = state.settings.snapshot();
             let filter_state = snap.global.wallpaper_filter.clone();
             let (wallpaper_filters, wallpaper_filter_logics) = filter_state.to_pb();
+            let wallpaper_sorts = WallpaperSortRuleState::vec_to_pb(&snap.global.wallpaper_sorts);
             let layout_defaults = pb::LayoutPrefs {
                 fillmode: fillmode_to_pb(snap.global.layout.fillmode) as i32,
                 align: align_to_pb(snap.global.layout.align) as i32,
@@ -1131,6 +1135,7 @@ async fn dispatch_inner(
                         as i32,
                     wallpaper_filters,
                     wallpaper_filter_logics,
+                    wallpaper_sorts,
                     layout_defaults: Some(layout_defaults),
                 }),
                 plugins: snap
@@ -1197,6 +1202,8 @@ async fn dispatch_inner(
                         &g.wallpaper_filters,
                         &g.wallpaper_filter_logics,
                     );
+                    s.global.wallpaper_sorts =
+                        WallpaperSortRuleState::vec_from_pb(&g.wallpaper_sorts);
                     if let Some(ld) = g.layout_defaults.as_ref() {
                         if let Some(fm) = fillmode_from_pb(ld.fillmode) {
                             s.global.layout.fillmode = fm;

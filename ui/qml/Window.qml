@@ -54,9 +54,13 @@ MD.ApplicationWindow {
     ]
 
     readonly property var pageComponents: ["qrc:/waywallen/ui/qml/page/WallpaperPage.qml", "qrc:/waywallen/ui/qml/page/DisplaysPage.qml", "qrc:/waywallen/ui/qml/page/StatusPage.qml",]
+    // Pages that should survive navigation. Wallpapers carries scroll
+    // position, selection, and a non-trivial list query — recreating it
+    // on every visit causes a visible reload churn.
+    readonly property var pageCacheable: [true, false, false]
 
     onCurrentPageChanged: {
-        m_content.replace(m_content.currentItem, pageComponents[currentPage], {});
+        m_content.switchTo(pageComponents[currentPage], {}, pageCacheable[currentPage]);
     }
 
     Component.onCompleted: {
@@ -195,11 +199,10 @@ MD.ApplicationWindow {
             }
 
             // --- Page content ---
-            MD.StackView {
+            MD.PageContainer {
                 id: m_content
                 Layout.fillHeight: true
                 Layout.fillWidth: true
-                // Layout.margins: win.isCompact ? 0 : 8
                 clip: true
                 initialItem: Item {}
 

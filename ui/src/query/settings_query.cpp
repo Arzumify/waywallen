@@ -46,6 +46,11 @@ auto global_to_map(const proto::GlobalSettings& g) -> QVariantMap {
         wallpaper_filter_logics.append(QVariant::fromValue(logic));
     }
     m[u"wallpaperFilterLogics"_s] = wallpaper_filter_logics;
+    QVariantList wallpaper_sorts;
+    for (const auto& sort : g.wallpaperSorts()) {
+        wallpaper_sorts.append(QVariant::fromValue(sort));
+    }
+    m[u"wallpaperSorts"_s] = wallpaper_sorts;
     if (g.hasLayoutDefaults()) {
         m[u"layoutDefaults"_s] = layout_to_map(g.layoutDefaults());
     }
@@ -80,6 +85,11 @@ auto map_to_global(const QVariantMap& m) -> proto::GlobalSettings {
         wallpaper_filter_logics.append(value.value<proto::FilterLogic>());
     }
     g.setWallpaperFilterLogics(wallpaper_filter_logics);
+    QList<proto::WallpaperSortRule> wallpaper_sorts;
+    for (const auto& value : m.value(u"wallpaperSorts"_s).toList()) {
+        wallpaper_sorts.append(value.value<proto::WallpaperSortRule>());
+    }
+    g.setWallpaperSorts(wallpaper_sorts);
     // Round-trip layout_defaults so a single-plugin SettingsSet doesn't
     // wipe the daemon's current LayoutPrefs (fillmode / align /
     // clear_rgba). UI never edits these — it just forwards them.

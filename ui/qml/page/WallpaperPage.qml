@@ -67,6 +67,7 @@ MD.Page {
                         global.wallpaperFilters || [],
                         global.wallpaperFilterLogics || []);
             wallpaperFilterModel.doQuery();
+            root.restoreSortFromSettings(global.wallpaperSorts || []);
         }
     }
 
@@ -137,12 +138,15 @@ MD.Page {
     property bool sortAsc: true
     property WC.wallpaperSortRule emptySortRule
 
-    function applySort() {
+    function _buildSortRule() {
         const rule = emptySortRule;
         rule.key = sortOptions[sortIndex].key;
         rule.direction = sortAsc ? WC.SortDirection.SORT_DIRECTION_ASC
                                  : WC.SortDirection.SORT_DIRECTION_DESC;
-        wallpaperQuery.sorts = [rule];
+        return rule;
+    }
+    function applySort() {
+        wallpaperQuery.sorts = [_buildSortRule()];
     }
     function pickSort(idx) {
         if (idx === sortIndex) {
@@ -151,6 +155,27 @@ MD.Page {
             sortIndex = idx;
             sortAsc = true;
         }
+        applySort();
+        // Persist the new pick. Daemon broadcasts SettingsChanged after
+        // commit; the round-trip is harmless because restoreSortFromSettings
+        // is a no-op when state already matches.
+        const nextGlobal = Object.assign({}, filterSettingsGet.global);
+        nextGlobal.wallpaperSorts = [_buildSortRule()];
+        filterSettingsSet.global = nextGlobal;
+        filterSettingsSet.plugins = filterSettingsGet.plugins;
+        filterSettingsSet.reload();
+    }
+    function restoreSortFromSettings(rules) {
+        if (!rules || rules.length === 0) {
+            // No persisted sort yet — keep whatever defaults are in place
+            // and push them down so the list query has at least one rule.
+            applySort();
+            return;
+        }
+        const r = rules[0];
+        const idx = sortOptions.findIndex(o => o.key === r.key);
+        if (idx >= 0) sortIndex = idx;
+        sortAsc = r.direction !== WC.SortDirection.SORT_DIRECTION_DESC;
         applySort();
     }
 

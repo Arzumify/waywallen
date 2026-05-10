@@ -161,6 +161,9 @@ pub struct GlobalSettings {
         deserialize_with = "deserialize_wallpaper_filter_state"
     )]
     pub wallpaper_filter: WallpaperFilterState,
+
+    #[serde(default)]
+    pub wallpaper_sorts: Vec<WallpaperSortRuleState>,
 }
 
 impl Default for GlobalSettings {
@@ -173,7 +176,39 @@ impl Default for GlobalSettings {
             rotation_secs: 0,
             layout: LayoutDefaults::default(),
             wallpaper_filter: WallpaperFilterState::default(),
+            wallpaper_sorts: Vec::new(),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct WallpaperSortRuleState {
+    pub key: i32,
+    pub direction: i32,
+}
+
+impl WallpaperSortRuleState {
+    pub fn vec_to_pb(
+        v: &[WallpaperSortRuleState],
+    ) -> Vec<crate::control_proto::WallpaperSortRule> {
+        v.iter()
+            .map(|r| crate::control_proto::WallpaperSortRule {
+                key: r.key,
+                direction: r.direction,
+            })
+            .collect()
+    }
+
+    pub fn vec_from_pb(
+        v: &[crate::control_proto::WallpaperSortRule],
+    ) -> Vec<WallpaperSortRuleState> {
+        v.iter()
+            .map(|r| WallpaperSortRuleState {
+                key: r.key,
+                direction: r.direction,
+            })
+            .collect()
     }
 }
 

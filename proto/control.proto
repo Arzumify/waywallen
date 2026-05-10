@@ -683,6 +683,9 @@ message GlobalSettings {
   // UI never has to serialize/parse the editor state itself.
   repeated WallpaperFilterRule wallpaper_filters = 6;
   repeated FilterLogic wallpaper_filter_logics = 7;
+  // Persisted wallpaper-browser sort. Same shape as `WallpaperListRequest.sorts`
+  // (composite, applied in order). Empty ⇒ daemon's default ordering.
+  repeated WallpaperSortRule wallpaper_sorts = 8;
 
   // Note: fps is per-plugin (in PluginSettings) — different renderer
   // engines have different sane defaults, so it's not a global field.
