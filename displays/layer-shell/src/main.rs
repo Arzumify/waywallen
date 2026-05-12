@@ -1442,18 +1442,32 @@ fn run_uds_session(sock: &Path, binding: &OutputBinding) -> Result<()> {
                         gen
                     );
                 } else if let Some(buffer) = pool.get(buffer_index as usize) {
-                    // Throttle commits to compositor vblank: if the
-                    // last frame_callback hasn't fired yet, skip this
-                    // commit (but always ack BufferRelease below so
-                    // the daemon isn't starved). The compositor will
-                    // redraw from whatever buffer is currently
-                    // attached.
-                    if binding.frame_pending.load(Ordering::SeqCst) {
-                        log::trace!(
-                            "[{}] skip commit: frame callback pending",
-                            binding.display_name
-                        );
-                    } else {
+                    // Commit every FrameReady. A previous version
+                    // gated commits on `frame_pending` (cleared by the
+                    // compositor's `wl_callback.done` reply), which is
+                    // the conventional throttle for interactive clients
+                    // that want their producer-side rendering aligned
+                    // to compositor vsync. For a wallpaper layer that
+                    // pattern is wrong:
+                    //   * Producer rate is set by the source video,
+                    //     not the compositor.
+                    //   * COSMIC delivers `wl_callback.done` to
+                    //     layer-shell wallpaper surfaces at very
+                    //     different cadences per output — observed
+                    //     ~6 Hz on a 4K output vs ~18 Hz on a 2K
+                    //     output. The slower output's frame_pending
+                    //     stayed true between FrameReadys, every
+                    //     commit got skipped, the orphaned
+                    //     release_syncobj fds piled up in
+                    //     pending_release_fds, and the daemon's
+                    //     reaper had to force-signal at WAIT_TIMEOUT
+                    //     (~1 Hz) — capping the entire pipeline.
+                    // mpv / gstreamer wlsink commit every frame and
+                    // let the compositor coalesce excess. We do the
+                    // same. `frame_pending` is kept (informational,
+                    // available for future heuristics) but is no
+                    // longer a gate.
+                    {
                         binding.surface.attach(Some(buffer), 0, 0);
 
                         // Map buffer → surface via wp_viewporter when
