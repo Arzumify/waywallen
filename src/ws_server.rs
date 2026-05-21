@@ -26,6 +26,7 @@ use crate::settings::{
     WallpaperIntFilterState, WallpaperSortRuleState, WallpaperStringFilterState,
 };
 use crate::tasks;
+use crate::wallpaper_sort::apply_wallpaper_sorts;
 use crate::AppState;
 
 /// Bind the WebSocket control plane and return the actual local address
@@ -790,27 +791,8 @@ async fn dispatch_inner(
 
             // Build a lookup map: (library.path, item.path) -> item::Model
             // so we can overlay DB media-meta (size/width/height/format) onto
-            // each WallpaperEntry before sending it to the UI. DB read
-            // failures propagate as `Internal` (via anyhow::Error From)
-            // instead of being silently dropped — the caller sees the
-            // actual problem.
-            let db_meta_map: std::collections::HashMap<
-                (String, String),
-                crate::model::entities::item::Model,
-            > = {
-                let libs = repo::list_libraries(&state.db).await?;
-                let lib_path_by_id: std::collections::HashMap<i64, String> =
-                    libs.into_iter().map(|l| (l.id, l.path)).collect();
-                let items = repo::list_items_all(&state.db).await?;
-                items
-                    .into_iter()
-                    .filter_map(|it| {
-                        let lib_path = lib_path_by_id.get(&it.library_id)?.clone();
-                        let item_path = it.path.clone();
-                        Some(((lib_path, item_path), it))
-                    })
-                    .collect()
-            };
+            // each WallpaperEntry before sending it to the UI.
+            let db_meta_map = crate::wallpaper_sort::load_db_meta_map(state).await?;
 
             let raw_entries: Vec<&crate::wallpaper_type::WallpaperEntry> = if r.wp_type.is_empty() {
                 snap.list().iter().collect()
@@ -1119,13 +1101,9 @@ async fn dispatch_inner(
                     .await;
             }
 
-            // Mirror the persistence side-effects that
-            // `control::apply_wallpaper_by_id` performs: locate the
-            // playlist cursor and persist `last_wallpaper` so the
-            // next daemon start can restore. Without this the WS
-            // apply path silently bypasses persistence (D-Bus + the
-            // rotator both go through `control::apply_wallpaper_by_id`
-            // and don't have this hole).
+            // Mirror the persistence side-effects of
+            // `control::apply_wallpaper_by_id`: pin the playlist cursor
+            // so the next sequential/random step has an anchor.
             {
                 let mut q = state.queue.lock().await;
                 q.current = Some(entry.id.clone());
@@ -1145,8 +1123,31 @@ async fn dispatch_inner(
                     }
                 }
             }
+            // Per-display: empty display_ids means "all currently
+            // registered displays" (matches the relink branch above).
+            // Specific list means only those. The global write below
+            // stays as the fallback for displays that have no record
+            // yet (e.g. a brand-new monitor connected for the first
+            // time after restart).
+            let target_ids: Vec<crate::scheduler::DisplayId> = if r.display_ids.is_empty() {
+                state
+                    .router
+                    .snapshot_displays()
+                    .await
+                    .into_iter()
+                    .map(|d| d.id)
+                    .collect()
+            } else {
+                r.display_ids.clone()
+            };
+            let keys = state.router.display_settings_keys(&target_ids).await;
+            let wp_id = entry.id.clone();
             state.settings.update(|s| {
-                s.global.last_wallpaper = Some(entry.id.clone());
+                for (_did, key) in &keys {
+                    let prefs = s.displays.entry(key.clone()).or_default();
+                    prefs.last_wallpaper = Some(wp_id.clone());
+                }
+                s.global.last_wallpaper = Some(wp_id);
             });
             state.settings.flush_now().await;
             // Reset the rotator deadline so a manual apply gets the
@@ -1550,52 +1551,6 @@ fn entry_to_pb(
         width,
         height,
         content_rating,
-    }
-}
-
-// Apply composite sort rules in-place. Rules are applied in reverse so
-// the first rule ends up as the primary key (sort_by is stable).
-fn apply_wallpaper_sorts(
-    entries: &mut [&crate::wallpaper_type::WallpaperEntry],
-    sorts: &[pb::WallpaperSortRule],
-    db_meta_map: &std::collections::HashMap<
-        (String, String),
-        crate::model::entities::item::Model,
-    >,
-) {
-    use std::cmp::Ordering;
-
-    let lookup = |e: &crate::wallpaper_type::WallpaperEntry| {
-        crate::model::sync::relative_under_root(&e.library_root, &e.resource)
-            .and_then(|rel| db_meta_map.get(&(e.library_root.clone(), rel)))
-    };
-
-    for rule in sorts.iter().rev() {
-        let key = match pb::WallpaperSortKey::try_from(rule.key) {
-            Ok(k) if k != pb::WallpaperSortKey::Unspecified => k,
-            _ => continue,
-        };
-        let desc = pb::SortDirection::try_from(rule.direction)
-            == Ok(pb::SortDirection::Desc);
-
-        entries.sort_by(|a, b| {
-            let ord = match key {
-                pb::WallpaperSortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-                pb::WallpaperSortKey::WpType => a.wp_type.cmp(&b.wp_type),
-                pb::WallpaperSortKey::Size => {
-                    let sa = lookup(a).and_then(|m| m.size).or(a.size).unwrap_or(0);
-                    let sb = lookup(b).and_then(|m| m.size).or(b.size).unwrap_or(0);
-                    sa.cmp(&sb)
-                }
-                pb::WallpaperSortKey::LastModified => {
-                    let ma = lookup(a).and_then(|m| m.modified_at).unwrap_or(0);
-                    let mb = lookup(b).and_then(|m| m.modified_at).unwrap_or(0);
-                    ma.cmp(&mb)
-                }
-                pb::WallpaperSortKey::Unspecified => Ordering::Equal,
-            };
-            if desc { ord.reverse() } else { ord }
-        });
     }
 }
 

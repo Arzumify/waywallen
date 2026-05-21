@@ -26,6 +26,7 @@ mod settings;
 mod sync;
 mod tasks;
 mod tray;
+mod wallpaper_sort;
 mod wallpaper_type;
 mod ws_server;
 
@@ -203,6 +204,23 @@ fn resolve_ui_path(explicit: Option<PathBuf>) -> Option<PathBuf> {
         }
     }
     None
+}
+
+async fn recall_for_display(state: &Arc<AppState>, snap: &routing::DisplaySnapshot) {
+    let key = snap.instance_id.as_deref().unwrap_or(&snap.name);
+    let Some(wp_id) = state.settings.resolved_last_wallpaper(key) else {
+        return;
+    };
+    log::info!(
+        "wallpaper recall: display id={} key={key} -> wallpaper {wp_id}",
+        snap.id
+    );
+    if let Err(e) = control::apply_wallpaper_to_displays(state, &wp_id, &[snap.id]).await {
+        log::warn!(
+            "wallpaper recall failed for display id={} key={key}: {e:#}",
+            snap.id
+        );
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -546,9 +564,8 @@ async fn async_main() -> anyhow::Result<()> {
                 }
 
                 // Sources + initial DB sync done. Publish the latched
-                // phase marker; the restore coordinator (separate task)
-                // observes this and the matching DisplayReady marker
-                // before kicking off the actual restore.
+                // phase marker so external observers can tell the
+                // daemon has finished bringing sources online.
                 state_for_task
                     .events
                     .publish(events::GlobalEvent::SourcesReady);
@@ -607,34 +624,73 @@ async fn async_main() -> anyhow::Result<()> {
         );
     }
 
-    // Restore coordinator: gate ONLY on display readiness. The scan
-    // is a pure background task and must not delay restore. If the
-    // saved wallpaper id is missing from the (still-empty) in-memory
-    // snapshot, restore logs and bails — by definition that item is
-    // stale and can stay un-restored until the user picks again.
+    // Restore queue mode + rotation cadence from disk. These don't
+    // depend on display readiness — per-display wallpaper restoration
+    // is event-driven below.
     {
-        let coord_state = state.clone();
-        let restore_last = cli.restore_last;
+        let restore_state = state.clone();
+        state.tasks.spawn_async(
+            tasks::TaskKind::Startup,
+            "startup/restore",
+            async move {
+                control::run_restore(&restore_state)
+                    .await
+                    .map_err(anyhow::Error::from)
+            },
+        );
+    }
+
+    // Wallpaper recall: long-lived watcher that applies each display's
+    // persisted `last_wallpaper` as the display becomes visible. One
+    // path covers both startup and hot-plug (a reconnected monitor
+    // gets a fresh DisplayId so it re-applies). Looks up
+    // `resolved_last_wallpaper(key)` which cascades per-display →
+    // global; an empty global keeps the display blank until the user
+    // picks something.
+    if cli.restore_last {
+        let watcher_state = state.clone();
         state.tasks.spawn_async(
             tasks::TaskKind::Service,
-            "boot/restore-coordinator",
+            "service/wallpaper-recall",
             async move {
-                let mut display_rx = coord_state.events.watch_display_ready();
-                let _ = display_rx.wait_for(|v| *v).await;
-                log::info!("restore coordinator: display registered, settling 2s before restore");
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-                let restore_state = coord_state.clone();
-                coord_state.tasks.spawn_async(
-                    tasks::TaskKind::Startup,
-                    "startup/restore",
-                    async move {
-                        control::run_restore(&restore_state, restore_last)
-                            .await
-                            .map_err(anyhow::Error::from)
-                    },
-                );
-                Ok(())
+                use std::collections::HashSet;
+                let mut seen: HashSet<scheduler::DisplayId> = HashSet::new();
+                // Apply for any displays that registered before we subscribed.
+                for snap in watcher_state.router.snapshot_displays().await {
+                    if seen.insert(snap.id) {
+                        recall_for_display(&watcher_state, &snap).await;
+                    }
+                }
+                let mut events_rx = watcher_state.router.subscribe_events();
+                loop {
+                    match events_rx.recv().await {
+                        Ok(routing::RouterEvent::DisplayUpsert(snap)) => {
+                            if seen.insert(snap.id) {
+                                recall_for_display(&watcher_state, &snap).await;
+                            }
+                        }
+                        Ok(routing::RouterEvent::DisplaysReplace(list)) => {
+                            for snap in list {
+                                if seen.insert(snap.id) {
+                                    recall_for_display(&watcher_state, &snap).await;
+                                }
+                            }
+                        }
+                        Ok(_) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            // Lag: resync from current state. Already-seen ids
+                            // are dropped by the dedupe set.
+                            for snap in watcher_state.router.snapshot_displays().await {
+                                if seen.insert(snap.id) {
+                                    recall_for_display(&watcher_state, &snap).await;
+                                }
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            return Ok(());
+                        }
+                    }
+                }
             },
         );
     }

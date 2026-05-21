@@ -1368,6 +1368,25 @@ impl Router {
             .collect()
     }
 
+    /// For each requested `DisplayId`, return its settings key —
+    /// `instance_id` when present, else `name` (see
+    /// `Self::settings_key_for`). Unknown ids are skipped silently.
+    /// Callers use this to persist per-display state (e.g. the last
+    /// applied wallpaper) keyed the same way `set_display_layout`
+    /// already keys layout overrides.
+    pub async fn display_settings_keys(
+        self: &Arc<Self>,
+        ids: &[DisplayId],
+    ) -> Vec<(DisplayId, String)> {
+        let inner = self.inner.lock().await;
+        ids.iter()
+            .filter_map(|did| {
+                let s = inner.displays.get(did)?;
+                Some((*did, Self::settings_key_for(&s.info).to_string()))
+            })
+            .collect()
+    }
+
     /// Emit a `LibraryUpsert` event so subscribers (UI) refresh their
     /// view. The router no longer caches libraries — the DB is the
     /// source of truth; callers query it directly when they need the
@@ -2177,6 +2196,35 @@ mod tests {
                 d.id
             );
         }
+    }
+
+    fn reg_iid(name: &str, iid: &str) -> DisplayRegistration {
+        DisplayRegistration {
+            name: name.into(),
+            instance_id: Some(iid.into()),
+            width: 1920,
+            height: 1080,
+            refresh_mhz: 60_000,
+            gpu: DrmNode::UNKNOWN,
+            properties: vec![],
+            consumer_caps: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn display_settings_keys_prefers_instance_id() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr);
+
+        let h1 = router.register_display(reg_iid("HDMI-A-1", "uuid-1")).await;
+        let h2 = router.register_display(reg("DP-1", 2560, 1440)).await;
+
+        let keys = router.display_settings_keys(&[h1.id, h2.id]).await;
+        assert_eq!(keys, vec![(h1.id, "uuid-1".into()), (h2.id, "DP-1".into())]);
+
+        // Unknown ids are dropped.
+        let keys = router.display_settings_keys(&[h1.id, 9999]).await;
+        assert_eq!(keys, vec![(h1.id, "uuid-1".into())]);
     }
 
     #[tokio::test]

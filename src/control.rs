@@ -19,6 +19,7 @@ use crate::model::{repo, sync};
 use crate::queue::rotator::RotationConfig;
 use crate::queue::Mode;
 use crate::renderer_manager;
+use crate::scheduler::DisplayId;
 use crate::wallpaper_type::WallpaperEntry;
 use crate::AppState;
 
@@ -31,16 +32,14 @@ pub struct ApplyResult {
     pub entry: WallpaperEntry,
 }
 
-/// Apply a wallpaper by id, with single-flight semantics across the
-/// daemon: only one apply is in flight at a time. A subsequent call
-/// supersedes any in-flight prior call (the prior caller observes
-/// `apply task superseded or cancelled` and the prior renderer-spawn
-/// in progress is dropped, which kills its child via `kill_on_drop`).
-///
-/// This sits on top of `crate::tasks::TaskManager::spawn_async_unique`
-/// using the fixed key `apply/global` — Iter 3 only serializes globally;
-/// per-display keys land when displays can be assigned distinct
-/// wallpapers.
+/// Apply a wallpaper by id to every registered display, with global
+/// single-flight semantics: only one global apply is in flight at a
+/// time. A subsequent call supersedes any in-flight prior call (the
+/// prior caller observes `apply task superseded or cancelled` and the
+/// prior renderer-spawn in progress is dropped, which kills its child
+/// via `kill_on_drop`). The key is `apply/global`; per-display recall
+/// goes through [`apply_wallpaper_to_displays`] which bypasses this
+/// gate so concurrent per-display restores don't cancel each other.
 pub async fn apply_wallpaper_by_id(app: &Arc<AppState>, id: &str) -> Result<ApplyResult> {
     let app_clone = app.clone();
     let id_owned = id.to_string();
@@ -61,9 +60,41 @@ pub async fn apply_wallpaper_by_id(app: &Arc<AppState>, id: &str) -> Result<Appl
         .map_err(|_| Error::Internal(anyhow!("apply task superseded or cancelled")))?
 }
 
+/// Apply a wallpaper to a specific subset of displays. Used by the
+/// hot-plug recall watcher: a freshly-connected display gets its own
+/// persisted assignment restored independently of any other display.
+/// Bypasses the global single-flight key (`apply_wallpaper_by_id`)
+/// so concurrent per-display restores don't cancel each other.
+pub async fn apply_wallpaper_to_displays(
+    app: &Arc<AppState>,
+    id: &str,
+    target: &[DisplayId],
+) -> Result<ApplyResult> {
+    if target.is_empty() {
+        return Err(Error::Internal(anyhow!(
+            "apply_wallpaper_to_displays: empty target"
+        )));
+    }
+    apply_wallpaper_core(app, id, Some(target)).await
+}
+
 /// The actual apply work — spawn renderer, relink displays, kill old
 /// renderers, update playlist. Caller is the unique apply task.
 async fn apply_wallpaper_inner(app: &Arc<AppState>, id: &str) -> Result<ApplyResult> {
+    apply_wallpaper_core(app, id, None).await
+}
+
+/// Shared core for both the global apply path (target=None → all
+/// currently-registered displays get re-pointed) and the per-display
+/// path (target=Some(ids) → only those displays). Spawns / reuses the
+/// renderer, performs the relink, and persists `last_wallpaper` both
+/// per-display and globally (the global value is a fallback for
+/// brand-new displays that have no saved record yet).
+async fn apply_wallpaper_core(
+    app: &Arc<AppState>,
+    id: &str,
+    target: Option<&[DisplayId]>,
+) -> Result<ApplyResult> {
     // Render-target hint comes from settings.global; same path as the
     // WS apply RPC. Hardcoding (0, 0, AS_GIVEN) here would let the
     // renderer subprocess fall back to its built-in default and break
@@ -85,11 +116,10 @@ async fn apply_wallpaper_inner(app: &Arc<AppState>, id: &str) -> Result<ApplyRes
         .map(|def| def.name.clone())
         .ok_or_else(|| Error::NoRendererForType(entry.wp_type.clone()))?;
 
-    // The D-Bus + rotator entry point always relinks every display
-    // to the new renderer (relink_all_displays_to below). That means
-    // every pre-existing renderer ends up with zero enabled links. We
-    // stop them *before* spawning the new one so peak VRAM stays at
-    // one renderer's working set instead of overlapping two.
+    // Global apply re-points every display; per-display apply only
+    // re-points its targets. Stop any pre-existing renderer whose
+    // every enabled link is in our target set BEFORE spawning so peak
+    // VRAM stays at one working set's worth instead of overlapping.
     //
     // Ordering matters for cross-process Vulkan correctness:
     //   1. Arm unbind-ack tracking on the doomed renderers.
@@ -103,7 +133,7 @@ async fn apply_wallpaper_inner(app: &Arc<AppState>, id: &str) -> Result<ApplyRes
     //      timeout). The producer's clean exit drains its device
     //      (via the bridge's wait_idle vfunc), so its acquire
     //      dma_fence signals normally instead of being kernel-cancelled.
-    let to_stop = app.router.renderers_fully_replaced_by(None).await;
+    let to_stop = app.router.renderers_fully_replaced_by(target).await;
     if !to_stop.is_empty() {
         // 1 s ack timeout: the consumer's unbind_done is sent
         // synchronously from handle_unbind after the textures_releasing
@@ -153,15 +183,29 @@ async fn apply_wallpaper_inner(app: &Arc<AppState>, id: &str) -> Result<ApplyRes
     // it typed Error). The blanket `From<anyhow::Error>` lands this in
     // `Error::Internal`; once Phase 3 ships, the typed
     // `RendererSpawnFailed` will flow through automatically.
-    let renderer_id = app
-        .renderer_manager
-        .spawn(spawn_req)
-        .await
-        .map_err(|e| Error::RendererSpawnFailed(e.to_string()))?;
-    if let Some(handle) = app.renderer_manager.get(&renderer_id).await {
-        app.router.register_renderer(handle).await;
+    // Renderer reuse: if a live renderer already matches the spawn
+    // request (same wp_type / extent / extras), reuse it instead of
+    // re-spawning. Matches the WS apply path so the hot-plug recall
+    // of multiple displays onto the same wallpaper doesn't spawn one
+    // renderer per display.
+    let renderer_id = match app.renderer_manager.find_reusable(&spawn_req).await {
+        Some(existing) => existing,
+        None => {
+            let new_id = app
+                .renderer_manager
+                .spawn(spawn_req)
+                .await
+                .map_err(|e| Error::RendererSpawnFailed(e.to_string()))?;
+            if let Some(handle) = app.renderer_manager.get(&new_id).await {
+                app.router.register_renderer(handle).await;
+            }
+            new_id
+        }
+    };
+    match target {
+        None => app.router.relink_all_displays_to(&renderer_id).await,
+        Some(ids) => app.router.relink_displays_to(ids, &renderer_id).await,
     }
-    app.router.relink_all_displays_to(&renderer_id).await;
 
     {
         let mut q = app.queue.lock().await;
@@ -181,14 +225,33 @@ async fn apply_wallpaper_inner(app: &Arc<AppState>, id: &str) -> Result<ApplyRes
         }
     }
 
+    // Persist per-display (the actual targets) plus the global
+    // fallback (used by displays that have no saved record yet — e.g.
+    // a monitor connected for the first time).
+    let target_ids: Vec<DisplayId> = match target {
+        None => app
+            .router
+            .snapshot_displays()
+            .await
+            .into_iter()
+            .map(|d| d.id)
+            .collect(),
+        Some(ids) => ids.to_vec(),
+    };
+    let keys = app.router.display_settings_keys(&target_ids).await;
+    let wp_id = entry.id.clone();
     app.settings.update(|s| {
-        s.global.last_wallpaper = Some(entry.id.clone());
+        for (_did, key) in &keys {
+            let prefs = s.displays.entry(key.clone()).or_default();
+            prefs.last_wallpaper = Some(wp_id.clone());
+        }
+        s.global.last_wallpaper = Some(wp_id);
     });
     // Push the just-applied wallpaper to disk synchronously instead of
     // waiting on the 2s debounce. A kill / SIGTERM inside the debounce
-    // window would otherwise lose `last_wallpaper`, which is exactly
-    // the value the next start needs to reproduce playback. flush_now
-    // is a cheap no-op when nothing actually changed.
+    // window would otherwise lose the per-display assignment, which is
+    // exactly the value the next start needs to reproduce playback.
+    // flush_now is a cheap no-op when nothing actually changed.
     app.settings.flush_now().await;
     crate::dbus_iface::notify_current_wallpaper_id_changed(app).await;
 
@@ -197,45 +260,73 @@ async fn apply_wallpaper_inner(app: &Arc<AppState>, id: &str) -> Result<ApplyRes
 
 /// Advance the queue cursor by `delta` and apply the result.
 ///
-/// Sequential / Random go straight to the DB via the active filter
-/// (`settings.global.wallpaper_filter`). Shuffle materializes a round
-/// of matching DB ids on first entry / wrap, then walks it in memory.
-/// The rotator (rotation tick) calls this with `delta = 1`.
+/// Sequential honors `settings.global.wallpaper_sorts` so D-Bus
+/// next/previous walk the same order the UI's wallpaper list shows.
+/// Random / Shuffle ignore sort order by design.
 pub async fn step(app: &Arc<AppState>, delta: i32) -> Result<String> {
-    use crate::model::repo::{StepDirection, QueueRow};
+    use crate::model::repo::QueueRow;
     use crate::queue::Mode;
 
     let (filters, logics) = app.settings.global().wallpaper_filter.to_pb();
+    let sorts = crate::settings::WallpaperSortRuleState::vec_to_pb(
+        &app.settings.global().wallpaper_sorts,
+    );
     let mode = app.queue.lock().await.mode;
 
-    let row: QueueRow = match mode {
-        Mode::Sequential => {
-            let after = app.queue.lock().await.last_db_id;
-            let dir = if delta >= 0 {
-                StepDirection::Forward
-            } else {
-                StepDirection::Backward
-            };
-            repo::next_item_by_filter(&app.db, &filters, &logics, after, dir)
-                .await?
-                .ok_or_else(|| Error::FailedPrecondition("queue is empty".into()))?
-        }
+    let entry_id: String = match mode {
+        Mode::Sequential => step_sequential(app, delta, &filters, &logics, &sorts).await?,
         Mode::Random => {
             let exclude = app.queue.lock().await.last_db_id;
-            repo::random_item_by_filter(&app.db, &filters, &logics, exclude)
+            let row: QueueRow = repo::random_item_by_filter(&app.db, &filters, &logics, exclude)
                 .await?
-                .ok_or_else(|| Error::FailedPrecondition("queue is empty".into()))?
+                .ok_or_else(|| Error::FailedPrecondition("queue is empty".into()))?;
+            bridge_to_entry_id(app, &row).await?
         }
-        Mode::Shuffle => step_shuffle(app, &filters, &logics, delta).await?,
+        Mode::Shuffle => {
+            let row = step_shuffle(app, &filters, &logics, delta).await?;
+            bridge_to_entry_id(app, &row).await?
+        }
     };
 
-    let entry_id = bridge_to_entry_id(app, &row).await?;
     apply_wallpaper_by_id(app, &entry_id).await?;
     // Reset the rotator deadline so the user gets the full quiet
     // window after a manual advance instead of being walked over by
     // the next auto tick.
     app.rotation.kick();
     Ok(entry_id)
+}
+
+/// Walk the sorted+filtered entry list by `delta`. Wraps with
+/// `rem_euclid`. If the current entry isn't in the list (filtered out,
+/// or first-ever call), starts at index 0 for delta>=0 and len-1 for
+/// delta<0.
+async fn step_sequential(
+    app: &Arc<AppState>,
+    delta: i32,
+    filters: &[crate::control_proto::WallpaperFilterRule],
+    logics: &[crate::control_proto::FilterLogic],
+    sorts: &[crate::control_proto::WallpaperSortRule],
+) -> Result<String> {
+    let ordered = crate::wallpaper_sort::ordered_entry_ids(app, filters, logics, sorts).await?;
+    if ordered.is_empty() {
+        return Err(Error::FailedPrecondition("queue is empty".into()));
+    }
+    let len = ordered.len() as i64;
+    let current = app.queue.lock().await.current.clone();
+    let cur_idx = current
+        .as_deref()
+        .and_then(|c| ordered.iter().position(|id| id == c));
+    let next_idx = match cur_idx {
+        Some(i) => ((i as i64) + delta as i64).rem_euclid(len) as usize,
+        None => {
+            if delta >= 0 {
+                0
+            } else {
+                (len - 1) as usize
+            }
+        }
+    };
+    Ok(ordered[next_idx].clone())
 }
 
 /// Bridge a DB row to a snapshot entry id (the `WallpaperApply`
@@ -377,29 +468,15 @@ pub async fn queue_status(app: &Arc<AppState>) -> QueueStatus {
     }
 }
 
-/// Restore the persisted wallpaper + queue state. Idempotent —
-/// callable on demand if a future feature wants to "re-load saved
-/// state" without a full daemon restart. Publishes `RestoreApplied`
-/// or `RestoreFailed` on the global event bus on completion so
-/// observers (logs, integration tests, future UI status) can react.
-pub async fn run_restore(app: &Arc<AppState>, restore_last: bool) -> Result<()> {
+/// Restore queue mode + rotation cadence from disk. Idempotent.
+///
+/// Wallpaper restoration is event-driven elsewhere: a long-lived
+/// watcher subscribes to `RouterEvent::DisplayUpsert` and applies
+/// each display's persisted wallpaper (per-display → global fallback)
+/// as the display becomes visible. This covers both startup and
+/// hot-plug. See `restore_watcher` in `main.rs`.
+pub async fn run_restore(app: &Arc<AppState>) -> Result<()> {
     use crate::events::GlobalEvent;
-
-    let mut applied: Option<String> = None;
-
-    if restore_last {
-        if let Some(last_id) = app.settings.global().last_wallpaper.clone() {
-            log::info!("restoring last wallpaper: {last_id}");
-            match apply_wallpaper_by_id(app, &last_id).await {
-                Ok(_) => applied = Some(last_id),
-                Err(e) => {
-                    log::warn!("failed to restore last wallpaper: {e:#}");
-                    app.events
-                        .publish(GlobalEvent::RestoreFailed(format!("apply: {e:#}")));
-                }
-            }
-        }
-    }
 
     let g = app.settings.global();
     if let Some(mode) = crate::queue::Mode::from_str(&g.queue_mode) {
@@ -409,48 +486,8 @@ pub async fn run_restore(app: &Arc<AppState>, restore_last: bool) -> Result<()> 
         app.rotation.set_interval(g.rotation_secs);
     }
 
-    app.events.publish(GlobalEvent::RestoreApplied(applied));
+    app.events.publish(GlobalEvent::RestoreApplied(None));
     Ok(())
-}
-
-/// Block until at least one display is registered with the router
-/// (or `timeout` elapses, whichever comes first). Returns `true` if
-/// a display is up by the time we return, `false` on timeout.
-///
-/// Used by the startup-restore path so applying the saved wallpaper
-/// doesn't race the display backend's first connect — without this
-/// gate the renderer spawns into a vacuum, the relink-all-displays
-/// step is a no-op (no displays yet), and the wallpaper never
-/// actually shows up on screen.
-pub async fn wait_for_display(app: &Arc<AppState>, timeout: Duration) -> bool {
-    // Fast path: a display is already registered (e.g. KDE wallpaper
-    // plugin connected before the startup task got around to running).
-    if !app.router.snapshot_displays().await.is_empty() {
-        return true;
-    }
-    let mut events = app.router.subscribe_events();
-    let deadline = tokio::time::sleep(timeout);
-    tokio::pin!(deadline);
-    loop {
-        tokio::select! {
-            _ = &mut deadline => return false,
-            evt = events.recv() => match evt {
-                Ok(crate::routing::RouterEvent::DisplayUpsert(_)) => return true,
-                Ok(crate::routing::RouterEvent::DisplaysReplace(list)) if !list.is_empty() => {
-                    return true;
-                }
-                Ok(_) => continue,
-                Err(_) => {
-                    // Broadcast lag or channel close — fall back to a
-                    // direct snapshot. Either we missed the upsert
-                    // event (and the snapshot is now non-empty, return
-                    // true) or the router shut down (snapshot empty,
-                    // restore won't help anyway).
-                    return !app.router.snapshot_displays().await.is_empty();
-                }
-            }
-        }
-    }
 }
 
 /// Auto-rotation task body. Lives here (not in `playlist::rotator`)

@@ -62,6 +62,11 @@ pub struct DisplayPrefs {
     pub rotation: Option<Rotation>,
     pub autopause_mode: Option<AutopauseMode>,
     pub autopause_resume_ms: Option<u32>,
+    /// Last wallpaper id applied to this display, persisted so the
+    /// daemon can restore the per-display assignment on restart or
+    /// when the display re-connects mid-session. `None` falls back to
+    /// `GlobalSettings::last_wallpaper`.
+    pub last_wallpaper: Option<String>,
 }
 
 impl DisplayPrefs {
@@ -71,6 +76,7 @@ impl DisplayPrefs {
             && self.rotation.is_none()
             && self.autopause_mode.is_none()
             && self.autopause_resume_ms.is_none()
+            && self.last_wallpaper.is_none()
     }
 }
 
@@ -622,6 +628,20 @@ impl SettingsStore {
         }
     }
 
+    /// Per-display wallpaper id with fallback to the global
+    /// `last_wallpaper`. The hot-plug recall watcher and the startup
+    /// restorer both go through this helper so the cascade is in one
+    /// place.
+    pub fn resolved_last_wallpaper(&self, display_key: &str) -> Option<String> {
+        let g = self.inner.read().expect("settings poisoned");
+        if let Some(prefs) = g.displays.get(display_key) {
+            if let Some(id) = &prefs.last_wallpaper {
+                return Some(id.clone());
+            }
+        }
+        g.global.last_wallpaper.clone()
+    }
+
     /// Snapshot just the per-display preferences (cloned). Used to
     /// expose the override map over the control plane (e.g.
     /// `DisplayInfo.layout_override` in protobuf).
@@ -972,8 +992,7 @@ fillmode = "preserve_aspect_fit"
                 "eDP-1".into(),
                 DisplayPrefs {
                     fillmode: Some(FillMode::PreserveAspectCrop),
-                    align: None,
-                    rotation: None,
+                    ..Default::default()
                 },
             );
         });
@@ -981,6 +1000,52 @@ fillmode = "preserve_aspect_fit"
         let r = store.resolved_layout("eDP-1");
         assert_eq!(r.fillmode, FillMode::PreserveAspectCrop); // override
         assert_eq!(r.align, Align::Bottom); // global
+    }
+
+    #[test]
+    fn display_prefs_is_empty_tracks_last_wallpaper() {
+        let mut p = DisplayPrefs::default();
+        assert!(p.is_empty());
+        p.last_wallpaper = Some("wp-1".into());
+        assert!(!p.is_empty());
+        p.last_wallpaper = None;
+        assert!(p.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolved_last_wallpaper_prefers_per_display_then_global() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let store = SettingsStore::load_or_default(path).await;
+
+        // Neither global nor per-display set => None.
+        assert_eq!(store.resolved_last_wallpaper("HDMI-A-1"), None);
+
+        // Only global set => returned for any key.
+        store.update(|s| s.global.last_wallpaper = Some("wp-global".into()));
+        assert_eq!(
+            store.resolved_last_wallpaper("HDMI-A-1").as_deref(),
+            Some("wp-global"),
+        );
+
+        // Per-display override wins; other displays keep falling back.
+        store.update(|s| {
+            s.displays.insert(
+                "HDMI-A-1".into(),
+                DisplayPrefs {
+                    last_wallpaper: Some("wp-a".into()),
+                    ..Default::default()
+                },
+            );
+        });
+        assert_eq!(
+            store.resolved_last_wallpaper("HDMI-A-1").as_deref(),
+            Some("wp-a"),
+        );
+        assert_eq!(
+            store.resolved_last_wallpaper("DP-2").as_deref(),
+            Some("wp-global"),
+        );
     }
 
     #[test]

@@ -398,12 +398,6 @@ pub struct QueueRow {
     pub item_path: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StepDirection {
-    Forward,
-    Backward,
-}
-
 /// Total count of items matching the filter.
 pub async fn count_items_by_filter(
     db: &DatabaseConnection,
@@ -435,84 +429,6 @@ pub async fn list_item_ids_by_filter(
         .await
         .context("select filtered item ids")?;
     Ok(rows.into_iter().map(|it| it.id).collect())
-}
-
-/// Sequential cursor step. Returns the next item strictly after
-/// `after_id` in stable order; wraps around to the first/last row
-/// when no item is past the cursor. `after_id = None` ⇒ start from
-/// the first row.
-pub async fn next_item_by_filter(
-    db: &DatabaseConnection,
-    filters: &[crate::control_proto::WallpaperFilterRule],
-    logics: &[crate::control_proto::FilterLogic],
-    after_id: Option<i64>,
-    direction: StepDirection,
-) -> Result<Option<QueueRow>> {
-    use sea_orm::Condition;
-
-    let cond = filter::wallpaper_filters_to_condition(filters, logics);
-
-    // First attempt: strict cursor advancement.
-    let cursor_cond = after_id.map(|id| match direction {
-        StepDirection::Forward => item::Column::Id.gt(id),
-        StepDirection::Backward => item::Column::Id.lt(id),
-    });
-
-    let combined = match (cond.clone(), cursor_cond.clone()) {
-        (Some(c), Some(extra)) => Some(c.add(extra)),
-        (Some(c), None) => Some(c),
-        (None, Some(extra)) => Some(Condition::all().add(extra)),
-        (None, None) => None,
-    };
-
-    let mut query = item::Entity::find().find_also_related(library::Entity);
-    if let Some(c) = combined {
-        query = query.filter(c);
-    }
-    let row = match direction {
-        StepDirection::Forward => query
-            .order_by_asc(item::Column::Id)
-            .one(db)
-            .await
-            .context("next_item_by_filter forward")?,
-        StepDirection::Backward => query
-            .order_by_desc(item::Column::Id)
-            .one(db)
-            .await
-            .context("next_item_by_filter backward")?,
-    };
-    if let Some((it, Some(lib))) = row {
-        return Ok(Some(QueueRow {
-            item_id: it.id,
-            library_path: lib.path,
-            item_path: it.path,
-        }));
-    }
-
-    // Wrap: pick first/last matching item ignoring the cursor.
-    let mut query = item::Entity::find().find_also_related(library::Entity);
-    if let Some(c) = cond {
-        query = query.filter(c);
-    }
-    let row = match direction {
-        StepDirection::Forward => query
-            .order_by_asc(item::Column::Id)
-            .one(db)
-            .await
-            .context("next_item_by_filter forward wrap")?,
-        StepDirection::Backward => query
-            .order_by_desc(item::Column::Id)
-            .one(db)
-            .await
-            .context("next_item_by_filter backward wrap")?,
-    };
-    Ok(row.and_then(|(it, lib)| {
-        lib.map(|lib| QueueRow {
-            item_id: it.id,
-            library_path: lib.path,
-            item_path: it.path,
-        })
-    }))
 }
 
 /// Random sample. `exclude_id` is the current cursor, omitted from the
@@ -1217,36 +1133,6 @@ mod tests {
             ids.push(it.id);
         }
         (db, ids)
-    }
-
-    #[tokio::test]
-    async fn next_item_by_filter_walks_then_wraps() {
-        let (db, ids) = seed_queue_db().await;
-        let row = next_item_by_filter(&db, &[], &[], None, StepDirection::Forward)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.item_id, ids[0]);
-
-        let row = next_item_by_filter(&db, &[], &[], Some(ids[1]), StepDirection::Forward)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.item_id, ids[2]);
-
-        // Past the end → wrap to first.
-        let row = next_item_by_filter(&db, &[], &[], Some(ids[2]), StepDirection::Forward)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.item_id, ids[0]);
-
-        // Backward from the first → wrap to last.
-        let row = next_item_by_filter(&db, &[], &[], Some(ids[0]), StepDirection::Backward)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.item_id, ids[2]);
     }
 
     #[tokio::test]
