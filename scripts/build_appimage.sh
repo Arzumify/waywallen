@@ -269,12 +269,16 @@ cp -v "$CONDA_PREFIX/lib/libgcc_s.so.1" "$APPDIR/usr/lib/"
 pushd "$APPDIR"
 cp -rv ./usr/lib/qt6/qml/. ./usr/qml/
 rm -rf ./usr/lib/qt6
-rm -rf ./lib/libQt6QuickDialogs*
-rm -rf ./lib/libvulkan.so.1 ./lib/libva*
-rm -rf ./lib/libgcc_s.so.1
-rm -rf ./lib/libdbus-1.so.3
-rm -rf ./lib/libkrb5*
-rm -rf ./lib/*.a
+rm -rf ./usr/lib/libQt6QuickDialogs*
+rm -rf ./usr/lib/libvulkan.so.1 ./lib/libva*
+rm -rf ./usr/lib/libgcc_s.so.1
+rm -rf ./usr/lib/libdbus-1.so.3
+rm -rf ./usr/lib/libcom_err.so.3
+rm -rf ./usr/lib/libkrb5*
+rm -rf ./usr/lib/libk5crypto.so.3
+rm -rf ./usr/lib/libgssapi_krb5*
+rm -rf ./usr/lib/libxkbcommon*
+rm -rf ./usr/lib/*.a
 popd
 
 # ---- 8. Drop unused QuickControls2 styles (native libs + QML modules) ----

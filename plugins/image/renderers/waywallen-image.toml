@@ -3,7 +3,7 @@ name = "waywallen-image"
 bin = "../../../bin/waywallen-image-renderer"
 types = ["image"]
 priority = 100
-version = "0.1.5"
+version = "0.1.6"
 spawn_version = 5
 
 [renderer.settings]

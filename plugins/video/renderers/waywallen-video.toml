@@ -12,7 +12,7 @@ name = "waywallen-video"
 bin = "../../../bin/waywallen-video-renderer"
 types = ["video"]
 priority = 100
-version = "0.1.5"
+version = "0.1.6"
 spawn_version = 5
 
 [renderer.settings]
