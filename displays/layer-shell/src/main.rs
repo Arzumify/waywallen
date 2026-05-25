@@ -1531,10 +1531,12 @@ fn run_uds_session(sock: &Path, binding: &OutputBinding) -> Result<()> {
     let mut buf_height: u32 = height;
     let mut frames_presented: u64 = 0;
     // Latest SetConfig values, applied on each FrameReady commit.
-    // Units are buffer pixels (source) / surface logical pixels (dest) /
-    // wl_output::Transform enum index (transform).
+    // Source is in raw buffer (renderer texture) coords; transform is the
+    // wl_output::transform enum index. The daemon's dest_rect is in
+    // eff_disp coords and currently always full-screen — the layer
+    // surface fills the configured logical size, so we use that
+    // directly and don't cache dest.
     let mut cfg_source: Option<(f32, f32, f32, f32)> = None;
-    let mut cfg_dest_size: Option<(f32, f32)> = None;
     let mut cfg_transform: u32 = 0;
     // Set once on first SetConfig (or first FrameReady with defaults)
     // so we only call `set_buffer_transform` when it actually changes.
@@ -1614,7 +1616,6 @@ fn run_uds_session(sock: &Path, binding: &OutputBinding) -> Result<()> {
                 ..
             } => {
                 cfg_source = Some((source_rect.x, source_rect.y, source_rect.w, source_rect.h));
-                cfg_dest_size = Some((dest_rect.w, dest_rect.h));
                 if cfg_transform != transform {
                     cfg_transform = transform;
                     transform_dirty = true;
@@ -1715,14 +1716,32 @@ fn run_uds_session(sock: &Path, binding: &OutputBinding) -> Result<()> {
                         // available. Source defaults to the full buffer;
                         // SetConfig can crop. Destination defaults to
                         // the logical surface size; SetConfig can shrink.
-                        let src =
+                        let src_pre =
                             cfg_source.unwrap_or((0.0, 0.0, buf_width as f32, buf_height as f32));
+                        // The daemon computes source in pre-rotation buffer (renderer
+                        // texture) coords. After set_buffer_transform, wp_viewport.set_source
+                        // is in POST-transform coords, with the buffer's effective dims
+                        // swapped for transform=1/3. Passing raw coords trips out_of_buffer
+                        // on rotated configs → surface dies → process exits → respawn loop.
+                        let src = rotate_rect_pre_to_post(
+                            src_pre,
+                            buf_width as f32,
+                            buf_height as f32,
+                            cfg_transform,
+                        );
+                        // The layer surface is screen-aligned and anchored to all 4 edges,
+                        // so it always covers the logical screen size regardless of buffer
+                        // rotation. set_destination takes surface-local logical coords —
+                        // use the configure'd logical size directly. The daemon's dest_rect
+                        // is in eff_disp coords (swapped under rotation, physical pixels);
+                        // converting it would yield the same value for full-screen layouts
+                        // anyway, and there is no way to draw to a sub-rect of a layer.
                         let logical = binding
                             .logical_size
                             .lock()
                             .unwrap()
                             .unwrap_or((buf_width, buf_height));
-                        let dest = cfg_dest_size.unwrap_or((logical.0 as f32, logical.1 as f32));
+                        let dest = (logical.0 as f32, logical.1 as f32);
 
                         if let Some(vp) = binding.viewport.as_ref() {
                             // wayland-scanner maps `fixed` args to f64.
@@ -1816,6 +1835,25 @@ fn map_transform(t: u32) -> Transform {
         6 => Transform::Flipped180,
         7 => Transform::Flipped270,
         _ => Transform::Normal,
+    }
+}
+
+/// Map a rect from pre-buffer_transform (raw buffer / texture) coords
+/// to the post-buffer_transform coord system wp_viewport.set_source
+/// expects. `ref_w`/`ref_h` are the raw buffer dims. Only the 4
+/// non-flipped wl_output.transform values are supported (the daemon
+/// never produces the flipped variants).
+fn rotate_rect_pre_to_post(
+    (x, y, w, h): (f32, f32, f32, f32),
+    ref_w: f32,
+    ref_h: f32,
+    transform: u32,
+) -> (f32, f32, f32, f32) {
+    match transform {
+        1 => (ref_h - y - h, x, h, w),
+        2 => (ref_w - x - w, ref_h - y - h, w, h),
+        3 => (y, ref_w - x - w, h, w),
+        _ => (x, y, w, h),
     }
 }
 

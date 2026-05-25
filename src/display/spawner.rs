@@ -242,8 +242,11 @@ pub fn should_daemon_spawn(outcome: &PickOutcome) -> bool {
 // Subprocess supervision
 // ---------------------------------------------------------------------------
 
-/// Initial restart delay after a backend exits unexpectedly.
-const RESTART_INITIAL: Duration = Duration::from_millis(250);
+/// Initial restart delay after a backend exits unexpectedly. Kept
+/// generous so a crashing backend (e.g. a protocol error from a bad
+/// SetConfig) doesn't burn CPU on rapid respawns — a real fix needs
+/// log inspection, not a 4-Hz restart loop.
+const RESTART_INITIAL: Duration = Duration::from_secs(2);
 /// Upper bound on the exponential backoff.
 const RESTART_MAX: Duration = Duration::from_secs(10);
 
