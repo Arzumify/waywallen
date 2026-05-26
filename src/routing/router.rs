@@ -253,6 +253,19 @@ struct Inner {
     /// Play/Pause diff when ref_counts change so we never send the
     /// same control twice.
     paused_renderers: std::collections::HashSet<RendererId>,
+    /// Set when the screen-saver / lock-screen is active. Causes all
+    /// renderers to pause regardless of per-display window-state when
+    /// `AutopauseDefaults::pause_on_lock` is enabled.
+    session_locked: bool,
+    /// Set when the current login session is inactive (user switched to
+    /// another session). Causes all renderers to pause when
+    /// `AutopauseDefaults::pause_on_user_switch` is enabled.
+    session_inactive: bool,
+    /// Generation counter for the session-pause debounce timer. Bumped
+    /// on every session-state transition; the pending resume task
+    /// carries the snapshot taken at spawn time and is a no-op if the
+    /// counter has advanced (i.e. a newer transition invalidated it).
+    session_gen: u64,
     /// Timestamp of the Pause transition for each paused renderer.
     /// Consumed by the reaper task to enforce `IDLE_KILL_TIMEOUT`.
     paused_since: HashMap<RendererId, Instant>,
@@ -319,6 +332,9 @@ impl Router {
                 unbind_acks_pending: HashMap::new(),
                 next_display_id: 0,
                 next_config_generation: 0,
+                session_locked: false,
+                session_inactive: false,
+                session_gen: 0,
             }),
             mgr,
             events_tx,
@@ -1085,6 +1101,85 @@ impl Router {
         }
     }
 
+    /// Update the session-level pause state driven by the
+    /// `session_monitor` task. Pass `Some(true/false)` to flip a flag;
+    /// `None` leaves it unchanged.
+    ///
+    /// Pause transitions are immediate. Resume transitions (both flags
+    /// becoming `false`) are held for `resume_ms` so that a brief
+    /// lock→unlock→lock flap doesn't restart renderers unnecessarily.
+    pub async fn update_session_state(
+        self: &Arc<Self>,
+        locked: Option<bool>,
+        inactive: Option<bool>,
+    ) {
+        enum Action {
+            ScheduleResume { gen: u64, ms: u32 },
+            Reconcile,
+            Noop,
+        }
+        let action = {
+            let mut inner = self.inner.lock().await;
+            let mut changed = false;
+            if let Some(v) = locked {
+                if inner.session_locked != v {
+                    inner.session_locked = v;
+                    changed = true;
+                }
+            }
+            if let Some(v) = inactive {
+                if inner.session_inactive != v {
+                    inner.session_inactive = v;
+                    changed = true;
+                }
+            }
+            if !changed {
+                Action::Noop
+            } else {
+                let now_paused = inner.session_locked || inner.session_inactive;
+                if now_paused {
+                    // Entering a paused state: immediate, cancel any
+                    // pending resume by bumping the generation counter.
+                    inner.session_gen = inner.session_gen.wrapping_add(1);
+                    Action::Reconcile
+                } else {
+                    // All session-pause flags cleared: schedule a debounced
+                    // resume so a brief flap doesn't restart renderers.
+                    inner.session_gen = inner.session_gen.wrapping_add(1);
+                    let resume_ms = self
+                        .settings
+                        .get()
+                        .map(|s| s.global().autopause.resume_ms)
+                        .unwrap_or(500);
+                    Action::ScheduleResume {
+                        gen: inner.session_gen,
+                        ms: resume_ms,
+                    }
+                }
+            }
+        };
+        match action {
+            Action::Noop => {}
+            Action::Reconcile => self.reconcile_lifecycle().await,
+            Action::ScheduleResume { gen, ms } => {
+                let router = Arc::clone(self);
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(ms as u64)).await;
+                    let need_reconcile = {
+                        let inner = router.inner.lock().await;
+                        // A newer transition invalidated us — bail.
+                        inner.session_gen == gen
+                            && !inner.session_locked
+                            && !inner.session_inactive
+                    };
+                    if need_reconcile {
+                        router.reconcile_lifecycle().await;
+                    }
+                });
+            }
+        }
+    }
+
     /// Whether this renderer is currently in the paused set (zero
     /// enabled links). Returns `false` for unknown ids.
     pub async fn is_paused(self: &Arc<Self>, renderer_id: &str) -> bool {
@@ -1759,7 +1854,16 @@ impl Router {
                             .map(|s| s.autopause.requested)
                             .unwrap_or(false)
                     });
-                let should_pause = !has_active_link || any_autopaused;
+                let session_paused = {
+                    let ap = self
+                        .settings
+                        .get()
+                        .map(|s| s.global().autopause)
+                        .unwrap_or_default();
+                    (ap.pause_on_lock && inner.session_locked)
+                        || (ap.pause_on_user_switch && inner.session_inactive)
+                };
+                let should_pause = !has_active_link || any_autopaused || session_paused;
                 let was_paused = inner.paused_renderers.contains(&rid);
                 if !should_pause && was_paused {
                     inner.paused_renderers.remove(&rid);

@@ -23,6 +23,7 @@ mod renderer_manager;
 mod routing;
 mod scheduler;
 mod self_test;
+mod session_monitor;
 mod settings;
 mod sync;
 mod tasks;
@@ -384,6 +385,12 @@ async fn async_main() -> anyhow::Result<()> {
                 Ok(())
             });
     }
+
+    // Session-level autopause monitor. Watches D-Bus for lock-screen and
+    // user-switch events and forwards them to the router as session state
+    // changes. Errors connecting to D-Bus are non-fatal and logged as
+    // warnings; the rest of the daemon continues unaffected.
+    session_monitor::spawn(router.clone(), state.shutdown_subscribe());
 
     // Display infrastructure first. The UDS endpoint and (if applicable)
     // the daemon-managed display backend subprocess are queued *before*

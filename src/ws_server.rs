@@ -422,6 +422,8 @@ fn global_to_pb(g: &crate::settings::GlobalSettings) -> pb::GlobalSettings {
         autopause: Some(pb::AutopauseSettings {
             mode: autopause_mode_to_pb(g.autopause.mode) as i32,
             resume_ms: g.autopause.resume_ms,
+            pause_on_lock: g.autopause.pause_on_lock,
+            pause_on_user_switch: g.autopause.pause_on_user_switch,
         }),
         queue_mode: g.queue_mode.clone(),
         rotation_secs: g.rotation_secs,
@@ -1420,6 +1422,8 @@ async fn dispatch_inner(
                     if let Some(ap) = g.autopause.as_ref() {
                         s.global.autopause.mode = autopause_mode_from_pb(ap.mode);
                         s.global.autopause.resume_ms = ap.resume_ms;
+                        s.global.autopause.pause_on_lock = ap.pause_on_lock;
+                        s.global.autopause.pause_on_user_switch = ap.pause_on_user_switch;
                     }
                     if !g.queue_mode.is_empty() {
                         s.global.queue_mode = g.queue_mode.clone();

@@ -121,11 +121,25 @@ pub struct AutopauseDefaults {
     /// renderer is allowed to Play again. Smooths bursty fullscreen
     /// toggles (e.g. video player UI peek).
     pub resume_ms: u32,
+    /// Pause all renderers when the session's screen-saver/lock-screen
+    /// becomes active (`org.freedesktop.ScreenSaver.ActiveChanged`).
+    /// Monitored by `session_monitor` on the D-Bus session bus.
+    pub pause_on_lock: bool,
+    /// Pause all renderers when the current login session becomes
+    /// inactive (user switches to another session via the display
+    /// manager). Monitored via `org.freedesktop.login1.Session.Active`
+    /// on the D-Bus system bus.
+    pub pause_on_user_switch: bool,
 }
 
 impl Default for AutopauseDefaults {
     fn default() -> Self {
-        Self { mode: AutopauseMode::Never, resume_ms: 500 }
+        Self {
+            mode: AutopauseMode::Never,
+            resume_ms: 500,
+            pause_on_lock: true,
+            pause_on_user_switch: true,
+        }
     }
 }
 
