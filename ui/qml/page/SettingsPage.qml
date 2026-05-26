@@ -199,6 +199,86 @@ MD.Page {
                             }
                         }
                     }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 2
+
+                            MD.Text {
+                                text: qsTr("Pause on lock screen")
+                                typescale: MD.Token.typescale.body_medium
+                                color: MD.Token.color.on_surface
+                            }
+                            MD.Text {
+                                text: qsTr("Pause while the screen is locked")
+                                typescale: MD.Token.typescale.body_small
+                                color: MD.Token.color.on_surface_variant
+                                wrapMode: Text.WordWrap
+                                Layout.fillWidth: true
+                            }
+                        }
+
+                        MD.Switch {
+                            id: m_pause_on_lock
+                            onToggled: root._mut(g => {
+                                const ap = Object.assign({},
+                                    g.autopause || ({ mode: 0, resumeMs: 500,
+                                                      pauseOnLock: true,
+                                                      pauseOnUserSwitch: true }));
+                                ap.pauseOnLock = checked;
+                                g.autopause = ap;
+                            })
+                        }
+                        Binding {
+                            target: m_pause_on_lock
+                            property: "checked"
+                            value: getQ.global?.autopause?.pauseOnLock ?? true
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 2
+
+                            MD.Text {
+                                text: qsTr("Pause on user switch")
+                                typescale: MD.Token.typescale.body_medium
+                                color: MD.Token.color.on_surface
+                            }
+                            MD.Text {
+                                text: qsTr("Pause when switching to another user session")
+                                typescale: MD.Token.typescale.body_small
+                                color: MD.Token.color.on_surface_variant
+                                wrapMode: Text.WordWrap
+                                Layout.fillWidth: true
+                            }
+                        }
+
+                        MD.Switch {
+                            id: m_pause_on_user_switch
+                            onToggled: root._mut(g => {
+                                const ap = Object.assign({},
+                                    g.autopause || ({ mode: 0, resumeMs: 500,
+                                                      pauseOnLock: true,
+                                                      pauseOnUserSwitch: true }));
+                                ap.pauseOnUserSwitch = checked;
+                                g.autopause = ap;
+                            })
+                        }
+                        Binding {
+                            target: m_pause_on_user_switch
+                            property: "checked"
+                            value: getQ.global?.autopause?.pauseOnUserSwitch ?? true
+                        }
+                    }
                 }
             }
 

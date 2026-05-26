@@ -34,8 +34,10 @@ auto map_to_layout(const QVariantMap& m) -> proto::LayoutPrefs {
 
 auto autopause_to_map(const proto::AutopauseSettings& a) -> QVariantMap {
     QVariantMap m;
-    m[u"mode"_s]     = static_cast<int>(a.mode());
-    m[u"resumeMs"_s] = a.resumeMs();
+    m[u"mode"_s]              = static_cast<int>(a.mode());
+    m[u"resumeMs"_s]          = a.resumeMs();
+    m[u"pauseOnLock"_s]       = a.pauseOnLock();
+    m[u"pauseOnUserSwitch"_s] = a.pauseOnUserSwitch();
     return m;
 }
 
@@ -43,6 +45,8 @@ auto map_to_autopause(const QVariantMap& m) -> proto::AutopauseSettings {
     proto::AutopauseSettings a;
     a.setMode(static_cast<proto::AutopauseMode>(m.value(u"mode"_s).toInt()));
     a.setResumeMs(m.value(u"resumeMs"_s).toUInt());
+    a.setPauseOnLock(m.value(u"pauseOnLock"_s, true).toBool());
+    a.setPauseOnUserSwitch(m.value(u"pauseOnUserSwitch"_s, true).toBool());
     return a;
 }
 

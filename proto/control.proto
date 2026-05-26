@@ -793,6 +793,10 @@ message AutopauseSettings {
   AutopauseMode mode = 1;
   // Milliseconds of "no autopause condition" required before resume.
   uint32 resume_ms = 2;
+  // Pause when the session's lock screen becomes active.
+  bool pause_on_lock = 3;
+  // Pause when the current login session becomes inactive (user switch).
+  bool pause_on_user_switch = 4;
 }
 
 // One plugin's settings table. Wire format is string→string for
