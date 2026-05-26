@@ -38,15 +38,17 @@
     "commit": "a37dadd1ed5949ab0accd7087b7c5c57800eab43",
     "dest": "build/_flatpak_deps/cubeb-src",
     "disable-shallow-clone": true,
+    "disable-submodules": true,
     "type": "git",
     "url": "https://github.com/mozilla/cubeb.git",
     "x-cmake": {
       "name": "cubeb",
-      "exclude_from_all": true
+      "exclude_from_all": true,
+      "find_package_args": "GLOBAL"
     }
   },
   {
-    "commit": "036d65a66790f0635fa22cd31f3a24610b717502",
+    "commit": "629bda81eb98856ca023f0f87f57dde8d22b4823",
     "dest": "build/_flatpak_deps/rstd-src",
     "disable-shallow-clone": true,
     "type": "git",
@@ -68,7 +70,7 @@
     }
   },
   {
-    "commit": "609676c524e3c2364dfb46c0f0f8c601f346102a",
+    "commit": "a8f3b7c38c19eb499fb137129a1a3bdb2ebd7edf",
     "dest": "build/_flatpak_deps/wavsen-src",
     "disable-shallow-clone": true,
     "type": "git",
