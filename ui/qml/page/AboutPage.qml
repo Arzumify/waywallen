@@ -46,7 +46,7 @@ MD.Page {
 
         MD.Text {
             Layout.alignment: Qt.AlignHCenter
-            text: "Waywallen is a wallpaper manager for Linux desktops."
+            text: "Waywallen is a dynamic wallpaper solution for Linux desktops."
             typescale: MD.Token.typescale.body_medium
             color: MD.Token.color.on_surface_variant
             horizontalAlignment: Text.AlignHCenter
