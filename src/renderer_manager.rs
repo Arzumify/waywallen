@@ -244,7 +244,7 @@ pub struct RendererHandle {
     /// manifest at spawn time. Pointer-event senders consult this to
     /// decide whether to encode (subscribed) or silently drop. Strings
     /// are validated against the recognised set in
-    /// `RendererRegistry::scan`.
+    /// `renderer_registry::scan_plugins`.
     events_subscribed: Arc<Vec<String>>,
 
     /// Renderer-published clear color (RGBA, 0..=1, sRGB straight
@@ -506,6 +506,7 @@ impl RendererManager {
         if let Some(bin) = std::env::var_os("WAYWALLEN_RENDERER_BIN") {
             registry.register(RendererDef {
                 name: "test-scene".to_string(),
+                plugin_id: "test.plugin".to_string(),
                 bin: PathBuf::from(bin),
                 types: vec!["scene".to_string()],
                 priority: 100,
@@ -1650,6 +1651,7 @@ mod init_handshake_tests {
         // the hard-coded primary-key priority list.
         RendererDef {
             name: name.to_string(),
+            plugin_id: "test.plugin".to_string(),
             bin: PathBuf::from("/dev/null"),
             types: vec!["scene".to_string()],
             priority: 100,
@@ -1664,6 +1666,7 @@ mod init_handshake_tests {
     fn def_scene_schema() -> RendererDef {
         RendererDef {
             name: "wescene-renderer".into(),
+            plugin_id: "test.plugin".to_string(),
             bin: PathBuf::from("/dev/null"),
             types: vec!["scene".into()],
             priority: 100,
@@ -1687,6 +1690,7 @@ mod init_handshake_tests {
         );
         RendererDef {
             name: "waywallen-mpv".into(),
+            plugin_id: "test.plugin".to_string(),
             bin: PathBuf::from("/dev/null"),
             types: vec!["video".into()],
             priority: 100,
@@ -1820,6 +1824,7 @@ mod reuse_tests {
         );
         RendererDef {
             name: "waywallen-mpv".into(),
+            plugin_id: "test.plugin".to_string(),
             bin: PathBuf::from("/dev/null"),
             types: vec!["video".into()],
             priority: 100,

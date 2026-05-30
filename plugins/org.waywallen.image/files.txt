@@ -1,0 +1,3 @@
+bin/waywallen-image-renderer
+image.lua
+plugin.toml

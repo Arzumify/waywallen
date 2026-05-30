@@ -9,11 +9,11 @@ fetchdeps(${CMAKE_SOURCE_DIR}/deps.json NAMES rstd wavsen)
 add_subdirectory(../bridge waywallen-bridge-build)
 
 if(WAYWALLEN_BUILD_IMAGE_PLUGIN)
-    add_subdirectory(image)
+    add_subdirectory(org.waywallen.image)
 endif()
 
 if(WAYWALLEN_BUILD_VIDEO_PLUGIN)
-    add_subdirectory(video)
+    add_subdirectory(org.waywallen.video)
 endif()
 
 if(WAYWALLEN_BUILD_MPV_PLUGIN)

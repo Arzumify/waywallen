@@ -30,11 +30,9 @@ install/bin/
     waywallen                          # daemon (Rust)
     waywallen-display-layer-shell      # wlroots adapter (Rust)
     waywallen-ui                       # Qt/QML UI
-    waywallen-image-renderer           # C++ plugin
-    waywallen-video-renderer           # C++ plugin (FFmpeg + Vulkan compute)
-install/share/waywallen/
-    renderers/*.toml
-    sources/*.lua
+install/share/waywallen/plugins/
+    org.waywallen.image/{plugin.toml, files.txt, image.lua, bin/waywallen-image-renderer}
+    org.waywallen.video/{plugin.toml, files.txt, video.lua, bin/waywallen-video-renderer}
 install/share/{applications,metainfo,icons/...}/
 ```
 

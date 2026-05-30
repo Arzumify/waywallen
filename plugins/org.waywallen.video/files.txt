@@ -1,0 +1,3 @@
+bin/waywallen-video-renderer
+plugin.toml
+video.lua

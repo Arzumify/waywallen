@@ -1,4 +1,3 @@
-use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -6,17 +5,86 @@ use std::path::{Path, PathBuf};
 use crate::wallpaper_type::WallpaperType;
 
 // ---------------------------------------------------------------------------
-// Manifest (TOML on disk)
+// Installable-plugin manifest (`plugins/<dir>/plugin.toml`)
 // ---------------------------------------------------------------------------
 
+/// One installable plugin: a `[plugin]` header plus the components it
+/// provides — at most one `[source]` (Lua) and zero or more
+/// `[renderers.<name>]` map entries.
 #[derive(Debug, Clone, Deserialize)]
-pub struct RendererManifest {
-    pub renderer: RendererDef,
+pub struct PluginManifest {
+    pub plugin: PluginMeta,
+    #[serde(default)]
+    pub source: Option<SourceComponent>,
+    /// Renderer components keyed by component name (the map key becomes
+    /// `RendererDef.name`).
+    #[serde(default)]
+    pub renderers: HashMap<String, RendererDef>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PluginMeta {
+    /// Domain-style unique id, e.g. `org.waywallen.image`.
+    pub id: String,
+    /// Human-readable display name.
+    pub name: String,
+    #[serde(default = "default_version")]
+    pub version: String,
+    /// Declarative file manifest (paths relative to the plugin dir),
+    /// loaded during scanning from the plugin's required `files.txt`
+    /// (newline-separated). Not parsed from the TOML.
+    #[serde(skip)]
+    pub files: Vec<String>,
+}
+
+/// Hard-coded name of the per-plugin file manifest every plugin must
+/// ship beside its `plugin.toml`. One path per line; blanks ignored.
+pub const PLUGIN_FILES_MANIFEST: &str = "files.txt";
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SourceComponent {
+    /// Lua file path, relative to the plugin directory.
+    pub lua: PathBuf,
+}
+
+/// A source component discovered in a plugin manifest. Carries the
+/// owning plugin's domain id so loaded source plugins can be tagged with
+/// their provenance at load time (name/version come from the Lua
+/// `info()` itself).
+#[derive(Debug, Clone)]
+pub struct SourceRef {
+    pub plugin_id: String,
+    pub lua: PathBuf,
+}
+
+/// Components collected from scanning one or more `plugins/` directories.
+#[derive(Debug, Default)]
+pub struct PluginScan {
+    pub renderers: Vec<RendererDef>,
+    pub sources: Vec<SourceRef>,
+    /// Parsed plugin metadata (id/name/version + resolved `files`),
+    /// retained for introspection.
+    pub plugins: Vec<PluginMeta>,
+}
+
+impl PluginScan {
+    pub fn merge(&mut self, other: PluginScan) {
+        self.renderers.extend(other.renderers);
+        self.sources.extend(other.sources);
+        self.plugins.extend(other.plugins);
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RendererDef {
+    /// Component name. Empty in a manifest map value — filled from the
+    /// `[renderers.<name>]` map key during scanning.
+    #[serde(default)]
     pub name: String,
+    /// Domain id of the owning installable plugin. Filled during
+    /// scanning; reported to UIs so they can show a renderer's source.
+    #[serde(default)]
+    pub plugin_id: String,
     pub bin: PathBuf,
     pub types: Vec<WallpaperType>,
     #[serde(default = "default_priority")]
@@ -388,62 +456,6 @@ impl RendererRegistry {
         }
     }
 
-    /// Scan a directory for `*.toml` renderer manifest files and populate
-    /// the registry. Non-parseable files are logged and skipped.
-    pub fn scan(dir: &Path) -> Result<Self> {
-        let mut reg = Self::new();
-        let pattern = dir.join("*.toml");
-        let pattern_str = pattern
-            .to_str()
-            .context("manifest dir path not valid UTF-8")?;
-        for entry in glob::glob(pattern_str).context("glob pattern")? {
-            let path = match entry {
-                Ok(p) => p,
-                Err(e) => {
-                    log::warn!("renderer manifest glob error: {e}");
-                    continue;
-                }
-            };
-            match std::fs::read_to_string(&path) {
-                Ok(contents) => match toml::from_str::<RendererManifest>(&contents) {
-                    Ok(mut manifest) => {
-                        // Resolve relative bin paths against the manifest's directory.
-                        if manifest.renderer.bin.is_relative() {
-                            if let Some(manifest_dir) = path.parent() {
-                                manifest.renderer.bin = manifest_dir.join(&manifest.renderer.bin);
-                            }
-                        }
-                        // Drop unrecognised event kinds with a warn — the
-                        // gating tables below only know about a small
-                        // closed set, so an unknown name in `events` is
-                        // effectively dead config.
-                        let renderer_name = manifest.renderer.name.clone();
-                        manifest.renderer.events.retain(|e| {
-                            if is_known_event_kind(e) {
-                                true
-                            } else {
-                                log::warn!(
-                                    "renderer {renderer_name}: dropping unknown event kind {e:?}"
-                                );
-                                false
-                            }
-                        });
-                        log::info!(
-                            "loaded renderer manifest: {} (types: {:?}, events: {:?})",
-                            manifest.renderer.name,
-                            manifest.renderer.types,
-                            manifest.renderer.events,
-                        );
-                        reg.register(manifest.renderer);
-                    }
-                    Err(e) => log::warn!("skip {}: {e}", path.display()),
-                },
-                Err(e) => log::warn!("skip {}: {e}", path.display()),
-            }
-        }
-        Ok(reg)
-    }
-
     /// Register a renderer definition programmatically.
     pub fn register(&mut self, def: RendererDef) {
         for wp_type in &def.types {
@@ -489,29 +501,123 @@ impl RendererRegistry {
     }
 }
 
-/// Build a registry by scanning the two canonical plugin paths:
-/// 1. `<exec>/../share/waywallen/renderers/`  (bundled / system install)
-/// 2. `$XDG_DATA_HOME/waywallen/renderers/`   (user overrides)
-///
-/// User-local manifests (XDG) are loaded last so they can shadow bundled
-/// ones by name. Non-existent directories are silently skipped.
-pub fn build_default_registry() -> Result<RendererRegistry> {
-    let mut registry = RendererRegistry::new();
-
-    for dir in standard_plugin_dirs("renderers") {
-        if dir.is_dir() {
-            match RendererRegistry::scan(&dir) {
-                Ok(scanned) => {
-                    for def in scanned.all_renderers() {
-                        registry.register(def.clone());
-                    }
-                }
-                Err(e) => log::warn!("scan {}: {e}", dir.display()),
+/// Scan a `plugins/` directory: each immediate subdirectory holding a
+/// `plugin.toml` is one installable plugin. Returns the renderer and
+/// source components it provides. Bad manifests are logged and skipped.
+pub fn scan_plugins(dir: &Path) -> PluginScan {
+    let mut out = PluginScan::default();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            log::warn!("read plugins dir {}: {e}", dir.display());
+            return out;
+        }
+    };
+    for entry in entries.flatten() {
+        let plugin_dir = entry.path();
+        if !plugin_dir.is_dir() {
+            continue;
+        }
+        let manifest_path = plugin_dir.join("plugin.toml");
+        if !manifest_path.is_file() {
+            continue;
+        }
+        let manifest: PluginManifest = match std::fs::read_to_string(&manifest_path)
+            .map_err(|e| e.to_string())
+            .and_then(|c| toml::from_str(&c).map_err(|e| e.to_string()))
+        {
+            Ok(m) => m,
+            Err(e) => {
+                log::warn!("skip {}: {e}", manifest_path.display());
+                continue;
             }
+        };
+
+        let mut meta = manifest.plugin;
+
+        // Every plugin must ship a newline-separated `files.txt` manifest.
+        let files_path = plugin_dir.join(PLUGIN_FILES_MANIFEST);
+        match std::fs::read_to_string(&files_path) {
+            Ok(text) => meta.files.extend(
+                text.lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_owned),
+            ),
+            Err(e) => log::warn!(
+                "plugin {}: required {} missing or unreadable ({e})",
+                meta.id,
+                files_path.display()
+            ),
+        }
+
+        if let Some(src) = manifest.source {
+            out.sources.push(SourceRef {
+                plugin_id: meta.id.clone(),
+                lua: resolve_rel(&plugin_dir, src.lua),
+            });
+        }
+
+        for (name, mut def) in manifest.renderers {
+            def.name = name;
+            def.plugin_id = meta.id.clone();
+            def.bin = resolve_rel(&plugin_dir, def.bin);
+            // Drop unrecognised event kinds — the gating tables only know
+            // a small closed set, so an unknown name is dead config.
+            let renderer_name = def.name.clone();
+            def.events.retain(|e| {
+                if is_known_event_kind(e) {
+                    true
+                } else {
+                    log::warn!("renderer {renderer_name}: dropping unknown event kind {e:?}");
+                    false
+                }
+            });
+            log::info!(
+                "loaded renderer component: {} (plugin {}, types: {:?}, events: {:?})",
+                def.name,
+                meta.id,
+                def.types,
+                def.events,
+            );
+            out.renderers.push(def);
+        }
+
+        log::info!(
+            "loaded plugin: {} ({}) v{} ({} files)",
+            meta.name,
+            meta.id,
+            meta.version,
+            meta.files.len()
+        );
+        out.plugins.push(meta);
+    }
+    out
+}
+
+/// Join `p` against `base` when relative; pass through when absolute.
+fn resolve_rel(base: &Path, p: PathBuf) -> PathBuf {
+    if p.is_relative() {
+        base.join(p)
+    } else {
+        p
+    }
+}
+
+/// Scan the two canonical plugin roots:
+/// 1. `<exec>/../share/waywallen/plugins/`  (bundled / system install)
+/// 2. `$XDG_DATA_HOME/waywallen/plugins/`   (user overrides)
+///
+/// User-local plugins (XDG) are scanned last so they can shadow bundled
+/// ones by name. Non-existent directories are silently skipped.
+pub fn build_default_plugin_scan() -> PluginScan {
+    let mut scan = PluginScan::default();
+    for dir in standard_plugin_dirs("plugins") {
+        if dir.is_dir() {
+            scan.merge(scan_plugins(&dir));
         }
     }
-
-    Ok(registry)
+    scan
 }
 
 /// Return the two canonical plugin directories (bundled + XDG) for a
@@ -568,51 +674,66 @@ mod schema_tests {
     #[test]
     fn manifest_parses_events_array() {
         let src = r#"
-            [renderer]
-            name = "wescene-renderer"
-            bin = "/usr/bin/waywallen-wescene-renderer"
+            [plugin]
+            id = "org.waywallen.wallpaper-engine"
+            name = "Wallpaper Engine"
+
+            [renderers.wescene-renderer]
+            bin = "bin/waywallen-wescene-renderer"
             types = ["scene"]
             events = ["pointer"]
         "#;
-        let m: RendererManifest = toml::from_str(src).expect("parses");
-        assert_eq!(m.renderer.events, vec!["pointer".to_string()]);
+        let m: PluginManifest = toml::from_str(src).expect("parses");
+        let r = &m.renderers["wescene-renderer"];
+        assert_eq!(r.events, vec!["pointer".to_string()]);
     }
 
     #[test]
     fn manifest_events_default_empty() {
         let src = r#"
-            [renderer]
-            name = "waywallen-image"
-            bin = "/usr/bin/waywallen-image-renderer"
+            [plugin]
+            id = "org.waywallen.image"
+            name = "Image"
+
+            [renderers.waywallen-image]
+            bin = "bin/waywallen-image-renderer"
             types = ["image"]
         "#;
-        let m: RendererManifest = toml::from_str(src).expect("parses");
-        assert!(m.renderer.events.is_empty());
+        let m: PluginManifest = toml::from_str(src).expect("parses");
+        assert!(m.renderers["waywallen-image"].events.is_empty());
     }
 
     #[test]
-    fn manifest_parses_with_extras_and_settings() {
-        // End-to-end: TOML manifest → RendererDef. Wire-level details
-        // (extras whitelist, per-key SettingDef shape) are exercised
-        // through deserialization here so a regression in the manifest
-        // grammar is caught.
+    fn manifest_parses_source_extras_and_settings() {
+        // End-to-end: plugin.toml → source ref + RendererDef. Wire-level
+        // details (extras whitelist, per-key SettingDef shape) are
+        // exercised through deserialization here so a regression in the
+        // manifest grammar is caught.
         let src = r#"
-            [renderer]
-            name = "waywallen-mpv"
-            bin = "/usr/bin/waywallen-mpv-renderer"
+            [plugin]
+            id = "org.waywallen.mpv"
+            name = "mpv"
+
+            [source]
+            lua = "mpv.lua"
+
+            [renderers.waywallen-mpv]
+            bin = "bin/waywallen-mpv-renderer"
             types = ["video"]
             priority = 100
             spawn_version = 1
             extras = ["subtitle"]
 
-            [renderer.settings]
+            [renderers.waywallen-mpv.settings]
             loop_file = { type = "string", default = "inf",  identity = false }
             hwdec     = { type = "string", default = "auto", identity = false }
         "#;
-        let manifest: RendererManifest = toml::from_str(src).expect("manifest parses");
-        assert_eq!(manifest.renderer.spawn_version, Some(1));
-        assert_eq!(manifest.renderer.extras, vec!["subtitle".to_string()]);
-        assert_eq!(manifest.renderer.settings.len(), 2);
+        let m: PluginManifest = toml::from_str(src).expect("manifest parses");
+        assert_eq!(m.source.as_ref().unwrap().lua, PathBuf::from("mpv.lua"));
+        let r = &m.renderers["waywallen-mpv"];
+        assert_eq!(r.spawn_version, Some(1));
+        assert_eq!(r.extras, vec!["subtitle".to_string()]);
+        assert_eq!(r.settings.len(), 2);
     }
 
     #[test]

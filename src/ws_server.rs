@@ -788,6 +788,7 @@ async fn dispatch_inner(
                         priority: def.priority,
                         version: def.version.clone(),
                         settings,
+                        plugin_id: def.plugin_id.clone(),
                     }
                 })
                 .collect();

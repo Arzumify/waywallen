@@ -19,6 +19,9 @@ set(CMAKE_BUILD_WITH_INSTALL_RPATH FALSE)
 
 set(WAYWALLEN_LIB_RPATH "$ORIGIN")
 set(WAYWALLEN_BIN_RPATH "$ORIGIN;$ORIGIN/../lib")
+# Renderer bins live under share/waywallen/plugins/<id>/bin (5 levels
+# below the install prefix); reach the shared libs in <prefix>/lib.
+set(WAYWALLEN_PLUGIN_BIN_RPATH "$ORIGIN;$ORIGIN/../../../../../lib")
 
 include(GNUInstallDirs)
 list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")

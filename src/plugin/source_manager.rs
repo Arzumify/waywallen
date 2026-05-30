@@ -18,6 +18,10 @@ use crate::wallpaper_type::{WallpaperEntry, WallpaperType};
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SourcePluginInfo {
     pub name: String,
+    /// Domain id of the owning installable plugin (from its
+    /// `plugin.toml`). Empty when the plugin was loaded without an
+    /// owning manifest (e.g. tests).
+    pub plugin_id: String,
     pub types: Vec<WallpaperType>,
     pub version: String,
     /// Short label/placeholder a UI uses when prompting the user for a
@@ -38,6 +42,8 @@ pub struct SourceManager {
     lua: Lua,
     /// plugin name → registry key for the loaded module table.
     plugins: HashMap<String, LuaRegistryKey>,
+    /// source `info().name` → owning installable plugin's domain id.
+    plugin_ids: HashMap<String, String>,
     /// Flattened scan results from all plugins.
     entries: Vec<WallpaperEntry>,
     /// Index: wp_type → indices into `entries`.
@@ -69,6 +75,7 @@ impl SourceManager {
         Ok(Self {
             lua,
             plugins: HashMap::new(),
+            plugin_ids: HashMap::new(),
             entries: Vec::new(),
             by_type: HashMap::new(),
             probe,
@@ -84,8 +91,9 @@ impl SourceManager {
         self.db = Some(db);
     }
 
-    /// Load a single `.lua` source plugin. Returns the plugin name.
-    pub fn load_plugin(&mut self, path: &Path) -> Result<String> {
+    /// Load a single `.lua` source plugin, tagging it with the owning
+    /// installable plugin's domain id. Returns the source plugin name.
+    pub fn load_plugin(&mut self, path: &Path, plugin_id: &str) -> Result<String> {
         let source = std::fs::read_to_string(path)
             .map_err(|e| Error::Internal(anyhow!("read {}: {e}", path.display())))?;
         let module: LuaTable = self
@@ -110,27 +118,12 @@ impl SourceManager {
 
         let key = self.lua.create_registry_value(module)?;
         self.plugins.insert(name.clone(), key);
-        log::info!("loaded source plugin: {name} from {}", path.display());
+        self.plugin_ids.insert(name.clone(), plugin_id.to_owned());
+        log::info!(
+            "loaded source plugin: {name} (plugin {plugin_id}) from {}",
+            path.display()
+        );
         Ok(name)
-    }
-
-    /// Scan a directory for `*.lua` plugin files and load all of them.
-    pub fn load_all(&mut self, dir: &Path) -> Result<Vec<String>> {
-        let pattern = dir.join("*.lua");
-        let pattern_str = pattern
-            .to_str()
-            .ok_or_else(|| Error::Internal(anyhow!("source dir path not valid UTF-8")))?;
-        let mut names = Vec::new();
-        for entry in glob::glob(pattern_str).map_err(|e| Error::Internal(anyhow!("glob: {e}")))? {
-            match entry {
-                Ok(path) => match self.load_plugin(&path) {
-                    Ok(name) => names.push(name),
-                    Err(e) => log::warn!("skip {}: {e}", path.display()),
-                },
-                Err(e) => log::warn!("source plugin glob error: {e}"),
-            }
-        }
-        Ok(names)
     }
 
     /// Run `scan(ctx)` on all loaded plugins and merge results.
@@ -688,6 +681,7 @@ impl SourceManager {
             let library_hint: String = info.get("library_hint").unwrap_or_default();
             out.push(SourcePluginInfo {
                 name: name.clone(),
+                plugin_id: self.plugin_ids.get(name).cloned().unwrap_or_default(),
                 types,
                 version,
                 library_label,
@@ -876,7 +870,7 @@ return M
         .unwrap();
 
         let mut mgr = SourceManager::with_probe(probe as Arc<dyn MediaProbe>).unwrap();
-        mgr.load_plugin(&plugin_path).unwrap();
+        mgr.load_plugin(&plugin_path, "test.plugin").unwrap();
         block(async { mgr.scan_all(&HashMap::new()).await.unwrap() });
 
         let entries = mgr.list();
@@ -912,7 +906,7 @@ return M
         .unwrap();
 
         let mut mgr = SourceManager::new().unwrap();
-        let name = mgr.load_plugin(&plugin_path).unwrap();
+        let name = mgr.load_plugin(&plugin_path, "test.plugin").unwrap();
         assert_eq!(name, "test");
 
         block(async { mgr.scan_all(&HashMap::new()).await.unwrap() });
@@ -949,7 +943,7 @@ return M
             .join("plugins/video/sources/video.lua");
 
         let mut mgr = SourceManager::new().unwrap();
-        let name = mgr.load_plugin(&plugin_path).unwrap();
+        let name = mgr.load_plugin(&plugin_path, "test.plugin").unwrap();
         assert_eq!(name, "video");
 
         let mut libs = HashMap::new();

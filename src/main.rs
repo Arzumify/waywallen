@@ -244,22 +244,22 @@ async fn async_main() -> anyhow::Result<()> {
     let dbus_conn = dbus_iface::acquire_or_handoff(handoff_ui).await;
     log::info!("DBus name acquired: {}", dbus_iface::BUS_NAME);
 
-    let mut registry = plugin::renderer_registry::build_default_registry()
-        .expect("failed to build renderer registry");
-
-    // Scan extra --plugin directories for renderer manifests.
+    // Scan installable plugins (`plugins/<id>/plugin.toml`) from the
+    // standard roots plus any extra `--plugin PATH/plugins` dirs. Each
+    // plugin contributes renderer components (registered below) and an
+    // optional source component (loaded by the startup task further down).
+    let mut plugin_scan = plugin::renderer_registry::build_default_plugin_scan();
     for plugin_dir in &cli.plugin_dirs {
-        let renderers_dir = plugin_dir.join("renderers");
-        if renderers_dir.is_dir() {
-            match plugin::renderer_registry::RendererRegistry::scan(&renderers_dir) {
-                Ok(scanned) => {
-                    for def in scanned.all_renderers() {
-                        registry.register(def.clone());
-                    }
-                }
-                Err(e) => log::warn!("scan {}: {e}", renderers_dir.display()),
-            }
+        let plugins_dir = plugin_dir.join("plugins");
+        if plugins_dir.is_dir() {
+            plugin_scan.merge(plugin::renderer_registry::scan_plugins(&plugins_dir));
         }
+    }
+    let source_refs = std::mem::take(&mut plugin_scan.sources);
+
+    let mut registry = plugin::renderer_registry::RendererRegistry::new();
+    for def in &plugin_scan.renderers {
+        registry.register(def.clone());
     }
 
     // Shared media probe — constructed once, reused by SourceManager
@@ -487,27 +487,18 @@ async fn async_main() -> anyhow::Result<()> {
     // registration runs in parallel — it does not gate on this task.
     {
         let source_mgr = source_mgr.clone();
-        let plugin_dirs = cli.plugin_dirs.clone();
+        let source_refs = source_refs.clone();
         let state_for_task = state.clone();
         state
             .tasks
             .spawn_async(tasks::TaskKind::Startup, "startup/sources", async move {
-                // Step 1 — load Lua plugins off the blocking pool.
+                // Step 1 — load Lua source components off the blocking
+                // pool. Each ref carries the owning plugin's domain id.
                 tokio::task::spawn_blocking(move || {
                     let mut sm = source_mgr.blocking_lock();
-                    for dir in plugin::renderer_registry::standard_plugin_dirs("sources") {
-                        if dir.is_dir() {
-                            if let Err(e) = sm.load_all(&dir) {
-                                log::warn!("load sources {}: {e:#}", dir.display());
-                            }
-                        }
-                    }
-                    for plugin_dir in &plugin_dirs {
-                        let sources_dir = plugin_dir.join("sources");
-                        if sources_dir.is_dir() {
-                            if let Err(e) = sm.load_all(&sources_dir) {
-                                log::warn!("load sources {}: {e:#}", sources_dir.display());
-                            }
+                    for r in &source_refs {
+                        if let Err(e) = sm.load_plugin(&r.lua, &r.plugin_id) {
+                            log::warn!("load source {}: {e:#}", r.lua.display());
                         }
                     }
                 })

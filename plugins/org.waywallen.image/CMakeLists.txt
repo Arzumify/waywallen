@@ -10,8 +10,8 @@ add_executable(waywallen-image-renderer
     src/main.cpp
     src/av_image.cpp
 )
-set_target_properties(waywallen-image-renderer PROPERTIES 
-    INSTALL_RPATH "${WAYWALLEN_BIN_RPATH}"
+set_target_properties(waywallen-image-renderer PROPERTIES
+    INSTALL_RPATH "${WAYWALLEN_PLUGIN_BIN_RPATH}"
 )
 target_compile_features(waywallen-image-renderer PRIVATE cxx_std_20)
 set_target_properties(waywallen-image-renderer PROPERTIES CXX_SCAN_FOR_MODULES ON)
@@ -33,16 +33,15 @@ target_link_libraries(waywallen-image-renderer
         Threads::Threads
 )
 
+set(_IMAGE_PLUGIN_DIR ${CMAKE_INSTALL_DATADIR}/waywallen/plugins/org.waywallen.image)
+
 install(TARGETS waywallen-image-renderer
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    RUNTIME DESTINATION ${_IMAGE_PLUGIN_DIR}/bin
 )
 
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/renderers/
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/waywallen/renderers
-    FILES_MATCHING PATTERN "*.toml"
-)
-
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/sources/
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/waywallen/sources
-    FILES_MATCHING PATTERN "*.lua"
+install(FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/plugin.toml
+    ${CMAKE_CURRENT_SOURCE_DIR}/image.lua
+    ${CMAKE_CURRENT_SOURCE_DIR}/files.txt
+    DESTINATION ${_IMAGE_PLUGIN_DIR}
 )

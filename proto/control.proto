@@ -250,10 +250,13 @@ message RendererPluginInfo {
   uint32 priority = 4;
   string version = 5;
   // Per-setting schema entries derived from the manifest's
-  // `[renderer.settings.*]` table. UIs use these to render typed
+  // `[renderers.<name>.settings.*]` table. UIs use these to render typed
   // input widgets; daemon enforces validation independently before
   // accepting a `SettingsSet`.
   repeated SettingSchema settings = 6;
+  // Domain id of the installable plugin that provides this renderer
+  // component (its `plugin.toml` `[plugin].id`).
+  string plugin_id = 7;
 }
 
 // Wire encoding of one `[renderer.settings.<key>]` row. All

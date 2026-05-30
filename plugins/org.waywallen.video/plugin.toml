@@ -1,21 +1,26 @@
-# waywallen-video — the canonical video renderer for waywallen.
+# waywallen-video — the canonical video renderer + source for waywallen.
 #
 # Pipeline: best-effort Vulkan hwdevice (FFmpeg AV_HWDEVICE_TYPE_VULKAN)
 # decode → sw landing frame → swscale to NV12 → GPU NV12→RGBA compute
 # pass into the bridge slot. PTS-driven pacing. render_node pins the
 # Vulkan physical device used for the compute pass.
-#
-# Successor to the libmpv plugin (removed in Iter 5).
 
-[renderer]
-name = "waywallen-video"
-bin = "../../../bin/waywallen-video-renderer"
+[plugin]
+id = "org.waywallen.video"
+name = "Video"
+version = "0.1.6"
+
+[source]
+lua = "video.lua"
+
+[renderers.waywallen-video]
+bin = "bin/waywallen-video-renderer"
 types = ["video"]
 priority = 100
 version = "0.1.6"
 spawn_version = 5
 
-[renderer.settings]
+[renderers.waywallen-video.settings]
 loop_file = { type = "string", default = "inf", choices = ["inf", "no"], identity = false, label_key = "settings.video.loop_file", group = "playback", order = 10 }
 hwdec = { type = "string", default = "auto", choices = ["auto", "vaapi", "vulkan", "none"], identity = false, label_key = "settings.video.hwdec", group = "decode", order = 20 }
 render_node = { type = "string", default = "", identity = true, label_key = "settings.video.render_node", group = "decode", order = 30 }
