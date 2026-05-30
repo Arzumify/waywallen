@@ -237,14 +237,11 @@ fn main() -> anyhow::Result<()> {
 async fn async_main() -> anyhow::Result<()> {
     let cli = parse_args();
 
-    let ui_bin: Option<PathBuf> = if cli.no_ui {
-        None
-    } else {
-        resolve_ui_path(cli.ui_path.clone())
-    };
+    let ui_bin: Option<PathBuf> = resolve_ui_path(cli.ui_path.clone());
 
     // Single-instance gate.
-    let dbus_conn = dbus_iface::acquire_or_handoff(ui_bin.as_deref()).await;
+    let handoff_ui = if cli.no_ui { None } else { ui_bin.as_deref() };
+    let dbus_conn = dbus_iface::acquire_or_handoff(handoff_ui).await;
     log::info!("DBus name acquired: {}", dbus_iface::BUS_NAME);
 
     let mut registry = plugin::renderer_registry::build_default_registry()
@@ -664,12 +661,16 @@ async fn async_main() -> anyhow::Result<()> {
         .store(ws_port, std::sync::atomic::Ordering::SeqCst);
     log::info!("ws port: {ws_port}");
 
-    // Stash the pre-resolved UI path and launch once at startup.
-    if let Some(ui_bin) = ui_bin {
-        *state.ui_path.lock().unwrap() = Some(ui_bin);
-        spawn_ui(&state);
-    } else if !cli.no_ui {
-        log::info!("waywallen-ui not found, running headless");
+    match ui_bin {
+        Some(ui_bin) => {
+            *state.ui_path.lock().unwrap() = Some(ui_bin);
+            if cli.no_ui {
+                log::info!("ui auto-start suppressed (--no-ui); open via tray or relaunch");
+            } else {
+                spawn_ui(&state);
+            }
+        }
+        None => log::info!("waywallen-ui not found, running headless"),
     }
 
     // Publish the Daemon1 interface on the connection we already own.
