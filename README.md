@@ -39,11 +39,12 @@ It started life as a Wallpaper Engine plugin for KDE.
 | **Niri** | `zwlr_layer_shell_v1` | ✅ | ❌ |
 | **Sway** | `zwlr_layer_shell_v1` | ✅ | ❌ |
 
-## Compatibility
+## Wallpaper plugins
+- image plugin
+- video plugin
+  - hwdec by vulkan,vaapi
 
-| Item | Status |
-|------|--------|
-| Image wallpapers | ✅ |
-| Scene wallpapers | ✅ via [open-wallpaper-engine](https://github.com/waywallen/open-wallpaper-engine) |
-| Video wallpapers | ✅ |
-| Web wallpapers | ✅ via [open-wallpaper-engine](https://github.com/waywallen/open-wallpaper-engine) |
+### Third plugins
+- [open-wallpaper-engine](https://github.com/waywallen/open-wallpaper-engine)
+  - scene support
+  - web support
