@@ -56,6 +56,17 @@ bool Util::supportsDisplayRename() const {
     }
 }
 
+bool Util::tilingWm() const {
+    switch (desktop()) {
+        case Desktop::Hyprland:
+        case Desktop::Sway:
+        case Desktop::Niri:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // --- BBCode → Qt StyledText HTML subset --------------------------------
 //
 // All regexes are static QRegularExpression so they compile once. PCRE

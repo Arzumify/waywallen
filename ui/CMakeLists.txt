@@ -57,6 +57,7 @@ qt_add_protobuf(waywallen-control
 set(SOURCES_NO_MOC
   src/action.cpp
   src/util.cpp
+  src/ui_settings.cpp
   src/backend.cpp
   src/app.cpp
   src/daemon_dbus.cpp
@@ -88,6 +89,7 @@ set(SOURCES
 set(MOC_SOURCE_FILES
   src/action.cppm
   src/util.cppm
+  src/ui_settings.cppm
   src/app.cppm
   src/backend.cppm
   src/daemon_dbus.cppm
