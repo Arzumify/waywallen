@@ -10,8 +10,10 @@ MD.ItemDelegate {
     required property var model
     required property int index
     property var supportedTypes: []
+    property var allTags: []
     property WC.wallpaperStringFilter emptyStringFilter
     property WC.wallpaperIntFilter emptyIntFilter
+    property WC.wallpaperTagFilter emptyTagFilter
 
     font.capitalization: Font.MixedCase
 
@@ -20,7 +22,8 @@ MD.ItemDelegate {
         { name: qsTr("Type"),           value: WC.WallpaperFilterType.WALLPAPER_FILTER_TYPE_WP_TYPE, kind: "wp_type" },
         { name: qsTr("Width"),          value: WC.WallpaperFilterType.WALLPAPER_FILTER_TYPE_WIDTH,   kind: "int"     },
         { name: qsTr("Height"),         value: WC.WallpaperFilterType.WALLPAPER_FILTER_TYPE_HEIGHT,  kind: "int"     },
-        { name: qsTr("Size"),           value: WC.WallpaperFilterType.WALLPAPER_FILTER_TYPE_SIZE,    kind: "int"     }
+        { name: qsTr("Size"),           value: WC.WallpaperFilterType.WALLPAPER_FILTER_TYPE_SIZE,    kind: "int"     },
+        { name: qsTr("Tag"),            value: WC.WallpaperFilterType.WALLPAPER_FILTER_TYPE_TAG,     kind: "tag"     }
     ]
 
     readonly property var currentOption: typeOptions.find(e => e.value === root.model.type) || null
@@ -34,6 +37,8 @@ MD.ItemDelegate {
             return wpTypeSpec;
         if (currentOption.kind === "int")
             return intSpec;
+        if (currentOption.kind === "tag")
+            return tagSpec;
         return emptySpec;
     }
 
@@ -46,6 +51,9 @@ MD.ItemDelegate {
             break;
         case "int":
             root.model.intFilter = emptyIntFilter;
+            break;
+        case "tag":
+            root.model.tagFilter = emptyTagFilter;
             break;
         }
     }
@@ -63,10 +71,17 @@ MD.ItemDelegate {
         id: intSpec
         filter: root.currentOption && root.currentOption.kind === "int" ? root.model : null
     }
+    W.TagFilter {
+        id: tagSpec
+        filter: root.currentOption && root.currentOption.kind === "tag" ? root.model : null
+        allTags: root.allTags
+        availableWidth: chipFlow.width
+    }
     W.EmptyFilter { id: emptySpec }
 
     contentItem: RowLayout {
         Flow {
+            id: chipFlow
             Layout.fillWidth: true
             spacing: 12
 

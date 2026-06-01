@@ -75,6 +75,11 @@ auto global_to_map(const proto::GlobalSettings& g) -> QVariantMap {
     }
     m[u"queueMode"_s]    = g.queueMode();
     m[u"rotationSecs"_s] = g.rotationSecs();
+    QStringList wallpaper_skip_types;
+    for (const auto& t : g.wallpaperSkipTypes()) {
+        wallpaper_skip_types.append(t);
+    }
+    m[u"wallpaperSkipTypes"_s] = wallpaper_skip_types;
     return m;
 }
 
@@ -122,6 +127,13 @@ auto map_to_global(const QVariantMap& m) -> proto::GlobalSettings {
     }
     if (m.contains(u"rotationSecs"_s)) {
         g.setRotationSecs(m.value(u"rotationSecs"_s).toUInt());
+    }
+    if (m.contains(u"wallpaperSkipTypes"_s)) {
+        QStringList skip;
+        for (const auto& v : m.value(u"wallpaperSkipTypes"_s).toList()) {
+            skip.append(v.toString());
+        }
+        g.setWallpaperSkipTypes(skip);
     }
     return g;
 }

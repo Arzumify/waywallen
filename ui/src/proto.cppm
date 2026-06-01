@@ -79,6 +79,9 @@ using proto::PluginInfo;
 using proto::PluginListRequest;
 using proto::PluginListResponse;
 
+using proto::TagListRequest;
+using proto::TagListResponse;
+
 using proto::LibraryInstance;
 using proto::LibraryListRequest;
 using proto::LibraryListResponse;
@@ -107,6 +110,7 @@ using proto::WallpaperFilterRule;
 using proto::WallpaperFilterTypeGadget::WallpaperFilterType;
 using proto::WallpaperStringFilter;
 using proto::WallpaperIntFilter;
+using proto::WallpaperTagFilter;
 using proto::StringConditionGadget::StringCondition;
 using proto::IntConditionGadget::IntCondition;
 using proto::LogicOpGadget::LogicOp;

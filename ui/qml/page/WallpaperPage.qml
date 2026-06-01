@@ -136,6 +136,11 @@ MD.Page {
         id: autoDetectQuery
     }
 
+    // Skip-types is seeded from settings once; after that the local
+    // selection is authoritative. Re-adopting it on every settings echo
+    // would revert a just-applied toggle whenever the round-trip lags.
+    property bool _skipTypesSeeded: false
+
     W.SettingsGetQuery {
         id: filterSettingsGet
         onGlobalChanged: {
@@ -145,6 +150,10 @@ MD.Page {
             // filter state already matches, and m_sorts must already
             // be the persisted value at that point.
             root.restoreSortFromSettings(global.wallpaperSorts || []);
+            if (!root._skipTypesSeeded) {
+                wallpaperQuery.skipTypes = global.wallpaperSkipTypes || [];
+                root._skipTypesSeeded = true;
+            }
             wallpaperFilterModel.replaceState(
                         global.wallpaperFilters || [],
                         global.wallpaperFilterLogics || []);
@@ -200,6 +209,17 @@ MD.Page {
         parent: T.Overlay.overlay
         model: wallpaperFilterModel
         supportedTypes: pluginQuery.supportedTypes || []
+        skipTypes: wallpaperQuery.skipTypes
+        onToggleSkip: function (ty) {
+            const next = (wallpaperQuery.skipTypes || []).slice();
+            const i = next.indexOf(ty);
+            if (i >= 0)
+                next.splice(i, 1);
+            else
+                next.push(ty);
+            wallpaperQuery.skipTypes = next;
+            root._persistGlobalChange(g => { g.wallpaperSkipTypes = next; });
+        }
     }
 
     Connections {

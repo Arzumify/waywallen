@@ -11,6 +11,11 @@ MD.Dialog {
     title: qsTr("Filters")
     property var model
     property var supportedTypes: []
+    // Quick type toggles (applied immediately, independent of the rule
+    // editor's Apply/Reset). Chips show all types; a checked chip means
+    // the type is shown. Unchecked types are what we record as skipped.
+    property var skipTypes: []
+    signal toggleSkip(string ty)
     horizontalPadding: 16
     implicitWidth: Math.min(440, parent ? parent.width - 48 : 440)
     standardButtons: T.Dialog.Cancel | T.Dialog.Reset | T.Dialog.Apply
@@ -20,6 +25,13 @@ MD.Dialog {
         accept();
     }
     onReset: model.reset()
+
+    // Tag names for the tag-filter picker; refreshed each time the
+    // dialog opens so newly-scanned tags show up.
+    W.TagListQuery {
+        id: tagListQuery
+    }
+    onAboutToShow: tagListQuery.reload()
 
     Component.onCompleted: {
         let button = standardButton(T.Dialog.Reset);
@@ -31,6 +43,34 @@ MD.Dialog {
     }
 
     contentItem: ColumnLayout {
+        spacing: 8
+
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 4
+            visible: root.supportedTypes && root.supportedTypes.length > 0
+
+            MD.Label {
+                text: qsTr("Types")
+                typescale: MD.Token.typescale.title_medium
+            }
+
+            Flow {
+                Layout.fillWidth: true
+                spacing: 8
+                Repeater {
+                    model: root.supportedTypes
+                    delegate: MD.FilterChip {
+                        required property var modelData
+                        checkable: false
+                        text: qsTr(modelData)
+                        checked: (root.skipTypes || []).indexOf(modelData) < 0
+                        onClicked: root.toggleSkip(modelData)
+                    }
+                }
+            }
+        }
+
         RowLayout {
             MD.Label {
                 Layout.fillWidth: true
@@ -59,6 +99,7 @@ MD.Dialog {
             delegate: W.WallpaperFilter {
                 width: ListView.view.contentWidth
                 supportedTypes: root.supportedTypes
+                allTags: tagListQuery.tags
             }
             implicitHeight: contentHeight
             spacing: 2

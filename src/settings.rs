@@ -194,6 +194,10 @@ pub struct GlobalSettings {
 
     #[serde(default)]
     pub wallpaper_sorts: Vec<WallpaperSortRuleState>,
+
+    /// Wallpaper types hidden by the browser's quick type toggles.
+    #[serde(default)]
+    pub wallpaper_skip_types: Vec<String>,
 }
 
 impl Default for GlobalSettings {
@@ -206,7 +210,38 @@ impl Default for GlobalSettings {
             autopause: AutopauseDefaults::default(),
             wallpaper_filter: WallpaperFilterState::default(),
             wallpaper_sorts: Vec::new(),
+            wallpaper_skip_types: Vec::new(),
         }
+    }
+}
+
+impl GlobalSettings {
+    /// Filter rules + logics for the queue. The quick skip-type toggles
+    /// are folded in as `WpType IS_NOT <ty>` rules, each in its own
+    /// fresh group so they AND with the user's filter expression.
+    pub fn wallpaper_queue_filter(
+        &self,
+    ) -> (
+        Vec<crate::control_proto::WallpaperFilterRule>,
+        Vec<crate::control_proto::FilterLogic>,
+    ) {
+        use crate::control_proto as pb;
+        let (mut filters, logics) = self.wallpaper_filter.to_pb();
+        let mut next_group = filters.iter().map(|f| f.group).max().map(|g| g + 1).unwrap_or(0);
+        for ty in &self.wallpaper_skip_types {
+            filters.push(pb::WallpaperFilterRule {
+                r#type: pb::WallpaperFilterType::WpType as i32,
+                group: next_group,
+                payload: Some(pb::wallpaper_filter_rule::Payload::StringFilter(
+                    pb::WallpaperStringFilter {
+                        value: ty.clone(),
+                        condition: pb::StringCondition::IsNot as i32,
+                    },
+                )),
+            });
+            next_group += 1;
+        }
+        (filters, logics)
     }
 }
 
@@ -261,6 +296,14 @@ pub struct WallpaperFilterRuleState {
     pub group: i32,
     pub string_filter: Option<WallpaperStringFilterState>,
     pub int_filter: Option<WallpaperIntFilterState>,
+    pub tag_filter: Option<WallpaperTagFilterState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct WallpaperTagFilterState {
+    pub values: Vec<String>,
+    pub condition: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -292,7 +335,14 @@ impl WallpaperFilterState {
             .iter()
             .cloned()
             .map(|rule| {
-                let payload = if let Some(f) = rule.string_filter {
+                let payload = if let Some(f) = rule.tag_filter {
+                    Some(pb::wallpaper_filter_rule::Payload::TagFilter(
+                        pb::WallpaperTagFilter {
+                            values: f.values,
+                            condition: f.condition,
+                        },
+                    ))
+                } else if let Some(f) = rule.string_filter {
                     Some(pb::wallpaper_filter_rule::Payload::StringFilter(
                         pb::WallpaperStringFilter {
                             value: f.value,
@@ -350,6 +400,15 @@ impl WallpaperFilterState {
                         pb::wallpaper_filter_rule::Payload::IntFilter(f) => {
                             Some(WallpaperIntFilterState {
                                 value: f.value,
+                                condition: f.condition,
+                            })
+                        }
+                        _ => None,
+                    }),
+                    tag_filter: rule.payload.as_ref().and_then(|p| match p {
+                        pb::wallpaper_filter_rule::Payload::TagFilter(f) => {
+                            Some(WallpaperTagFilterState {
+                                values: f.values.clone(),
                                 condition: f.condition,
                             })
                         }

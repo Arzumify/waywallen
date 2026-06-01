@@ -56,12 +56,21 @@ message WallpaperIntFilter {
   IntCondition condition = 2;
 }
 
+// Tag membership against a set of tags. `condition` IS means "has any of
+// these tags", IS_NOT means "has none". CONTAINS variants collapse onto
+// IS / IS_NOT. An empty `values` list imposes no constraint.
+message WallpaperTagFilter {
+  repeated string values = 1;
+  StringCondition condition = 2;
+}
+
 message WallpaperFilterRule {
   WallpaperFilterType type = 1;
   int32 group = 2;
   oneof payload {
     WallpaperStringFilter string_filter = 101;
     WallpaperIntFilter int_filter = 102;
+    WallpaperTagFilter tag_filter = 104;
   }
   reserved 103;
 }

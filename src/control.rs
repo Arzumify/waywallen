@@ -395,7 +395,7 @@ pub async fn step(app: &Arc<AppState>, delta: i32) -> Result<String> {
     use crate::model::repo::QueueRow;
     use crate::queue::Mode;
 
-    let (filters, logics) = app.settings.global().wallpaper_filter.to_pb();
+    let (filters, logics) = app.settings.global().wallpaper_queue_filter();
     let sorts =
         crate::settings::WallpaperSortRuleState::vec_to_pb(&app.settings.global().wallpaper_sorts);
     let mode = app.queue.lock().await.mode;
@@ -579,10 +579,13 @@ pub struct QueueStatus {
 }
 
 pub async fn queue_status(app: &Arc<AppState>) -> QueueStatus {
-    let (filters, logics) = app.settings.global().wallpaper_filter.to_pb();
+    let (filters, logics) = app.settings.global().wallpaper_queue_filter();
     let count = repo::count_items_by_filter(&app.db, &filters, &logics)
         .await
         .unwrap_or(0) as u32;
+    // "smart" reflects user-authored filter rules only; the quick
+    // skip-type toggles narrow the queue but don't make it a playlist.
+    let is_smart = !app.settings.global().wallpaper_filter.filters.is_empty();
     let g = app.queue.lock().await;
     QueueStatus {
         active_id: None,
@@ -591,7 +594,7 @@ pub async fn queue_status(app: &Arc<AppState>) -> QueueStatus {
         current: g.current.clone(),
         position: None,
         count,
-        is_smart: !filters.is_empty(),
+        is_smart,
     }
 }
 

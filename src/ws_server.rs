@@ -450,6 +450,7 @@ fn global_to_pb(g: &crate::settings::GlobalSettings) -> pb::GlobalSettings {
         }),
         queue_mode: g.queue_mode.clone(),
         rotation_secs: g.rotation_secs,
+        wallpaper_skip_types: g.wallpaper_skip_types.clone(),
     }
 }
 
@@ -796,7 +797,11 @@ async fn dispatch_inner(
                 .iter()
                 .map(|def| renderer_def_to_pb(def))
                 .collect();
-            let supported_types = registry.supported_types().into_iter().cloned().collect();
+            // `supported_types` comes from a HashMap; sort so the UI's
+            // type chips/menus keep a stable alphabetical order.
+            let mut supported_types: Vec<_> =
+                registry.supported_types().into_iter().cloned().collect();
+            supported_types.sort();
             Res::RendererPluginList(pb::RendererPluginListResponse {
                 renderers,
                 supported_types,
@@ -830,6 +835,15 @@ async fn dispatch_inner(
             Res::PluginList(pb::PluginListResponse { plugins })
         }
 
+        Req::TagList(_) => {
+            let tags = repo::list_tags(&state.db)
+                .await?
+                .into_iter()
+                .map(|t| t.name)
+                .collect();
+            Res::TagList(pb::TagListResponse { tags })
+        }
+
         Req::WallpaperList(r) => {
             log::info!(
                 "WallpaperList: page={} page_size={} wp_type={:?} filters={} search={:?}",
@@ -848,11 +862,15 @@ async fn dispatch_inner(
             // each WallpaperEntry before sending it to the UI.
             let db_meta_map = crate::wallpaper_sort::load_db_meta_map(state).await?;
 
-            let raw_entries: Vec<&crate::wallpaper_type::WallpaperEntry> = if r.wp_type.is_empty() {
-                snap.list().iter().collect()
-            } else {
-                snap.list_by_type(&r.wp_type)
-            };
+            let mut raw_entries: Vec<&crate::wallpaper_type::WallpaperEntry> =
+                if r.wp_type.is_empty() {
+                    snap.list().iter().collect()
+                } else {
+                    snap.list_by_type(&r.wp_type)
+                };
+            if !r.skip_types.is_empty() {
+                raw_entries.retain(|e| !r.skip_types.iter().any(|t| t == &e.wp_type));
+            }
 
             // Inject the free-text search as an extra filter rule
             // placed in its own group. `build_grouped_condition` AND-s
@@ -1492,6 +1510,7 @@ async fn dispatch_inner(
                     );
                     s.global.wallpaper_sorts =
                         WallpaperSortRuleState::vec_from_pb(&g.wallpaper_sorts);
+                    s.global.wallpaper_skip_types = g.wallpaper_skip_types.clone();
                     if let Some(ld) = g.layout_defaults.as_ref() {
                         if let Some(fm) = fillmode_from_pb(ld.fillmode) {
                             s.global.layout.fillmode = fm;

@@ -134,6 +134,12 @@ pub fn wallpaper_filter_to_condition(filter: &pb::WallpaperFilterRule) -> Option
             _ => None,
         },
         pb::WallpaperFilterType::Tag => match filter.payload.as_ref() {
+            Some(Payload::TagFilter(f)) => tag_list_condition_to_condition(
+                &f.values,
+                pb::StringCondition::try_from(f.condition)
+                    .unwrap_or(pb::StringCondition::Unspecified),
+            ),
+            // Back-compat: older rules carried a single tag in string_filter.
             Some(Payload::StringFilter(f)) => tag_condition_to_condition(
                 &f.value,
                 pb::StringCondition::try_from(f.condition)
@@ -160,6 +166,39 @@ fn tag_condition_to_condition(tag: &str, cond: pb::StringCondition) -> Option<Co
         }
         pb::StringCondition::IsNot | pb::StringCondition::ContainsNot => {
             Some(Condition::all().add(Expr::cust(format!("NOT {exists}"))))
+        }
+        pb::StringCondition::Unspecified => None,
+    }
+}
+
+/// Tag-set membership. IS → has any of `values`; IS_NOT → has none of
+/// them. Empty list imposes no constraint.
+fn tag_list_condition_to_condition(values: &[String], cond: pb::StringCondition) -> Option<Condition> {
+    let names: Vec<&String> = values.iter().filter(|v| !v.is_empty()).collect();
+    if names.is_empty() {
+        return None;
+    }
+    let exists = |tag: &str| {
+        format!(
+            "EXISTS (SELECT 1 FROM item_tag JOIN tag ON tag.id = item_tag.tag_id \
+             WHERE item_tag.item_id = item.id AND tag.name = {} COLLATE NOCASE)",
+            sqlite_quote(tag)
+        )
+    };
+    match cond {
+        pb::StringCondition::Is | pb::StringCondition::Contains => {
+            let mut any = Condition::any();
+            for tag in names {
+                any = any.add(Expr::cust(exists(tag)));
+            }
+            Some(any)
+        }
+        pb::StringCondition::IsNot | pb::StringCondition::ContainsNot => {
+            let mut all = Condition::all();
+            for tag in names {
+                all = all.add(Expr::cust(format!("NOT {}", exists(tag))));
+            }
+            Some(all)
         }
         pb::StringCondition::Unspecified => None,
     }

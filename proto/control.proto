@@ -65,6 +65,7 @@ message Request {
     DisplayRenameRequest      display_rename = 45;
     PluginInstallRequest      plugin_install = 46;
     PluginListRequest         plugin_list = 47;
+    TagListRequest            tag_list = 48;
   }
 }
 
@@ -117,6 +118,7 @@ message Response {
     DisplayRenameResponse      display_rename = 45;
     PluginInstallResponse      plugin_install = 46;
     PluginListResponse         plugin_list = 47;
+    TagListResponse            tag_list = 48;
   }
 }
 
@@ -340,6 +342,10 @@ message WallpaperListRequest {
   // `name CONTAINS <text>` filter rule placed in its own group, which
   // is AND-ed with the existing filter expression.
   string search_text = 8;
+  // Wallpaper types to exclude outright (quick type toggles in the UI,
+  // independent of the structured filter rules). An entry whose
+  // `wp_type` is listed here is dropped before the rule filter runs.
+  repeated string skip_types = 9;
 }
 message WallpaperListResponse {
   repeated WallpaperEntry wallpapers = 1;
@@ -797,6 +803,11 @@ message GlobalSettings {
 
   // Auto-rotation interval in seconds. `0` disables auto-rotation.
   uint32 rotation_secs = 11;
+
+  // Wallpaper types the browser hides via the quick type toggles
+  // (above the structured filter rules). Persisted so the selection
+  // survives restarts.
+  repeated string wallpaper_skip_types = 12;
 }
 
 // When to pause the wallpaper based on window state on the same
@@ -1004,4 +1015,11 @@ message PluginInfo {
 message PluginListRequest {}
 message PluginListResponse {
   repeated PluginInfo plugins = 1;
+}
+
+// All distinct tag names currently in the library DB, for the wallpaper
+// browser's tag-filter picker.
+message TagListRequest {}
+message TagListResponse {
+  repeated string tags = 1;
 }

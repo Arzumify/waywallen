@@ -74,6 +74,7 @@ set(SOURCES_NO_MOC
   src/query/renderer_query.cpp
   src/query/source_query.cpp
   src/query/plugin_query.cpp
+  src/query/tag_query.cpp
   src/query/health_query.cpp
   src/query/display_query.cpp
   src/query/gpu_query.cpp
@@ -106,6 +107,7 @@ set(MOC_SOURCE_FILES
   src/query/renderer_query.cppm
   src/query/source_query.cppm
   src/query/plugin_query.cppm
+  src/query/tag_query.cppm
   src/query/health_query.cppm
   src/query/display_query.cppm
   src/query/gpu_query.cppm
@@ -135,6 +137,7 @@ set(QML_FILES
   qml/component/filter/StringFilter.qml
   qml/component/filter/IntFilter.qml
   qml/component/filter/WpTypeFilter.qml
+  qml/component/filter/TagFilter.qml
   qml/component/filter/EmptyFilter.qml
   qml/component/filter/WallpaperFilter.qml
   qml/component/settings/SettingField.qml
