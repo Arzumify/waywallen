@@ -19,9 +19,12 @@ MD.ApplicationWindow {
 
     color: MD.MProp.backgroundColor
     height: 600
-    visible: true
+    visible: m_uiVisible
     width: 900
     title: "waywallen"
+
+    property bool m_uiVisible: false
+    property bool m_saveArmed: false
 
     W.HealthQuery {
         id: healthQuery
@@ -33,6 +36,64 @@ MD.ApplicationWindow {
             healthQuery.reload();
         }
     }
+
+    readonly property bool sidebarAutoExpand: W.UiSettings.sidebarAutoExpand
+
+    Timer {
+        id: m_sizeFlush
+        interval: 500
+        repeat: false
+        onTriggered: {
+            if (W.Util.tilingWm)
+                return;
+            if (!W.UiSettings.saveWindowSize)
+                return;
+            W.UiSettings.windowWidth = Math.round(win.width);
+            W.UiSettings.windowHeight = Math.round(win.height);
+        }
+    }
+
+    function m_saveSize() {
+        if (W.Util.tilingWm)
+            return;
+        if (!m_saveArmed)
+            return;
+        if (!W.UiSettings.saveWindowSize)
+            return;
+        m_sizeFlush.restart();
+    }
+
+    function m_reveal() {
+        if (win.m_uiVisible)
+            return;
+        if (!W.Util.tilingWm && W.UiSettings.saveWindowSize && W.UiSettings.windowWidth > 0 && W.UiSettings.windowHeight > 0) {
+            win.width = W.UiSettings.windowWidth;
+            win.height = W.UiSettings.windowHeight;
+        }
+        win.m_uiVisible = true;
+        m_armTimer.restart();
+    }
+
+    Timer {
+        id: m_armTimer
+        interval: 600
+        repeat: false
+        onTriggered: win.m_saveArmed = true
+    }
+
+    function syncSidebar() {
+        const it = m_drawer_loader.item;
+        if (!it)
+            return;
+        if (win.sidebarAutoExpand)
+            it.expanded = it.useEmbed;
+        else
+            it.expanded = W.UiSettings.sidebarExpanded;
+    }
+
+    onWidthChanged: m_saveSize()
+    onHeightChanged: m_saveSize()
+    onSidebarAutoExpandChanged: syncSidebar()
 
     property int currentPage: 0
 
@@ -65,12 +126,14 @@ MD.ApplicationWindow {
 
     Component.onCompleted: {
         currentPageChanged();
+        win.m_reveal();
         // Level-check for the case where the daemon is already Ready
         // before this window finishes constructing (UI launched
         // standalone against a running daemon, page reload, etc.)
         // — `daemonReady` is edge-triggered and won't fire then.
-        if (W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready)
+        if (W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready) {
             healthQuery.reload();
+        }
     }
 
     MD.SnakeView {
@@ -117,22 +180,49 @@ MD.ApplicationWindow {
             Loader {
                 id: m_drawer_loader
                 Layout.fillHeight: true
+                Layout.preferredWidth: item ? (item.expanded ? item.expandedWidth : item.collapsedWidth) : -1
+
+                Behavior on Layout.preferredWidth {
+                    NumberAnimation {
+                        duration: MD.Token.duration.short4
+                    }
+                }
+
                 active: !win.isCompact
                 visible: active
 
                 sourceComponent: MD.StandardDrawer {
+                    id: m_drawer
                     model: win.pageModel
                     currentIndex: win.currentPage
-                    // showDivider: false
 
-                    Behavior on implicitWidth {
-                        NumberAnimation {
-                            duration: MD.Token.duration.short4
-                        }
-                    }
+                    onUseEmbedChanged: Qt.callLater(win.syncSidebar)
+                    Component.onCompleted: win.syncSidebar()
 
                     onClicked: function (model) {
                         win.currentPage = model.index;
+                    }
+
+                    header: ColumnLayout {
+                        spacing: 0
+
+                        MD.IconButton {
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.topMargin: 16
+                            Layout.bottomMargin: 8
+                            icon.name: MD.Token.icon.chevron_right
+                            onClicked: {
+                                m_drawer.expanded = true;
+                                if (!win.sidebarAutoExpand)
+                                    W.UiSettings.sidebarExpanded = true;
+                            }
+                        }
+
+                        MD.Divider {
+                            Layout.leftMargin: 12
+                            Layout.rightMargin: 12
+                            Layout.fillWidth: true
+                        }
                     }
 
                     drawerHeader: ColumnLayout {
@@ -159,6 +249,16 @@ MD.ApplicationWindow {
                                 Layout.fillWidth: true
                                 text: "waywallen"
                                 typescale: MD.Token.typescale.title_large
+                            }
+
+                            MD.IconButton {
+                                Layout.alignment: Qt.AlignVCenter
+                                icon.name: MD.Token.icon.chevron_left
+                                onClicked: {
+                                    m_drawer.expanded = false;
+                                    if (!win.sidebarAutoExpand)
+                                        W.UiSettings.sidebarExpanded = false;
+                                }
                             }
                         }
 

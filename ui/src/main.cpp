@@ -10,6 +10,7 @@ int main(int argc, char** argv) {
     ncrequest::global_init();
     QGuiApplication gui_app(argc, argv);
     QGuiApplication::setDesktopFileName(APP_ID);
+    QCoreApplication::setOrganizationName(QStringLiteral("waywallen"));
     QCoreApplication::setApplicationName(APP_NAME);
     QCoreApplication::setApplicationVersion(APP_VERSION);
 
