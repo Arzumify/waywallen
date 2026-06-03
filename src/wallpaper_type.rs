@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 pub type WallpaperType = String;
 
-/// A single wallpaper entry discovered by a source plugin.
+/// A single wallpaper entry. Source plugins fill the scan-time subset
+/// (name/wp_type/resource/preview/library_root/external_id/...); the
+/// daemon reconstructs the full entry from the DB on every read
+/// (`repo::load_entries` / `repo::get_entry`) — the DB is the source of
+/// truth, not an in-memory cache.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WallpaperEntry {
     /// Canonical identity: the DB `item.id` for this entry's
@@ -20,8 +23,6 @@ pub struct WallpaperEntry {
     pub resource: String,
     /// Optional path to a preview/thumbnail image.
     pub preview: Option<String>,
-    /// Type-specific metadata. For scene: {"pkg": "...", "assets": "..."}.
-    pub metadata: HashMap<String, String>,
     /// Free-form description (e.g. Wallpaper Engine `project.description`).
     #[serde(default)]
     pub description: Option<String>,
@@ -44,6 +45,10 @@ pub struct WallpaperEntry {
     /// "Mature"). Free-form string; the daemon doesn't interpret it.
     #[serde(default)]
     pub content_rating: Option<String>,
+    /// File mtime in ms since epoch (DB `item.modified_at`). Daemon-only
+    /// (filled on read for sorting); plugins do not set it.
+    #[serde(default)]
+    pub modified_at: Option<i64>,
     /// Name of the source plugin that produced this entry. Written by
     /// `SourceManager::scan_plugin` — Lua plugins do not set it
     /// themselves. Defaults to empty so deserializing older snapshots

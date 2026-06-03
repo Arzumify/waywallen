@@ -10,7 +10,23 @@ MD.Page {
 
     W.SourceListQuery {
         id: sourceQuery
-        Component.onCompleted: reload()
+    }
+
+    // `daemonReady` is edge-triggered, so also level-check in
+    // Component.onCompleted for the case where this page is pushed
+    // after the daemon is already Ready. Without the ready gate an
+    // early reload returns nothing and the source plugin list stays
+    // empty with no retry.
+    Connections {
+        target: W.Notify
+        function onDaemonReady() {
+            sourceQuery.reload();
+        }
+    }
+
+    Component.onCompleted: {
+        if (W.Notify.daemonPhase === W.Notify.DaemonPhase.Ready)
+            sourceQuery.reload();
     }
 
     W.LibraryAddQuery {

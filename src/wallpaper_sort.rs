@@ -4,47 +4,24 @@
 //! (D-Bus / rotator advance) must agree on what "the wallpaper after
 //! this one" means, otherwise D-Bus Next jumps to a row the user
 //! doesn't see next on screen.
+//!
+//! Entries are read from the DB (`repo::load_entries`) — the source of
+//! truth — so sorting reads the same fields the wire response carries.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use anyhow::Result;
 
 use crate::control_proto as pb;
-use crate::model::entities::item;
 use crate::model::repo;
 use crate::wallpaper_type::WallpaperEntry;
 use crate::AppState;
 
-pub type DbMetaMap = HashMap<(String, String), item::Model>;
-
-pub async fn load_db_meta_map(app: &Arc<AppState>) -> Result<DbMetaMap> {
-    let libs = repo::list_libraries(&app.db).await?;
-    let lib_path_by_id: HashMap<i64, String> = libs.into_iter().map(|l| (l.id, l.path)).collect();
-    let items = repo::list_items_all(&app.db).await?;
-    Ok(items
-        .into_iter()
-        .filter_map(|it| {
-            let lib_path = lib_path_by_id.get(&it.library_id)?.clone();
-            let item_path = it.path.clone();
-            Some(((lib_path, item_path), it))
-        })
-        .collect())
-}
-
 /// Apply composite sort rules in-place. Rules are applied in reverse
 /// so the first rule ends up as the primary key (sort_by is stable).
-pub fn apply_wallpaper_sorts(
-    entries: &mut [&WallpaperEntry],
-    sorts: &[pb::WallpaperSortRule],
-    db_meta_map: &DbMetaMap,
-) {
+pub fn apply_wallpaper_sorts(entries: &mut [&WallpaperEntry], sorts: &[pb::WallpaperSortRule]) {
     use std::cmp::Ordering;
-
-    let lookup = |e: &WallpaperEntry| {
-        crate::model::sync::relative_under_root(&e.library_root, &e.resource)
-            .and_then(|rel| db_meta_map.get(&(e.library_root.clone(), rel)))
-    };
 
     for rule in sorts.iter().rev() {
         let key = match pb::WallpaperSortKey::try_from(rule.key) {
@@ -57,15 +34,9 @@ pub fn apply_wallpaper_sorts(
             let ord = match key {
                 pb::WallpaperSortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
                 pb::WallpaperSortKey::WpType => a.wp_type.cmp(&b.wp_type),
-                pb::WallpaperSortKey::Size => {
-                    let sa = lookup(a).and_then(|m| m.size).or(a.size).unwrap_or(0);
-                    let sb = lookup(b).and_then(|m| m.size).or(b.size).unwrap_or(0);
-                    sa.cmp(&sb)
-                }
+                pb::WallpaperSortKey::Size => a.size.unwrap_or(0).cmp(&b.size.unwrap_or(0)),
                 pb::WallpaperSortKey::LastModified => {
-                    let ma = lookup(a).and_then(|m| m.modified_at).unwrap_or(0);
-                    let mb = lookup(b).and_then(|m| m.modified_at).unwrap_or(0);
-                    ma.cmp(&mb)
+                    a.modified_at.unwrap_or(0).cmp(&b.modified_at.unwrap_or(0))
                 }
                 pb::WallpaperSortKey::Unspecified => Ordering::Equal,
             };
@@ -78,7 +49,7 @@ pub fn apply_wallpaper_sorts(
     }
 }
 
-/// Resolve the user-visible ordered list of entry ids: snapshot →
+/// Resolve the user-visible ordered list of entry ids: DB entries →
 /// filter → sort. Mirrors the WallpaperList pipeline so D-Bus
 /// next/previous step in the same order the UI shows.
 pub async fn ordered_entry_ids(
@@ -87,8 +58,7 @@ pub async fn ordered_entry_ids(
     logics: &[pb::FilterLogic],
     sorts: &[pb::WallpaperSortRule],
 ) -> Result<Vec<String>> {
-    let snap = app.source_snapshot.read().await;
-    let raw: Vec<&WallpaperEntry> = snap.list().iter().collect();
+    let all = repo::load_entries(&app.db).await?;
 
     let matched_keys: Option<HashSet<(String, String)>> = if filters.is_empty() {
         None
@@ -102,7 +72,7 @@ pub async fn ordered_entry_ids(
     };
 
     let mut filtered: Vec<&WallpaperEntry> = if let Some(keys) = matched_keys.as_ref() {
-        raw.into_iter()
+        all.iter()
             .filter(|e| {
                 crate::model::sync::relative_under_root(&e.library_root, &e.resource)
                     .map(|rel| keys.contains(&(e.library_root.clone(), rel)))
@@ -110,16 +80,12 @@ pub async fn ordered_entry_ids(
             })
             .collect()
     } else {
-        raw
+        all.iter().collect()
     };
 
     if !sorts.is_empty() {
-        let db_meta_map = load_db_meta_map(app).await?;
-        apply_wallpaper_sorts(&mut filtered, sorts, &db_meta_map);
+        apply_wallpaper_sorts(&mut filtered, sorts);
     }
 
-    Ok(filtered
-        .into_iter()
-        .map(|e| e.item_id.to_string())
-        .collect())
+    Ok(filtered.into_iter().map(|e| e.item_id.to_string()).collect())
 }

@@ -91,8 +91,6 @@ function M.scan(ctx)
                         -- Image is its own preview; leave the column
                         -- empty and let consumers fall back to resource.
                         library_root = dir,
-                        metadata = {
-                        },
                     })
                 end
             end

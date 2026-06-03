@@ -376,6 +376,103 @@ pub async fn list_items_all(db: &DatabaseConnection) -> Result<Vec<item::Model>>
         .context("select all items")
 }
 
+/// Reconstruct a `WallpaperEntry` from a DB `item` row + its owning
+/// library path and plugin name. `item.path`/`preview_path` are stored
+/// relative to the library; `resource`/`preview` are rebuilt absolute.
+/// Tags are NOT loaded here — callers batch them via `item.id`.
+fn entry_from_item(
+    it: item::Model,
+    library_path: &str,
+    plugin_name: &str,
+) -> crate::wallpaper_type::WallpaperEntry {
+    use std::path::Path;
+    let resource = Path::new(library_path)
+        .join(&it.path)
+        .to_string_lossy()
+        .into_owned();
+    let preview = it.preview_path.as_deref().map(|rel| {
+        Path::new(library_path)
+            .join(rel)
+            .to_string_lossy()
+            .into_owned()
+    });
+    crate::wallpaper_type::WallpaperEntry {
+        item_id: it.id,
+        name: it.display_name,
+        wp_type: it.ty,
+        resource,
+        preview,
+        description: it.description,
+        tags: Vec::new(),
+        external_id: it.external_id,
+        size: it.size,
+        width: it.width.map(|v| v as u32),
+        height: it.height.map(|v| v as u32),
+        content_rating: it.content_rating,
+        modified_at: it.modified_at,
+        plugin_name: plugin_name.to_string(),
+        library_root: library_path.to_string(),
+    }
+}
+
+/// All items as fully-populated `WallpaperEntry` values, rebuilt from
+/// the DB (the read source of truth). Stable `(library_id, path)` order.
+/// Tags are left empty — callers batch-load them per page via `item.id`.
+pub async fn load_entries(
+    db: &DatabaseConnection,
+) -> Result<Vec<crate::wallpaper_type::WallpaperEntry>> {
+    let lib_path: HashMap<i64, String> = list_libraries(db)
+        .await?
+        .into_iter()
+        .map(|l| (l.id, l.path))
+        .collect();
+    let plugin_name: HashMap<i64, String> = list_plugins(db)
+        .await?
+        .into_iter()
+        .map(|p| (p.id, p.name))
+        .collect();
+    let items = list_items_all(db).await?;
+    Ok(items
+        .into_iter()
+        .filter_map(|it| {
+            let lib = lib_path.get(&it.library_id)?;
+            let plugin = plugin_name
+                .get(&it.plugin_id)
+                .cloned()
+                .unwrap_or_default();
+            Some(entry_from_item(it, lib, &plugin))
+        })
+        .collect())
+}
+
+/// A single item as a `WallpaperEntry` by DB id, with its tags filled.
+pub async fn get_entry(
+    db: &DatabaseConnection,
+    item_id: i64,
+) -> Result<Option<crate::wallpaper_type::WallpaperEntry>> {
+    let row = item::Entity::find_by_id(item_id)
+        .find_also_related(library::Entity)
+        .one(db)
+        .await
+        .with_context(|| format!("select item id={item_id}"))?;
+    let (it, lib) = match row {
+        Some((it, Some(lib))) => (it, lib),
+        _ => return Ok(None),
+    };
+    let plugin = find_plugin_by_id(db, it.plugin_id)
+        .await?
+        .map(|p| p.name)
+        .unwrap_or_default();
+    let tags = list_tags_of_item(db, it.id)
+        .await?
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    let mut entry = entry_from_item(it, &lib.path, &plugin);
+    entry.tags = tags;
+    Ok(Some(entry))
+}
+
 pub async fn list_item_keys_by_wallpaper_filters(
     db: &DatabaseConnection,
     filters: &[crate::control_proto::WallpaperFilterRule],

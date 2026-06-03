@@ -205,7 +205,6 @@ mod tests {
             wp_type: wp_type.to_owned(),
             resource: resource.to_owned(),
             preview: None,
-            metadata: HashMap::new(),
             plugin_name: plugin_name.to_owned(),
             library_root: library_root.to_owned(),
             description: None,
@@ -215,6 +214,7 @@ mod tests {
             width: None,
             height: None,
             content_rating: None,
+            modified_at: None,
         }
     }
 
@@ -364,7 +364,6 @@ mod tests {
             wp_type: "scene".to_owned(),
             resource: "/ws/12345/scene.pkg".to_owned(),
             preview: Some("/ws/12345/preview.gif".to_owned()),
-            metadata: HashMap::new(),
             plugin_name: "wallpaper_engine".to_owned(),
             library_root: "/ws".to_owned(),
             description: Some("rain and music".to_owned()),
@@ -374,6 +373,7 @@ mod tests {
             width: None,
             height: None,
             content_rating: None,
+            modified_at: None,
         };
         let _ = sync_plugin_entries(
             &db,

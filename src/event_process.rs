@@ -66,8 +66,8 @@ pub fn spawn(state: Arc<AppState>, restore_last: bool) {
 
 /// Long-lived watcher: re-apply each display's persisted wallpaper as
 /// it becomes visible. Spawned by the dispatcher when `SourcesReady`
-/// fires so `source_snapshot` is guaranteed populated when the first
-/// apply runs. Single path covers startup + hot-plug.
+/// fires so the DB is guaranteed populated when the first apply runs.
+/// Single path covers startup + hot-plug.
 ///
 /// Coalescing rule: arrivals are grouped by `wp_id`. Each group fires
 /// one `apply_wallpaper_to_displays` call after a SETTLE window from

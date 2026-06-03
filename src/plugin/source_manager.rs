@@ -222,7 +222,6 @@ impl SourceManager {
                 wp_type: tbl.get("wp_type").unwrap_or_default(),
                 resource: tbl.get("resource").unwrap_or_default(),
                 preview: tbl.get::<String>("preview").ok(),
-                metadata: parse_lua_string_map(&tbl, "metadata"),
                 plugin_name: name.to_owned(),
                 library_root: tbl.get("library_root").unwrap_or_default(),
                 description: tbl.get::<String>("description").ok(),
@@ -238,6 +237,8 @@ impl SourceManager {
                 width: tbl.get::<u32>("width").ok(),
                 height: tbl.get::<u32>("height").ok(),
                 content_rating: tbl.get::<String>("content_rating").ok(),
+                // Daemon-only (filled from DB on read); scan leaves it None.
+                modified_at: None,
             };
             let idx = self.entries.len();
             self.by_type
@@ -558,8 +559,8 @@ impl SourceManager {
     /// a flat `{string -> string}` map. `ctx` carries the same helpers
     /// scan(ctx) sees — including `library_meta_get` — so plugins can
     /// pull values they cached at scan time out of `library.metadata`
-    /// instead of duplicating them on every entry. Plugins that
-    /// haven't migrated fall through to `entry.metadata`.
+    /// instead of duplicating them on every entry. A plugin without an
+    /// `extras()` function yields an empty map (no CLI extras).
     ///
     /// `extras["path"]` is mandatory in the result — that's the
     /// canonical resource path. The daemon does NOT enforce that here;
@@ -582,13 +583,12 @@ impl SourceManager {
             let module: LuaTable = self.lua.registry_value(key)?;
             let extras_fn: Option<LuaFunction> = module.get("extras").ok();
             let Some(extras_fn) = extras_fn else {
-                // Legacy path: plugin hasn't migrated to extras(entry, ctx)
-                // yet. Fall back to entry.metadata.
-                log::debug!(
-                    "source plugin '{plugin_name}' has no extras() function; \
-                     using legacy entry.metadata as CLI extras"
-                );
-                return Ok::<_, mlua::Error>(entry.metadata.clone());
+                // A source plugin with no extras() can't produce the
+                // renderer's `--path`; nothing to hand off. (The old
+                // entry.metadata fallback is gone — metadata is no longer
+                // carried; plugins derive extras from ctx + entry fields.)
+                log::warn!("source plugin '{plugin_name}' has no extras() function");
+                return Ok::<_, mlua::Error>(HashMap::new());
             };
             let entry_tbl = self.lua.create_table()?;
             entry_tbl.set("item_id", entry.item_id)?;
@@ -598,13 +598,6 @@ impl SourceManager {
             if let Some(p) = &entry.preview {
                 entry_tbl.set("preview", p.clone())?;
             }
-            // Forward the (still-existing) metadata table so plugins that
-            // wrote secondary keys at scan-time can read them back here.
-            let md_tbl = self.lua.create_table()?;
-            for (k, v) in &entry.metadata {
-                md_tbl.set(k.clone(), v.clone())?;
-            }
-            entry_tbl.set("metadata", md_tbl)?;
             if let Some(d) = &entry.description {
                 entry_tbl.set("description", d.clone())?;
             }
@@ -1148,10 +1141,9 @@ return M
         assert!(entries.iter().all(|e| e.width.is_none()));
         assert!(entries.iter().all(|e| e.height.is_none()));
         assert!(entries.iter().all(|e| e.content_rating.is_none()));
-        // SPAWN_VERSION 3: plugins emit empty `metadata`; the canonical
-        // resource path lives in `entry.resource` and is surfaced to
-        // the renderer via the plugin's `extras(entry)` Lua callback.
-        assert!(entries.iter().all(|e| e.metadata.is_empty()));
+        // SPAWN_VERSION 3: the canonical resource path lives in
+        // `entry.resource` and is surfaced to the renderer via the
+        // plugin's `extras(entry)` Lua callback.
 
         let clip_path = lib.path().join("clip.MP4").to_string_lossy().to_string();
         let clip = mgr.get(&format!("video:{clip_path}")).unwrap().clone();

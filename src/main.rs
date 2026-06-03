@@ -39,11 +39,11 @@ pub struct AppState {
     /// Installable-plugin (package) list from the startup scan. Read-only;
     /// surfaced to the UI via `PluginListRequest` for a plugin-centric view.
     pub plugins: Arc<Vec<plugin::renderer_registry::PluginPackageMeta>>,
-    /// Read-only mirror of the latest scan results. Updated atomically
-    /// by `control::refresh_sources` after the Lua scan finishes; read
-    /// by `WallpaperList`/`WallpaperApply`/`SourceList` so those handlers
-    /// don't contend with an in-flight scan on `source_manager`.
-    pub source_snapshot: Arc<tokio::sync::RwLock<plugin::source_snapshot::SourceSnapshot>>,
+    /// The installed source plugins (types/labels/hints). The only
+    /// scan-derived state not in the DB: the Add-Library UI needs it
+    /// even before any library exists. Populated at startup and after
+    /// each scan; wallpaper reads themselves go straight to the DB.
+    pub source_plugins: Arc<tokio::sync::RwLock<Vec<plugin::source_manager::SourcePluginInfo>>>,
     pub router: Arc<routing::Router>,
     pub settings: Arc<settings::SettingsStore>,
     /// Snapshot of `/dev/dri` taken at startup. Read-only after construction;
@@ -350,15 +350,13 @@ async fn async_main() -> anyhow::Result<()> {
 
     let (rotation_handle, rotation_rx) = queue::rotator::make_handle();
 
-    let source_snapshot = Arc::new(tokio::sync::RwLock::new(
-        plugin::source_snapshot::SourceSnapshot::default(),
-    ));
+    let source_plugins = Arc::new(tokio::sync::RwLock::new(Vec::new()));
 
     let state = Arc::new(AppState {
         renderer_manager: renderer_mgr,
         source_manager: source_mgr.clone(),
         plugins: plugin_packages,
-        source_snapshot,
+        source_plugins,
         router: router.clone(),
         settings: settings_store,
         gpus,
@@ -539,6 +537,13 @@ async fn async_main() -> anyhow::Result<()> {
                         Err(e) => log::warn!("enumerate loaded plugins: {e:#}"),
                     }
                 }
+
+                // Always publish the source-plugin list into the
+                // snapshot up front. It's static (from loaded plugins)
+                // and the Add-Library UI needs it even with no libraries
+                // — otherwise the scan below (which populates it as a
+                // side effect) is skipped and the source list is empty.
+                control::refresh_source_plugins(&state_for_task).await;
 
                 // Step 2 — scan against DB-driven libraries + sync results
                 // + seed the playlist. Skip when no libraries are

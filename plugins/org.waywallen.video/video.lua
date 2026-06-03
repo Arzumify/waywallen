@@ -94,8 +94,6 @@ function M.scan(ctx)
                         -- leave video previews empty until thumbnailing exists.
                         preview = nil,
                         library_root = dir,
-                        metadata = {
-                        },
                         -- Cheap stat-only metadata. Width/height/format are
                         -- filled by the daemon's background media probe.
                         size = ctx.file_size(path),

@@ -116,9 +116,9 @@ pub async fn apply_wallpaper_via_portal(
 }
 
 async fn apply_via_portal_inner(app: &Arc<AppState>, id: &str) -> Result<PortalApplyResult> {
-    let entry = {
-        let snap = app.source_snapshot.read().await;
-        snap.get(id).cloned()
+    let entry = match id.parse::<i64>() {
+        Ok(iid) => repo::get_entry(&app.db, iid).await?,
+        Err(_) => None,
     };
     let entry = entry.ok_or_else(|| Error::WallpaperNotFound(id.to_string()))?;
 
@@ -217,9 +217,9 @@ async fn apply_wallpaper_core(
     id: &str,
     target: Option<&[DisplayId]>,
 ) -> Result<ApplyResult> {
-    let entry = {
-        let snap = app.source_snapshot.read().await;
-        snap.get(id).cloned()
+    let entry = match id.parse::<i64>() {
+        Ok(iid) => repo::get_entry(&app.db, iid).await?,
+        Err(_) => None,
     };
     let entry = entry.ok_or_else(|| Error::WallpaperNotFound(id.to_string()))?;
 
@@ -407,11 +407,11 @@ pub async fn step(app: &Arc<AppState>, delta: i32) -> Result<String> {
             let row: QueueRow = repo::random_item_by_filter(&app.db, &filters, &logics, exclude)
                 .await?
                 .ok_or_else(|| Error::FailedPrecondition("queue is empty".into()))?;
-            bridge_to_entry_id(app, &row).await?
+            bridge_to_entry_id(&row)
         }
         Mode::Shuffle => {
             let row = step_shuffle(app, &filters, &logics, delta).await?;
-            bridge_to_entry_id(app, &row).await?
+            bridge_to_entry_id(&row)
         }
     };
 
@@ -456,29 +456,10 @@ async fn step_sequential(
     Ok(ordered[next_idx].clone())
 }
 
-/// Bridge a DB row to a snapshot entry id (the `WallpaperApply`
-/// argument). Returns `Error::WallpaperNotFound` if the snapshot
-/// hasn't picked the row up yet (sync just ran but scan hasn't).
-async fn bridge_to_entry_id(app: &Arc<AppState>, row: &repo::QueueRow) -> Result<String> {
-    let snap = app.source_snapshot.read().await;
-    for entry in snap.list() {
-        if entry.library_root.is_empty() {
-            continue;
-        }
-        let rel = match crate::queue::relative_under_root(&entry.library_root, &entry.resource) {
-            Some(r) => r,
-            None => continue,
-        };
-        if entry.library_root.trim_end_matches('/') == row.library_path.trim_end_matches('/')
-            && rel == row.item_path
-        {
-            return Ok(entry.item_id.to_string());
-        }
-    }
-    Err(Error::WallpaperNotFound(format!(
-        "{} / {}",
-        row.library_path, row.item_path
-    )))
+/// Bridge a DB queue row to the `WallpaperApply` argument. Identity is
+/// the DB `item.id`, which the row already carries.
+fn bridge_to_entry_id(row: &repo::QueueRow) -> String {
+    row.item_id.to_string()
 }
 
 async fn step_shuffle(
@@ -837,6 +818,23 @@ pub async fn libraries_by_plugin_name(
 /// Called from startup after plugins load, from manual `rescan`, and
 /// from `LibraryAdd` / `LibraryRemove` so the in-memory snapshot and
 /// DB stay consistent with the user-managed library list.
+/// Discover the installed source plugins and publish them into the
+/// snapshot, without touching scanned entries. Idempotent; safe to call
+/// before any library exists so the Add-Library UI always has the list.
+pub async fn refresh_source_plugins(app: &Arc<AppState>) {
+    let plugins = {
+        let sm = app.source_manager.lock().await;
+        match sm.plugins() {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!("refresh_source_plugins: source_manager.plugins() failed: {e:#}");
+                Vec::new()
+            }
+        }
+    };
+    *app.source_plugins.write().await = plugins;
+}
+
 pub async fn refresh_sources(app: &Arc<AppState>) -> Result<usize> {
     use std::sync::atomic::Ordering;
     app.scan_in_progress.store(true, Ordering::SeqCst);
@@ -875,9 +873,8 @@ async fn refresh_sources_inner(app: &Arc<AppState>) -> Result<usize> {
         .map(|(name, paths)| (name.clone(), dedup_paths_by_canonical(paths)))
         .collect();
     // The Lua VM lock (`source_manager`) is held only during the scan
-    // itself. Read consumers (`WallpaperList`/`WallpaperApply`/
-    // `SourceList`) go through `source_snapshot` instead and never park
-    // behind this section.
+    // itself. Wallpaper read consumers (`WallpaperList`/`WallpaperApply`)
+    // hit the DB and never park behind this section.
     //
     // `scan_all` is async because Lua plugins can call mlua async
     // functions (`ctx.library_meta_*`) that await sea-orm. We still
@@ -896,7 +893,13 @@ async fn refresh_sources_inner(app: &Arc<AppState>) -> Result<usize> {
 
     let plugins = {
         let sm = app.source_manager.lock().await;
-        sm.plugins().unwrap_or_default()
+        match sm.plugins() {
+            Ok(p) => p,
+            Err(e) => {
+                log::warn!("refresh_sources: source_manager.plugins() failed: {e:#}");
+                Vec::new()
+            }
+        }
     };
 
     // Sync to the DB first so every entry gets its canonical identity
@@ -945,24 +948,10 @@ async fn refresh_sources_inner(app: &Arc<AppState>) -> Result<usize> {
         }
     }
 
-    // Stamp each entry with its DB `item.id` (the wire/snapshot
-    // identity) and drop entries the sync layer couldn't place (no DB
-    // row → not addressable). Then install the enriched snapshot.
-    let meta = crate::wallpaper_sort::load_db_meta_map(app).await?;
-    let enriched: Vec<WallpaperEntry> = snapshot
-        .into_iter()
-        .filter_map(|mut e| {
-            let rel = crate::model::sync::relative_under_root(&e.library_root, &e.resource)?;
-            let m = meta.get(&(e.library_root.clone(), rel))?;
-            e.item_id = m.id;
-            Some(e)
-        })
-        .collect();
-    let count = enriched.len();
-    {
-        let mut snap = app.source_snapshot.write().await;
-        snap.install(enriched, plugins);
-    }
+    // Scan results are now persisted in the DB (the read source of
+    // truth); only the source-plugin list is cached in memory.
+    let count = snapshot.len();
+    *app.source_plugins.write().await = plugins;
     // Queue plays dynamically from settings.wallpaper_filter; nothing
     // to rebind after a sources refresh — the next `step()` will see
     // the new DB rows. Invalidate any pre-built shuffle round so it's
