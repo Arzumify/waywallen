@@ -161,12 +161,8 @@ MD.Page {
 
                         MD.Switch {
                             id: m_sidebar_auto_expand
+                            checked: W.Global.sidebarAutoExpand
                             onToggled: W.Global.sidebarAutoExpand = checked
-                        }
-                        Binding {
-                            target: m_sidebar_auto_expand
-                            property: "checked"
-                            value: W.Global.sidebarAutoExpand
                         }
                     }
                 }

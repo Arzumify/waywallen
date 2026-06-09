@@ -7,13 +7,10 @@ import Qcm.Material as MD
 QtObject {
     id: root
 
-    // Persisted UI preferences (QSettings, category "general").
-    property alias sidebarAutoExpand: m_settings.sidebarAutoExpand
+    property bool sidebarAutoExpand: true
 
-    readonly property Settings _settings: Settings {
-        id: m_settings
-        category: "general"
-        property bool sidebarAutoExpand: true
+    readonly property Settings _generalSettings: Settings {
+        property alias sidebarAutoExpand: root.sidebarAutoExpand
     }
 
     // Per-vendor Material color schemes, seeded from each GPU vendor's brand

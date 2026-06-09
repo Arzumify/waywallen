@@ -9,10 +9,11 @@ import waywallen;
 int main(int argc, char** argv) {
     ncrequest::global_init();
     QGuiApplication gui_app(argc, argv);
-    QGuiApplication::setDesktopFileName(APP_ID);
-    QCoreApplication::setOrganizationName(QStringLiteral("waywallen"));
-    QCoreApplication::setApplicationName(APP_NAME);
-    QCoreApplication::setApplicationVersion(APP_VERSION);
+    gui_app.setDesktopFileName(APP_ID);
+    gui_app.setOrganizationName("waywallen");
+    gui_app.setOrganizationDomain("waywallen.org");
+    gui_app.setApplicationName(APP_NAME);
+    gui_app.setApplicationVersion(APP_VERSION);
 
     QCommandLineParser parser;
     parser.addHelpOption();
