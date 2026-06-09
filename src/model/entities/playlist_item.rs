@@ -19,11 +19,24 @@ pub enum Relation {
         on_delete = "Cascade"
     )]
     Playlist,
+    #[sea_orm(
+        belongs_to = "super::item::Entity",
+        from = "Column::EntryId",
+        to = "super::item::Column::Id",
+        on_delete = "Cascade"
+    )]
+    Item,
 }
 
 impl Related<super::playlist::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::Playlist.def()
+    }
+}
+
+impl Related<super::item::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::Item.def()
     }
 }
 

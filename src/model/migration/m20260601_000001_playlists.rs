@@ -73,13 +73,21 @@ impl MigrationTrait for Migration {
                         ColumnDef::new(PlaylistItem::Position)
                             .big_integer()
                             .not_null()
-                            .default(0i64),
+                            .default(0i64)
+                            .check(Expr::col(PlaylistItem::Position).gte(0)),
                     )
                     .foreign_key(
                         ForeignKey::create()
                             .name("fk_playlist_item_playlist")
                             .from(PlaylistItem::Table, PlaylistItem::PlaylistId)
                             .to(Playlist::Table, Playlist::Id)
+                            .on_delete(ForeignKeyAction::Cascade),
+                    )
+                    .foreign_key(
+                        ForeignKey::create()
+                            .name("fk_playlist_item_item")
+                            .from(PlaylistItem::Table, PlaylistItem::EntryId)
+                            .to(Item::Table, Item::Id)
                             .on_delete(ForeignKeyAction::Cascade),
                     )
                     .to_owned(),
@@ -93,6 +101,27 @@ impl MigrationTrait for Migration {
                     .table(PlaylistItem::Table)
                     .col(PlaylistItem::PlaylistId)
                     .col(PlaylistItem::Position)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_playlist_item_playlist_entry")
+                    .table(PlaylistItem::Table)
+                    .col(PlaylistItem::PlaylistId)
+                    .col(PlaylistItem::EntryId)
+                    .unique()
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_playlist_item_entry")
+                    .table(PlaylistItem::Table)
+                    .col(PlaylistItem::EntryId)
                     .to_owned(),
             )
             .await?;
@@ -129,4 +158,10 @@ enum PlaylistItem {
     PlaylistId,
     EntryId,
     Position,
+}
+
+#[derive(DeriveIden)]
+enum Item {
+    Table,
+    Id,
 }

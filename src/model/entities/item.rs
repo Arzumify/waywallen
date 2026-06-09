@@ -73,6 +73,8 @@ pub enum Relation {
     Library,
     #[sea_orm(has_many = "super::item_tag::Entity")]
     ItemTag,
+    #[sea_orm(has_many = "super::playlist_item::Entity")]
+    PlaylistItem,
 }
 
 impl Related<super::source_plugin::Entity> for Entity {
@@ -90,6 +92,12 @@ impl Related<super::library::Entity> for Entity {
 impl Related<super::item_tag::Entity> for Entity {
     fn to() -> RelationDef {
         Relation::ItemTag.def()
+    }
+}
+
+impl Related<super::playlist_item::Entity> for Entity {
+    fn to() -> RelationDef {
+        Relation::PlaylistItem.def()
     }
 }
 

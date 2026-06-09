@@ -165,15 +165,51 @@ async fn require<C: sea_orm::ConnectionTrait>(conn: &C, id: i64) -> Result<playl
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::repo as model_repo;
 
     async fn mem_db() -> DatabaseConnection {
         crate::model::connect_url("sqlite::memory:").await.unwrap()
     }
 
+    async fn seed_items(db: &DatabaseConnection, count: usize) -> Vec<i64> {
+        let plugin = model_repo::upsert_plugin(db, "playlist-test", "")
+            .await
+            .unwrap();
+        let library = model_repo::add_library(db, plugin.id, "/playlist-test")
+            .await
+            .unwrap();
+        let mut ids = Vec::with_capacity(count);
+        for idx in 0..count {
+            let path = format!("item-{idx}");
+            let item = model_repo::upsert_item(
+                db,
+                model_repo::ItemUpsertArgs {
+                    plugin_id: plugin.id,
+                    library_id: library.id,
+                    path: &path,
+                    ty: "image",
+                    display_name: "",
+                    preview_path: None,
+                    description: None,
+                    external_id: None,
+                    size: None,
+                    width: None,
+                    height: None,
+                    content_rating: None,
+                },
+            )
+            .await
+            .unwrap();
+            ids.push(item.id);
+        }
+        ids
+    }
+
     #[tokio::test]
     async fn create_list_delete_roundtrip() {
         let db = mem_db().await;
-        let id = create(&db, "Nature", Mode::Shuffle, 300, 1, &[10])
+        let items = seed_items(&db, 1).await;
+        let id = create(&db, "Nature", Mode::Shuffle, 300, 1, &items)
             .await
             .unwrap();
         let all = list(&db).await.unwrap();
@@ -189,19 +225,26 @@ mod tests {
     #[tokio::test]
     async fn set_items_replaces_in_order() {
         let db = mem_db().await;
-        let id = create(&db, "p", Mode::Sequential, 0, 1, &[10])
+        let items = seed_items(&db, 3).await;
+        let id = create(&db, "p", Mode::Sequential, 0, 1, &items[0..1])
             .await
             .unwrap();
-        set_items(&db, id, &[11, 12, 10], 2).await.unwrap();
-        assert_eq!(entry_ids(&db, id).await.unwrap(), vec![11, 12, 10]);
-        set_items(&db, id, &[10], 3).await.unwrap();
-        assert_eq!(entry_ids(&db, id).await.unwrap(), vec![10]);
+        set_items(&db, id, &[items[1], items[2], items[0]], 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            entry_ids(&db, id).await.unwrap(),
+            vec![items[1], items[2], items[0]]
+        );
+        set_items(&db, id, &items[0..1], 3).await.unwrap();
+        assert_eq!(entry_ids(&db, id).await.unwrap(), vec![items[0]]);
     }
 
     #[tokio::test]
     async fn delete_cascades_items() {
         let db = mem_db().await;
-        let id = create(&db, "p", Mode::Sequential, 0, 1, &[10, 11])
+        let items = seed_items(&db, 2).await;
+        let id = create(&db, "p", Mode::Sequential, 0, 1, &items)
             .await
             .unwrap();
         delete(&db, id).await.unwrap();
@@ -211,7 +254,8 @@ mod tests {
     #[tokio::test]
     async fn mutators_touch_fields() {
         let db = mem_db().await;
-        let id = create(&db, "p", Mode::Sequential, 0, 1, &[10])
+        let items = seed_items(&db, 1).await;
+        let id = create(&db, "p", Mode::Sequential, 0, 1, &items)
             .await
             .unwrap();
         rename(&db, id, "Renamed", 5).await.unwrap();
