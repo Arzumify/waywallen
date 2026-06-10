@@ -47,6 +47,7 @@ export class DisplayLayoutSetQuery
     QML_ELEMENT
 
     Q_PROPERTY(QString name READ name WRITE setName NOTIFY paramsChanged FINAL)
+    Q_PROPERTY(quint64 displayId READ displayId WRITE setDisplayId NOTIFY paramsChanged FINAL)
     Q_PROPERTY(bool fillmodeSet READ fillmodeSet WRITE setFillmodeSet NOTIFY paramsChanged FINAL)
     Q_PROPERTY(int fillmode READ fillmode WRITE setFillmode NOTIFY paramsChanged FINAL)
     Q_PROPERTY(bool alignSet READ alignSet WRITE setAlignSet NOTIFY paramsChanged FINAL)
@@ -64,6 +65,8 @@ public:
 
     auto name() const -> const QString& { return m_name; }
     void setName(const QString& v);
+    auto displayId() const -> quint64 { return m_display_id; }
+    void setDisplayId(quint64 v);
     auto fillmodeSet() const -> bool { return m_fillmode_set; }
     void setFillmodeSet(bool v);
     auto fillmode() const -> int { return m_fillmode; }
@@ -89,6 +92,7 @@ public:
 
 private:
     QString m_name;
+    quint64 m_display_id { 0 };
     bool    m_fillmode_set { false };
     int     m_fillmode { 0 };
     bool    m_align_set { false };
@@ -106,6 +110,7 @@ export class DisplayRenameQuery : public Query,
     QML_ELEMENT
 
     Q_PROPERTY(QString name READ name WRITE setName NOTIFY paramsChanged FINAL)
+    Q_PROPERTY(quint64 displayId READ displayId WRITE setDisplayId NOTIFY paramsChanged FINAL)
     Q_PROPERTY(QString alias READ alias WRITE setAlias NOTIFY paramsChanged FINAL)
     Q_PROPERTY(bool clear READ clear WRITE setClear NOTIFY paramsChanged FINAL)
 
@@ -114,6 +119,8 @@ public:
 
     auto name() const -> const QString& { return m_name; }
     void setName(const QString& v);
+    auto displayId() const -> quint64 { return m_display_id; }
+    void setDisplayId(quint64 v);
     auto alias() const -> const QString& { return m_alias; }
     void setAlias(const QString& v);
     auto clear() const -> bool { return m_clear; }
@@ -125,6 +132,7 @@ public:
 
 private:
     QString m_name;
+    quint64 m_display_id { 0 };
     QString m_alias;
     bool    m_clear { false };
 };

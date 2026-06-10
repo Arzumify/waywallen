@@ -573,9 +573,12 @@ message DisplayInfo {
 }
 
 message DisplayRenameRequest {
-  string name  = 1;
-  string alias = 2;
-  bool   clear = 3;
+  // Live display id to mutate. `name` is retained for older clients but
+  // is not used for target resolution.
+  string name       = 1;
+  string alias      = 2;
+  bool   clear      = 3;
+  uint64 display_id = 4;
 }
 
 message DisplayRenameResponse {
@@ -666,7 +669,8 @@ message DisplayListResponse {
 // override AND set the corresponding `clear_*` flag below to true.
 // Sending an unspecified override leaves the override entry untouched.
 message DisplayLayoutSetRequest {
-  // Display name as advertised in `register_display`.
+  // Live display id to mutate. `name` is retained for older clients but
+  // is not used for target resolution.
   string name = 1;
   // New override values. Field set/unset behavior follows the
   // `LayoutOverride` message rules.
@@ -678,15 +682,14 @@ message DisplayLayoutSetRequest {
   bool clear_fillmode = 3;
   bool clear_align    = 4;
   bool clear_rotation = 6;
+  uint64 display_id   = 7;
   reserved 5;
   reserved "clear_clear_rgba";
 }
 
 message DisplayLayoutSetResponse {
   // Updated DisplayInfo for the affected display (with refreshed
-  // `effective_layout`). Empty if the display name was not registered
-  // at the time of the call — the override is still persisted and
-  // takes effect when the display next registers.
+  // `effective_layout`). Empty if the target live display was absent.
   DisplayInfo display = 1;
 }
 

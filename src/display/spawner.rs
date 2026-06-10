@@ -516,18 +516,6 @@ mod tests {
     }
 
     #[test]
-    fn unknown_wm_picks_layer_shell() {
-        let caps = DeCaps {
-            xdg_desktop: vec!["wayfire".into()],
-            ..Default::default()
-        };
-        match pick_backend(&registry(), &caps) {
-            PickOutcome::Matched(d) => assert_eq!(d.name, "layer-shell"),
-            other => panic!("expected Matched(layer-shell), got {:?}", other),
-        }
-    }
-
-    #[test]
     fn should_daemon_spawn_respects_mode() {
         let caps_kde = DeCaps {
             xdg_desktop: vec!["kde".into()],

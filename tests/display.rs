@@ -420,11 +420,9 @@ mod sync_fd_fanout {
                 wp_type: "scene".into(),
                 extras: std::collections::HashMap::new(),
                 settings: std::collections::HashMap::new(),
-                width: 640,
-                height: 480,
-                extent_mode: 0,
                 test_pattern: false,
                 renderer_name: None,
+                user_properties_json: None,
             })
             .await;
         let renderer_id = match spawn_res {
@@ -530,11 +528,9 @@ mod sync_fd_single {
                 wp_type: "scene".into(),
                 extras: std::collections::HashMap::new(),
                 settings: std::collections::HashMap::new(),
-                width: 640,
-                height: 480,
-                extent_mode: 0,
                 test_pattern: false,
                 renderer_name: None,
+                user_properties_json: None,
             })
             .await;
         let renderer_id = match spawn_res {

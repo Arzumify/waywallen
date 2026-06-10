@@ -292,6 +292,7 @@ MD.Page {
                             if (trimmed === serverAlias)
                                 return;
                             renameQuery.name = root.selected.name;
+                            renameQuery.displayId = root.selected.id;
                             renameQuery.alias = trimmed;
                             renameQuery.clear = (trimmed.length === 0);
                             renameQuery.reload();
@@ -320,6 +321,7 @@ MD.Page {
                             if (!root.selected)
                                 return;
                             renameQuery.name = root.selected.name;
+                            renameQuery.displayId = root.selected.id;
                             renameQuery.alias = "";
                             renameQuery.clear = true;
                             renameQuery.reload();
@@ -506,6 +508,7 @@ MD.Page {
                                 if (!root.selected)
                                     return;
                                 layoutSetQuery.name = root.selected.name;
+                                layoutSetQuery.displayId = root.selected.id;
                                 layoutSetQuery.fillmodeSet = false;
                                 layoutSetQuery.alignSet = false;
                                 layoutSetQuery.clearFillmode = true;
@@ -545,6 +548,7 @@ MD.Page {
                                 if (!root.selected)
                                     return;
                                 layoutSetQuery.name = root.selected.name;
+                                layoutSetQuery.displayId = root.selected.id;
                                 layoutSetQuery.fillmodeSet = true;
                                 layoutSetQuery.fillmode = root.kFillModeValues[idx];
                                 layoutSetQuery.alignSet = false;
@@ -622,6 +626,7 @@ MD.Page {
                                             if (!root.selected)
                                                 return;
                                             layoutSetQuery.name = root.selected.name;
+                                            layoutSetQuery.displayId = root.selected.id;
                                             layoutSetQuery.fillmodeSet = false;
                                             layoutSetQuery.alignSet = true;
                                             layoutSetQuery.align = parent.alignValue;
@@ -660,6 +665,7 @@ MD.Page {
                                 if (!root.selected)
                                     return;
                                 layoutSetQuery.name = root.selected.name;
+                                layoutSetQuery.displayId = root.selected.id;
                                 layoutSetQuery.fillmodeSet = false;
                                 layoutSetQuery.alignSet = false;
                                 layoutSetQuery.rotationSet = true;

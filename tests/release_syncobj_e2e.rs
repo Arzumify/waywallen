@@ -94,10 +94,8 @@ fn release_syncobj_round_trip() {
         &stream,
         &ControlMsg::Init {
             spawn_version: 4,
-            extent_w: 640,
-            extent_h: 360,
-            extent_mode: 0,
             settings: Vec::new(),
+            user_properties: String::new(),
         },
         &[],
     )

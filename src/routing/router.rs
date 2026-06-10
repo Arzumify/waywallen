@@ -426,6 +426,7 @@ impl Router {
     /// receives an updated `set_config`.
     pub async fn set_display_layout(
         self: &Arc<Self>,
+        display_id: Option<DisplayId>,
         display_name: String,
         new_fillmode: Option<crate::display::layout::FillMode>,
         new_align: Option<crate::display::layout::Align>,
@@ -433,29 +434,18 @@ impl Router {
         clear_fillmode: bool,
         clear_align: bool,
         clear_rotation: bool,
-    ) {
+    ) -> Option<DisplayId> {
         let Some(settings) = self.settings.get().cloned() else {
             log::warn!(
                 "router: set_display_layout({display_name}) called before settings attached"
             );
-            return;
+            return None;
         };
-        // Resolve the live display first so we know whether it has a
-        // stable v4 `instance_id` to key persistent settings under.
-        // Falls back to `display_name` for legacy v3 clients (or when
-        // the display is currently disconnected — the RPC still lets
-        // the user edit prefs by name).
-        let target_id = self.find_display_by_name(&display_name).await;
-        let key = match target_id {
-            Some(did) => {
-                let inner = self.inner.lock().await;
-                inner
-                    .displays
-                    .get(&did)
-                    .and_then(|s| s.info.instance_id.clone())
-                    .unwrap_or_else(|| display_name.clone())
-            }
-            None => display_name.clone(),
+        let Some((target_id, key)) = self
+            .resolve_display_mutation_target(display_id, &display_name, "set_display_layout")
+            .await
+        else {
+            return None;
         };
         settings.update(|s| {
             let entry = s.displays.entry(key.clone()).or_default();
@@ -482,35 +472,29 @@ impl Router {
                 s.displays.remove(&key);
             }
         });
-        if let Some(did) = target_id {
-            self.resync_display_set_config(did).await;
-            if let Some(snap) = self.snapshot_display(did).await {
-                self.emit(RouterEvent::DisplayUpsert(snap));
-            }
+        self.resync_display_set_config(target_id).await;
+        if let Some(snap) = self.snapshot_display(target_id).await {
+            self.emit(RouterEvent::DisplayUpsert(snap));
         }
+        Some(target_id)
     }
 
     pub async fn set_display_alias(
         self: &Arc<Self>,
+        display_id: Option<DisplayId>,
         display_name: String,
         new_alias: Option<String>,
         clear: bool,
-    ) {
+    ) -> Option<DisplayId> {
         let Some(settings) = self.settings.get().cloned() else {
             log::warn!("router: set_display_alias({display_name}) called before settings attached");
-            return;
+            return None;
         };
-        let target_id = self.find_display_by_name(&display_name).await;
-        let key = match target_id {
-            Some(did) => {
-                let inner = self.inner.lock().await;
-                inner
-                    .displays
-                    .get(&did)
-                    .and_then(|s| s.info.instance_id.clone())
-                    .unwrap_or_else(|| display_name.clone())
-            }
-            None => display_name.clone(),
+        let Some((target_id, key)) = self
+            .resolve_display_mutation_target(display_id, &display_name, "set_display_alias")
+            .await
+        else {
+            return None;
         };
         settings.update(|s| {
             let entry = s.displays.entry(key.clone()).or_default();
@@ -529,11 +513,10 @@ impl Router {
                 s.displays.remove(&key);
             }
         });
-        if let Some(did) = target_id {
-            if let Some(snap) = self.snapshot_display(did).await {
-                self.emit(RouterEvent::DisplayUpsert(snap));
-            }
+        if let Some(snap) = self.snapshot_display(target_id).await {
+            self.emit(RouterEvent::DisplayUpsert(snap));
         }
+        Some(target_id)
     }
 
     /// Re-emit `set_config` for a single display to pick up new
@@ -568,13 +551,22 @@ impl Router {
         }
     }
 
-    async fn find_display_by_name(self: &Arc<Self>, name: &str) -> Option<DisplayId> {
+    async fn resolve_display_mutation_target(
+        self: &Arc<Self>,
+        display_id: Option<DisplayId>,
+        display_name: &str,
+        op: &str,
+    ) -> Option<(DisplayId, String)> {
         let inner = self.inner.lock().await;
-        inner
-            .displays
-            .iter()
-            .find(|(_, s)| s.info.name == name)
-            .map(|(id, _)| *id)
+        let Some(display_id) = display_id else {
+            log::warn!("router: {op}: missing display_id for {display_name}");
+            return None;
+        };
+        let Some(state) = inner.displays.get(&display_id) else {
+            log::warn!("router: {op}: display_id={display_id} not registered");
+            return None;
+        };
+        Some((display_id, Self::settings_key_for(&state.info).to_string()))
     }
 
     /// Re-emit `set_config` for every registered display. Called from
@@ -2350,6 +2342,14 @@ mod tests {
         }
     }
 
+    async fn test_settings_store() -> Arc<crate::settings::SettingsStore> {
+        let tmp = tempfile::tempdir().unwrap();
+        let store =
+            crate::settings::SettingsStore::load_or_default(tmp.path().join("settings.toml")).await;
+        std::mem::forget(tmp);
+        store
+    }
+
     #[tokio::test]
     async fn display_settings_keys_prefers_instance_id() {
         let mgr = Arc::new(RendererManager::new_default());
@@ -2364,6 +2364,53 @@ mod tests {
         // Unknown ids are dropped.
         let keys = router.display_settings_keys(&[h1.id, 9999]).await;
         assert_eq!(keys, vec![(h1.id, "uuid-1".into())]);
+    }
+
+    #[tokio::test]
+    async fn display_layout_set_targets_display_id_when_names_collide() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        let settings = test_settings_store().await;
+        router.attach_settings(settings.clone());
+
+        let r = RendererHandle::test_stub("r1", "scene");
+        *r.bind_snapshot().lock().unwrap() = Some(fake_bind_snapshot(1, 1920, 1080));
+        mgr.register_test_handle(r.clone()).await;
+        router.register_renderer(r.clone()).await;
+
+        let mut h1 = router
+            .register_display(reg_iid("KDE Screen", "iid-1"))
+            .await;
+        let mut h2 = router
+            .register_display(reg_iid("KDE Screen", "iid-2"))
+            .await;
+        let _ = last_set_config(&mut h1.rx);
+        let _ = last_set_config(&mut h2.rx);
+
+        let target = router
+            .set_display_layout(
+                Some(h2.id),
+                "KDE Screen".into(),
+                Some(FillMode::PreserveAspectFit),
+                None,
+                None,
+                false,
+                false,
+                false,
+            )
+            .await;
+
+        assert_eq!(target, Some(h2.id));
+        assert!(last_set_config(&mut h1.rx).is_none());
+        assert!(last_set_config(&mut h2.rx).is_some());
+
+        let snap = settings.snapshot();
+        assert_eq!(
+            snap.displays.get("iid-2").and_then(|p| p.fillmode),
+            Some(FillMode::PreserveAspectFit)
+        );
+        assert!(snap.displays.get("iid-1").is_none());
+        assert!(snap.displays.get("KDE Screen").is_none());
     }
 
     #[tokio::test]

@@ -413,11 +413,9 @@ mod lifecycle {
             wp_type: "scene".into(),
             extras: std::collections::HashMap::new(),
             settings: std::collections::HashMap::new(),
-            width: 320,
-            height: 240,
-            extent_mode: 0,
             test_pattern: false,
             renderer_name: None,
+            user_properties_json: None,
         };
         let id = mgr.spawn(req).await.expect("spawn");
         assert!(!id.is_empty());

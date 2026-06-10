@@ -84,6 +84,7 @@ DisplayLayoutSetQuery::DisplayLayoutSetQuery(QObject* parent): Query(parent) {}
     } while (0)
 
 void DisplayLayoutSetQuery::setName(const QString& v) { WW_SET(m_name, v); }
+void DisplayLayoutSetQuery::setDisplayId(quint64 v) { WW_SET(m_display_id, v); }
 void DisplayLayoutSetQuery::setFillmodeSet(bool v) { WW_SET(m_fillmode_set, v); }
 void DisplayLayoutSetQuery::setFillmode(int v) { WW_SET(m_fillmode, v); }
 void DisplayLayoutSetQuery::setAlignSet(bool v) { WW_SET(m_align_set, v); }
@@ -109,6 +110,7 @@ void DisplayLayoutSetQuery::reload() {
 
     proto::DisplayLayoutSetRequest inner;
     inner.setName(m_name);
+    inner.setDisplayId(m_display_id);
     inner.setOverride(ovr);
     inner.setClearFillmode(m_clear_fillmode);
     inner.setClearAlign(m_clear_align);
@@ -144,6 +146,7 @@ DisplayRenameQuery::DisplayRenameQuery(QObject* parent): Query(parent) {}
     } while (0)
 
 void DisplayRenameQuery::setName(const QString& v) { WW_SET(m_name, v); }
+void DisplayRenameQuery::setDisplayId(quint64 v) { WW_SET(m_display_id, v); }
 void DisplayRenameQuery::setAlias(const QString& v) { WW_SET(m_alias, v); }
 void DisplayRenameQuery::setClear(bool v) { WW_SET(m_clear, v); }
 #undef WW_SET
@@ -154,6 +157,7 @@ void DisplayRenameQuery::reload() {
 
     proto::DisplayRenameRequest inner;
     inner.setName(m_name);
+    inner.setDisplayId(m_display_id);
     inner.setAlias(m_alias);
     inner.setClear(m_clear);
 

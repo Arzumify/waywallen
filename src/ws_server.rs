@@ -1199,9 +1199,10 @@ async fn dispatch_inner(
                     .filter(|o| o.rotation_set)
                     .and_then(|o| rotation_from_pb(o.rotation))
             };
-            state
+            let target_id = state
                 .router
                 .set_display_layout(
+                    (r.display_id != 0).then_some(r.display_id),
                     r.name.clone(),
                     new_fillmode,
                     new_align,
@@ -1211,12 +1212,14 @@ async fn dispatch_inner(
                     r.clear_rotation,
                 )
                 .await;
-            // Look up the (possibly absent) DisplayInfo to return.
-            let snap = state.router.snapshot_displays().await;
-            let display = snap
-                .into_iter()
-                .find(|d| d.name == r.name)
-                .map(|d| display_snapshot_to_pb(d, &state.settings));
+            let display = match target_id {
+                Some(id) => state
+                    .router
+                    .snapshot_display(id)
+                    .await
+                    .map(|d| display_snapshot_to_pb(d, &state.settings)),
+                None => None,
+            };
             Res::DisplayLayoutSet(pb::DisplayLayoutSetResponse { display })
         }
 
@@ -1226,15 +1229,23 @@ async fn dispatch_inner(
             } else {
                 Some(r.alias.clone())
             };
-            state
+            let target_id = state
                 .router
-                .set_display_alias(r.name.clone(), new_alias, r.clear)
+                .set_display_alias(
+                    (r.display_id != 0).then_some(r.display_id),
+                    r.name.clone(),
+                    new_alias,
+                    r.clear,
+                )
                 .await;
-            let snap = state.router.snapshot_displays().await;
-            let display = snap
-                .into_iter()
-                .find(|d| d.name == r.name)
-                .map(|d| display_snapshot_to_pb(d, &state.settings));
+            let display = match target_id {
+                Some(id) => state
+                    .router
+                    .snapshot_display(id)
+                    .await
+                    .map(|d| display_snapshot_to_pb(d, &state.settings)),
+                None => None,
+            };
             Res::DisplayRename(pb::DisplayRenameResponse { display })
         }
 
