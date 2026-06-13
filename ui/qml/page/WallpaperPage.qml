@@ -19,6 +19,23 @@ MD.Page {
         id: scanQuery
     }
 
+    W.PlaylistListQuery {
+        id: playlistListQuery
+    }
+
+    W.PlaylistMutationQuery {
+        id: playlistMutation
+        onDone: {
+            playlistListQuery.reload();
+            if (playlistMutation.status === 3) {
+                W.Action.toast(qsTr("Playlist update failed"));
+                return;
+            }
+            root.clearWallpaperSelection();
+            W.Action.toast(qsTr("Playlist updated"));
+        }
+    }
+
     // Daemon-driven syncs (manual click, LibraryAdd/Remove, startup)
     // all reach the UI through `Notify` (mirrors the daemon's
     // `GlobalEvent` broadcasts). Toast UX is handled here via
@@ -40,6 +57,7 @@ MD.Page {
 
     function reloadAll() {
         pluginQuery.reload();
+        playlistListQuery.reload();
         filterSettingsGet.reload();
     }
 
@@ -134,6 +152,57 @@ MD.Page {
         icon.name: MD.Token.icon.folder_open
         enabled: root.containerFolderUrl(root.infoWallpaper()?.resource).length > 0
         onTriggered: root.openContainerFolder()
+    }
+
+    MD.Action {
+        id: enterSelectionAction
+        text: "Select"
+        icon.name: "checklist"
+        onTriggered: root.beginWallpaperSelection(m_grid_view ? m_grid_view.currentIndex : -1)
+    }
+
+    MD.Action {
+        id: createPlaylistFromSelectionAction
+        text: "New playlist"
+        icon.name: MD.Token.icon.playlist_add
+        busy: playlistMutation.querying
+        enabled: root.selectedWallpaperCount > 0
+        onTriggered: root.createPlaylistFromSelection()
+    }
+
+    MD.Action {
+        id: addToPlaylistAction
+        text: "Add to playlist"
+        icon.name: MD.Token.icon.playlist_add
+        enabled: root.selectedWallpaperCount > 0
+              && (playlistListQuery.playlists || []).length > 0
+              && !playlistMutation.querying
+        onTriggered: selectionPlaylistMenu.open()
+    }
+
+    MD.Action {
+        id: filterAction
+        icon.name: MD.Token.icon.filter_list
+        text: "Filters"
+        checked: wallpaperQuery.hasActiveFilters
+        onTriggered: filterDialog.open()
+    }
+
+    MD.Action {
+        id: sourcesAction
+        icon.name: MD.Token.icon.hard_drive
+        text: "Sources"
+        onTriggered: MD.Util.showPopup('waywallen.ui/PagePopup', {
+            source: 'waywallen.ui/SourceManagePage'
+        }, root)
+    }
+
+    MD.Action {
+        id: refreshAction
+        icon.name: MD.Token.icon.refresh
+        text: "Refresh"
+        enabled: !W.Notify.scanInProgress
+        onTriggered: scanQuery.reload()
     }
 
     readonly property MD.Action activeApplyAction:
@@ -341,6 +410,143 @@ MD.Page {
     }
 
     property var selectedWallpaper: null
+    property bool selectionMode: false
+    property int selectionAnchorIndex: -1
+    readonly property int selectionSheetReserve: 160
+    readonly property int selectedWallpaperCount: wallpaperQuery.data
+        ? wallpaperQuery.data.selectedCount
+        : 0
+    readonly property bool selectionActive: root.selectionMode || root.selectedWallpaperCount > 0
+
+    onSelectedWallpaperCountChanged: root.cancelWallpaperSelectionIfEmpty()
+
+    onSelectionActiveChanged: {
+        if (selectionActive) {
+            selectedWallpaper = null;
+            if (m_grid_view)
+                m_grid_view.currentIndex = -1;
+        }
+        root.syncSelectionSheet();
+    }
+
+    function beginWallpaperSelection(index) {
+        const model = wallpaperQuery.data;
+        if (!model) {
+            root.selectionMode = false;
+            root.selectionAnchorIndex = -1;
+            return;
+        }
+
+        const row = index === undefined ? -1 : Number(index);
+        if (row >= 0) {
+            model.setSelected(row, true);
+            root.selectionAnchorIndex = row;
+        }
+
+        if (model.selectedCount === 0) {
+            root.selectionMode = false;
+            root.selectionAnchorIndex = -1;
+            return;
+        }
+
+        root.selectionMode = true;
+        root.selectedWallpaper = null;
+        if (m_grid_view)
+            m_grid_view.currentIndex = -1;
+        if (m_grid_view)
+            m_grid_view.forceActiveFocus();
+    }
+
+    function cancelWallpaperSelectionIfEmpty() {
+        if (root.selectedWallpaperCount > 0)
+            return;
+        root.selectionMode = false;
+        root.selectionAnchorIndex = -1;
+    }
+
+    function clearWallpaperSelection() {
+        if (wallpaperQuery.data)
+            wallpaperQuery.data.clearSelection();
+        root.selectionMode = false;
+        root.selectionAnchorIndex = -1;
+    }
+
+    function selectedWallpaperIds() {
+        return wallpaperQuery.data ? wallpaperQuery.data.selectedKeys() : [];
+    }
+
+    function handleWallpaperClick(index, modifiers) {
+        const model = wallpaperQuery.data;
+        if (!model)
+            return;
+
+        if ((modifiers & Qt.ShiftModifier) !== 0) {
+            const anchor = root.selectionAnchorIndex >= 0
+                ? root.selectionAnchorIndex
+                : (m_grid_view.currentIndex >= 0 ? m_grid_view.currentIndex : index);
+            model.selectRange(anchor, index, true);
+            root.selectionMode = true;
+            root.selectionAnchorIndex = anchor;
+            root.selectedWallpaper = null;
+            return;
+        }
+
+        if (root.selectionActive || (modifiers & Qt.ControlModifier) !== 0) {
+            model.toggleSelected(index);
+            const hasSelection = model.selectedCount > 0;
+            root.selectionMode = hasSelection;
+            root.selectionAnchorIndex = hasSelection ? index : -1;
+            root.selectedWallpaper = null;
+            return;
+        }
+
+        m_grid_view.currentIndex = index;
+        root.selectionAnchorIndex = index;
+        root.selectedWallpaper = model.item(index);
+    }
+
+    function requestWallpaperSelection(index) {
+        const model = wallpaperQuery.data;
+        if (!model)
+            return;
+
+        root.beginWallpaperSelection(index);
+    }
+
+    function syncSelectionSheet() {
+        if (root.selectionActive) {
+            if (!selectionActionSheet.opened && !selectionActionSheet.entering)
+                selectionActionSheet.open();
+        } else if (selectionActionSheet.opened || selectionActionSheet.entering) {
+            selectionActionSheet.close();
+        }
+    }
+
+    function createPlaylistFromSelection() {
+        const ids = root.selectedWallpaperIds();
+        if (ids.length === 0 || playlistMutation.querying)
+            return;
+        playlistMutation.create(qsTr("New playlist"), 1, 300, ids);
+    }
+
+    function addSelectionToPlaylist(playlist) {
+        const ids = root.selectedWallpaperIds();
+        if (ids.length === 0 || !playlist || playlistMutation.querying)
+            return;
+
+        const merged = (playlist.entryIds || []).slice();
+        const seen = {};
+        for (let i = 0; i < merged.length; ++i)
+            seen[String(merged[i])] = true;
+        for (let j = 0; j < ids.length; ++j) {
+            const key = String(ids[j]);
+            if (seen[key] !== true) {
+                merged.push(ids[j]);
+                seen[key] = true;
+            }
+        }
+        playlistMutation.setItems(playlist.id, merged);
+    }
 
     // Index into rendererCandidates; reset to 0 whenever the candidate
     // list changes (selection or registry update).
@@ -464,35 +670,13 @@ MD.Page {
                     }
 
                     MD.ActionToolBar {
+                        id: wallpaperActionToolBar
                         Layout.fillWidth: true
                         actions: [
-                            MD.Action {
-                                icon.name: MD.Token.icon.filter_list
-                                text: 'Filters'
-                                checked: wallpaperQuery.hasActiveFilters
-                                onTriggered: filterDialog.open()
-                            },
-                            MD.Action {
-                                icon.name: MD.Token.icon.hard_drive
-                                text: 'Sources'
-                                onTriggered: MD.Util.showPopup('waywallen.ui/PagePopup', {
-                                    source: 'waywallen.ui/SourceManagePage'
-                                }, root)
-                            },
-                            MD.Action {
-                                icon.name: MD.Token.icon.refresh
-                                text: 'Refresh'
-                                // Disabled while a scan is in flight (the
-                                // daemon dedups `scan/refresh` anyway, but
-                                // this gives users immediate visual feedback
-                                // and avoids stacking ineffective triggers).
-                                enabled: !W.Notify.scanInProgress
-                                // Daemon answers immediately and pushes
-                                // completion via `WallpaperSyncFinished`,
-                                // which the `Connections` block on
-                                // `Notify` handles (toast + list reload).
-                                onTriggered: scanQuery.reload()
-                            }
+                            enterSelectionAction,
+                            filterAction,
+                            sourcesAction,
+                            refreshAction
                         ]
                     }
                 }
@@ -528,7 +712,7 @@ MD.Page {
                         displayMarginBeginning: 300
                         displayMarginEnd: 300
                         topMargin: 2
-                        bottomMargin: 8
+                        bottomMargin: root.selectionActive ? root.selectionSheetReserve : 8
                         leftMargin: 8
                         rightMargin: 8
                         visible: m_grid_view.count > 0
@@ -540,9 +724,15 @@ MD.Page {
                         model: wallpaperQuery.data
 
                         delegate: WallpaperCard {
-                            onClicked: {
-                                m_grid_view.currentIndex = index;
-                                root.selectedWallpaper = wallpaperQuery.data.item(index);
+                            selected: model.selected ?? false
+                            onClicked: modifiers => root.handleWallpaperClick(index, modifiers)
+                            onSelectionRequested: modifiers => root.requestWallpaperSelection(index)
+                        }
+
+                        Keys.onEscapePressed: event => {
+                            if (root.selectionActive) {
+                                root.clearWallpaperSelection();
+                                event.accepted = true;
                             }
                         }
 
@@ -564,6 +754,21 @@ MD.Page {
                                 }
                             }
                         }
+                    }
+
+                    MD.Button {
+                        id: cancelSelectionButton
+                        anchors.left: parent.left
+                        anchors.top: parent.top
+                        anchors.leftMargin: 16
+                        anchors.topMargin: 12
+                        z: 10
+                        visible: root.selectionActive
+                        checked: true
+                        text: String(root.selectedWallpaperCount)
+                        icon.name: MD.Token.icon.close
+                        mdState.type: MD.Enum.BtElevated
+                        onClicked: root.clearWallpaperSelection()
                     }
 
                     ColumnLayout {
@@ -620,10 +825,10 @@ MD.Page {
 
         // --- Right: wallpaper detail panel ---
         MD.Pane {
-            Layout.preferredWidth: 280
+            Layout.preferredWidth: root.selectedWallpaper !== null && !root.selectionActive ? 280 : 0
             Layout.fillHeight: true
             Layout.maximumWidth: 280
-            visible: root.selectedWallpaper !== null
+            visible: root.selectedWallpaper !== null && !root.selectionActive
             radius: root.MD.MProp.page.backgroundRadius
             padding: 0
             showBackground: true
@@ -1195,6 +1400,55 @@ MD.Page {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    MD.BottomSheet {
+        id: selectionActionSheet
+        parent: root
+        anchors.fill: parent
+        z: 20
+        sheetType: MD.Enum.BottomSheetStandard
+        dim: false
+        dismissOnDragDown: false
+
+        onOpenedChanged: {
+            if (!opened)
+                selectionPlaylistMenu.close();
+        }
+
+        ColumnLayout {
+            width: selectionActionSheet.sheetWidth
+            spacing: 0
+
+            MD.SheetActionBar {
+                id: selectionSheetActions
+                Layout.fillWidth: true
+                delegateWidth: 88
+                actions: [
+                    createPlaylistFromSelectionAction,
+                    addToPlaylistAction
+                ]
+            }
+        }
+    }
+
+    MD.Menu {
+        id: selectionPlaylistMenu
+        parent: selectionSheetActions
+        x: Math.max(0, selectionSheetActions.width - implicitWidth - 16)
+        y: -implicitHeight - 8
+        model: playlistListQuery.playlists || []
+        contentDelegate: MD.MenuItem {
+            id: playlistMenuItem
+            required property var modelData
+
+            text: modelData.name || qsTr("Untitled")
+            icon.name: MD.Token.icon.playlist_add
+            onTriggered: {
+                root.addSelectionToPlaylist(modelData);
+                selectionPlaylistMenu.close();
             }
         }
     }

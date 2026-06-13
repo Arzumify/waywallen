@@ -9,20 +9,31 @@ Item {
     required property var model
     required property int index
     property var wallpaper: model
+    property bool selected: false
 
     width: GridView.view ? GridView.view.cellWidth : 0
     height: GridView.view ? GridView.view.cellHeight : 0
 
     focusPolicy: Qt.StrongFocus
 
-    signal clicked
+    signal clicked(int modifiers)
+    signal selectionRequested(int modifiers)
 
-    readonly property int _radius: MD.Token.shape.corner.extra_small
+    readonly property int _baseRadius: MD.Token.shape.corner.extra_small
+    readonly property int _selectedRadius: MD.Token.shape.corner.large
+    readonly property int _radius: root.selected ? root._selectedRadius : root._baseRadius
+    readonly property real _selectedInset: root._selectedRadius / 2
+
+    Rectangle {
+        anchors.fill: parent
+        visible: root.selected
+        color: MD.Token.color.primary_container
+    }
 
     Item {
         id: m_cell
         anchors.fill: parent
-        anchors.margins: 6
+        anchors.margins: 6 + (root.selected ? root._selectedInset : 0)
 
         W.ThumbnailImage {
             id: m_thumb
@@ -31,6 +42,7 @@ Item {
             resource: root.wallpaper?.resource ?? ""
             wpType  : root.wallpaper?.wpType ?? ""
             fillMode: Image.PreserveAspectCrop
+            radius: root._radius
         }
 
         // Scrim aligns to the image control's bounds; spans the
@@ -66,9 +78,48 @@ Item {
         }
 
         MouseArea {
+            property bool selectionRequestedByHold: false
+
             anchors.fill: parent
+            acceptedButtons: Qt.LeftButton | Qt.RightButton
             cursorShape: Qt.PointingHandCursor
-            onClicked: root.clicked()
+            onPressAndHold: mouse => {
+                if (mouse.button !== Qt.LeftButton)
+                    return;
+                selectionRequestedByHold = true;
+                root.selectionRequested(mouse.modifiers);
+            }
+            onClicked: mouse => {
+                if (selectionRequestedByHold) {
+                    selectionRequestedByHold = false;
+                    return;
+                }
+                if (mouse.button === Qt.RightButton) {
+                    root.selectionRequested(mouse.modifiers);
+                    return;
+                }
+                root.clicked(mouse.modifiers);
+            }
+        }
+    }
+
+    Rectangle {
+        anchors.top: parent.top
+        anchors.left: parent.left
+        anchors.margins: 8
+        width: 32
+        height: 32
+        radius: width / 2
+        visible: root.selected
+        color: MD.Token.color.primary
+        border.color: MD.Token.color.primary_container
+        border.width: 3
+
+        MD.Icon {
+            anchors.centerIn: parent
+            name: MD.Token.icon.check
+            size: 20
+            color: MD.Token.color.on_primary
         }
     }
 }

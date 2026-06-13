@@ -18,6 +18,7 @@ Item {
     property string resource
     property string wpType
     property int    fillMode: Image.PreserveAspectFit
+    property int    radius: MD.Token.shape.corner.extra_small
 
     readonly property bool _useDirect: root.source.length > 0
     readonly property url  _displayUrl: _useDirect
@@ -53,7 +54,7 @@ Item {
         onStatusChanged: if (status === AnimatedImage.Ready) playing = true
         layer.enabled: true
         layer.effect: MD.RoundClip {
-            corners: MD.Util.corners(MD.Token.shape.corner.extra_small)
+            corners: MD.Util.corners(root.radius)
             size: Qt.vector2d(m_image.width, m_image.height)
         }
     }
