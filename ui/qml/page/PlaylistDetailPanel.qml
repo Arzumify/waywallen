@@ -11,11 +11,6 @@ ColumnLayout {
 
     spacing: 0
 
-    component SectionTitle: MD.Text {
-        typescale: MD.Token.typescale.title_medium
-        color: MD.Token.color.on_surface
-    }
-
     component FieldLabel: MD.Text {
         typescale: MD.Token.typescale.label_medium
         color: MD.Token.color.on_surface_variant
@@ -70,8 +65,6 @@ ColumnLayout {
             contentItem: ColumnLayout {
                 spacing: 12
 
-                SectionTitle { text: qsTr("General") }
-
                 ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 4
@@ -88,97 +81,106 @@ ColumnLayout {
                     }
                 }
 
-                ColumnLayout {
+                RowLayout {
                     Layout.fillWidth: true
-                    spacing: 4
+                    spacing: 12
 
-                    FieldLabel { text: qsTr("Mode") }
-
-                    MD.ComboBox {
+                    ColumnLayout {
                         Layout.fillWidth: true
-                        enabled: control.canMutate()
-                        model: [qsTr("Sequential"), qsTr("Shuffle"), qsTr("Random")]
-                        currentIndex: control.playlist ? Math.max(0, control.playlist.mode - 1) : 0
-                        onActivated: {
-                            if (control.canMutate())
-                                control.mutation.setMode(control.playlist.id, currentIndex + 1);
+                        Layout.minimumWidth: 144
+                        spacing: 4
+
+                        FieldLabel { text: qsTr("Mode") }
+
+                        MD.ComboBox {
+                            Layout.fillWidth: true
+                            enabled: control.canMutate()
+                            model: [qsTr("Sequential"), qsTr("Shuffle"), qsTr("Random")]
+                            currentIndex: control.playlist ? Math.max(0, control.playlist.mode - 1) : 0
+                            onActivated: {
+                                if (control.canMutate())
+                                    control.mutation.setMode(control.playlist.id, currentIndex + 1);
+                            }
                         }
                     }
-                }
 
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 4
+                    ColumnLayout {
+                        Layout.alignment: Qt.AlignTop
+                        Layout.minimumWidth: intervalRow.implicitWidth
+                        spacing: 4
 
-                    FieldLabel { text: qsTr("Rotation interval") }
+                        FieldLabel { text: qsTr("Rotation interval") }
 
-                    RowLayout {
-                        spacing: 8
+                        RowLayout {
+                            id: intervalRow
 
-                        MD.TextField {
-                            id: fieldH
+                            spacing: 8
 
-                            implicitWidth: 48
-                            enabled: control.canMutate()
-                            inputMethodHints: Qt.ImhDigitsOnly
-                            validator: IntValidator { bottom: 0; top: 999 }
-                            text: String(control.ivalH())
-                            onEditingFinished: {
-                                if (text.length === 0)
-                                    text = "0";
-                                control.applyInterval();
+                            MD.TextField {
+                                id: fieldH
+
+                                implicitWidth: 48
+                                enabled: control.canMutate()
+                                inputMethodHints: Qt.ImhDigitsOnly
+                                validator: IntValidator { bottom: 0; top: 999 }
+                                text: String(control.ivalH())
+                                onEditingFinished: {
+                                    if (text.length === 0)
+                                        text = "0";
+                                    control.applyInterval();
+                                }
                             }
-                        }
 
-                        MD.Text {
-                            text: "h"
-                            typescale: MD.Token.typescale.body_small
-                            color: MD.Token.color.on_surface_variant
-                        }
-
-                        MD.TextField {
-                            id: fieldM
-
-                            implicitWidth: 48
-                            enabled: control.canMutate()
-                            inputMethodHints: Qt.ImhDigitsOnly
-                            validator: IntValidator { bottom: 0; top: 59 }
-                            text: String(control.ivalM())
-                            onEditingFinished: {
-                                if (text.length === 0)
-                                    text = "0";
-                                control.applyInterval();
+                            MD.Text {
+                                text: "h"
+                                typescale: MD.Token.typescale.body_small
+                                color: MD.Token.color.on_surface_variant
                             }
-                        }
 
-                        MD.Text {
-                            text: "m"
-                            typescale: MD.Token.typescale.body_small
-                            color: MD.Token.color.on_surface_variant
-                        }
+                            MD.TextField {
+                                id: fieldM
 
-                        MD.TextField {
-                            id: fieldS
-
-                            implicitWidth: 48
-                            enabled: control.canMutate()
-                            inputMethodHints: Qt.ImhDigitsOnly
-                            validator: IntValidator { bottom: 0; top: 59 }
-                            text: String(control.ivalS())
-                            onEditingFinished: {
-                                if (text.length === 0)
-                                    text = "0";
-                                control.applyInterval();
+                                implicitWidth: 48
+                                enabled: control.canMutate()
+                                inputMethodHints: Qt.ImhDigitsOnly
+                                validator: IntValidator { bottom: 0; top: 59 }
+                                text: String(control.ivalM())
+                                onEditingFinished: {
+                                    if (text.length === 0)
+                                        text = "0";
+                                    control.applyInterval();
+                                }
                             }
-                        }
 
-                        MD.Text {
-                            text: "s"
-                            typescale: MD.Token.typescale.body_small
-                            color: MD.Token.color.on_surface_variant
-                        }
+                            MD.Text {
+                                text: "m"
+                                typescale: MD.Token.typescale.body_small
+                                color: MD.Token.color.on_surface_variant
+                            }
 
-                        Item { Layout.fillWidth: true }
+                            MD.TextField {
+                                id: fieldS
+
+                                implicitWidth: 48
+                                enabled: control.canMutate()
+                                inputMethodHints: Qt.ImhDigitsOnly
+                                validator: IntValidator { bottom: 0; top: 59 }
+                                text: String(control.ivalS())
+                                onEditingFinished: {
+                                    if (text.length === 0)
+                                        text = "0";
+                                    control.applyInterval();
+                                }
+                            }
+
+                            MD.Text {
+                                text: "s"
+                                typescale: MD.Token.typescale.body_small
+                                color: MD.Token.color.on_surface_variant
+                            }
+
+                            Item { Layout.fillWidth: true }
+                        }
                     }
                 }
             }
