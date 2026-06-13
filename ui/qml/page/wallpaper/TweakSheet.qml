@@ -105,12 +105,12 @@ MD.BottomSheet {
 
                 MD.Slider {
                     Layout.fillWidth: true
-                    from: 112
-                    to: 260
-                    stepSize: 8
+                    from: control.tweak.minimumItemSize
+                    to: control.tweak.maximumItemSize
+                    stepSize: control.tweak.itemSizeStep
                     snapMode: T.Slider.SnapAlways
                     value: control.tweak.itemSize
-                    onMoved: control.tweak.itemSize = Math.round(value / 8) * 8
+                    onMoved: control.tweak.setItemSize(value)
                 }
             }
 
@@ -131,13 +131,13 @@ MD.BottomSheet {
                     MD.SegmentedButton {
                         text: qsTr("Fill cell")
                         checked: control.tweak.layoutMode === control.tweak.layoutFillCell
-                        onClicked: control.tweak.layoutMode = control.tweak.layoutFillCell
+                        onClicked: control.tweak.setLayoutMode(control.tweak.layoutFillCell)
                     }
 
                     MD.SegmentedButton {
                         text: qsTr("Fixed")
                         checked: control.tweak.layoutMode === control.tweak.layoutFixed
-                        onClicked: control.tweak.layoutMode = control.tweak.layoutFixed
+                        onClicked: control.tweak.setLayoutMode(control.tweak.layoutFixed)
                     }
                 }
             }
