@@ -313,6 +313,14 @@ MD.Page {
     }
 
     MD.Action {
+        id: tweakAction
+        text: "Tweak"
+        icon.name: MD.Token.icon.tune
+        checked: wallpaperTweakSheet.opened || wallpaperTweakSheet.entering
+        onTriggered: root.toggleWallpaperTweakSheet()
+    }
+
+    MD.Action {
         id: filterAction
         icon.name: MD.Token.icon.filter_list
         text: "Filters"
@@ -481,6 +489,18 @@ MD.Page {
     property bool sortAsc: true
     property WC.wallpaperSortRule emptySortRule
 
+    readonly property int wallpaperItemLayoutFillCell: 0
+    readonly property int wallpaperItemLayoutFixed: 1
+    property int wallpaperItemSize: 162
+    property real wallpaperItemAspectRatio: 1
+    property int wallpaperItemLayoutMode: wallpaperItemLayoutFillCell
+    readonly property real wallpaperItemHeight: root.wallpaperItemSize
+        / Math.max(root.wallpaperItemAspectRatio, 0.1)
+
+    onWallpaperItemSizeChanged: if (m_grid_view) m_grid_view.forceLayout()
+    onWallpaperItemAspectRatioChanged: if (m_grid_view) m_grid_view.forceLayout()
+    onWallpaperItemLayoutModeChanged: if (m_grid_view) m_grid_view.forceLayout()
+
     function _buildSortRule() {
         const rule = emptySortRule;
         rule.key = sortOptions[sortIndex].key;
@@ -527,6 +547,10 @@ MD.Page {
         if (idx >= 0) sortIndex = idx;
         sortAsc = r.direction !== WC.SortDirection.SORT_DIRECTION_DESC;
         applySort();
+    }
+
+    function setWallpaperItemAspectRatio(ratio) {
+        root.wallpaperItemAspectRatio = ratio;
     }
 
     // Renderers that advertise the selected wallpaper's wp_type, sorted
@@ -785,8 +809,20 @@ MD.Page {
             playlistListSheet.close();
             return;
         }
+        if (wallpaperTweakSheet.opened || wallpaperTweakSheet.entering)
+            wallpaperTweakSheet.close();
         playlistListQuery.reload();
         playlistListSheet.open();
+    }
+
+    function toggleWallpaperTweakSheet() {
+        if (wallpaperTweakSheet.opened || wallpaperTweakSheet.entering) {
+            wallpaperTweakSheet.close();
+            return;
+        }
+        if (playlistListSheet.opened || playlistListSheet.entering)
+            playlistListSheet.close();
+        wallpaperTweakSheet.open();
     }
 
     function isEditingPlaylist(playlist) {
@@ -1023,6 +1059,7 @@ MD.Page {
                         Layout.fillWidth: true
                         actions: [
                             playlistListAction,
+                            tweakAction,
                             filterAction,
                             sourcesAction,
                             refreshAction
@@ -1066,14 +1103,28 @@ MD.Page {
                         rightMargin: 8
                         visible: m_grid_view.count > 0
 
-                        readonly property int _cols: Math.max(1, Math.floor(width / 162))
-                        cellWidth: (width - leftMargin - rightMargin) / _cols
-                        cellHeight: cellWidth
+                        readonly property real _availableWidth:
+                            Math.max(0, width - leftMargin - rightMargin)
+                        readonly property int _cols:
+                            Math.max(1, Math.floor(_availableWidth / root.wallpaperItemSize))
+                        readonly property real _stretchedItemWidth:
+                            _availableWidth / _cols
+                        readonly property bool _fillCell:
+                            root.wallpaperItemLayoutMode === root.wallpaperItemLayoutFillCell
+                        readonly property real _displayItemWidth: _fillCell
+                            ? _stretchedItemWidth
+                            : Math.min(root.wallpaperItemSize, _stretchedItemWidth)
+                        readonly property real _displayItemHeight: _displayItemWidth
+                            / Math.max(root.wallpaperItemAspectRatio, 0.1)
+                        cellWidth: _stretchedItemWidth
+                        cellHeight: _fillCell ? _displayItemHeight : root.wallpaperItemHeight
 
                         model: wallpaperQuery.data
 
                         delegate: WallpaperCard {
                             selected: model.selected ?? false
+                            itemWidth: m_grid_view._displayItemWidth
+                            itemHeight: m_grid_view._displayItemHeight
                             onClicked: modifiers => root.handleWallpaperClick(index, modifiers)
                             onSelectionRequested: modifiers => root.requestWallpaperSelection(index)
                         }
@@ -1928,6 +1979,139 @@ MD.Page {
                                 visible: parent.hovered
                                 text: qsTr("Add selection")
                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    MD.BottomSheet {
+        id: wallpaperTweakSheet
+        parent: root
+        anchors.fill: parent
+        z: 25
+        sheetType: MD.Enum.BottomSheetModal
+        dim: false
+        dismissOnDragDown: true
+        maxSheetWidth: 560
+
+        ColumnLayout {
+            width: wallpaperTweakSheet.sheetWidth
+            spacing: 0
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.leftMargin: 16
+                Layout.rightMargin: 16
+                Layout.bottomMargin: 16
+                spacing: 16
+
+                MD.Text {
+                    Layout.fillWidth: true
+                    text: qsTr("Tweak")
+                    typescale: MD.Token.typescale.title_medium
+                    color: MD.Token.color.on_surface
+                    maximumLineCount: 1
+                    elide: Text.ElideRight
+                }
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    MD.Text {
+                        Layout.fillWidth: true
+                        text: qsTr("Aspect ratio")
+                        typescale: MD.Token.typescale.label_medium
+                        color: MD.Token.color.on_surface_variant
+                    }
+
+                    MD.SegmentedButtonGroup {
+                        size: MD.Enum.XS
+
+                        MD.SegmentedButton {
+                            text: "1:1"
+                            checked: Math.abs(root.wallpaperItemAspectRatio - 1) < 0.001
+                            onClicked: root.setWallpaperItemAspectRatio(1)
+                        }
+
+                        MD.SegmentedButton {
+                            text: "4:3"
+                            checked: Math.abs(root.wallpaperItemAspectRatio - 4 / 3) < 0.001
+                            onClicked: root.setWallpaperItemAspectRatio(4 / 3)
+                        }
+
+                        MD.SegmentedButton {
+                            text: "16:9"
+                            checked: Math.abs(root.wallpaperItemAspectRatio - 16 / 9) < 0.001
+                            onClicked: root.setWallpaperItemAspectRatio(16 / 9)
+                        }
+
+                        MD.SegmentedButton {
+                            text: "9:16"
+                            checked: Math.abs(root.wallpaperItemAspectRatio - 9 / 16) < 0.001
+                            onClicked: root.setWallpaperItemAspectRatio(9 / 16)
+                        }
+                    }
+                }
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 4
+
+                    RowLayout {
+                        Layout.fillWidth: true
+
+                        MD.Text {
+                            Layout.fillWidth: true
+                            text: qsTr("Size")
+                            typescale: MD.Token.typescale.label_medium
+                            color: MD.Token.color.on_surface_variant
+                        }
+
+                        MD.Text {
+                            text: qsTr("%1 px").arg(root.wallpaperItemSize)
+                            typescale: MD.Token.typescale.label_medium
+                            color: MD.Token.color.on_surface_variant
+                        }
+                    }
+
+                    MD.Slider {
+                        Layout.fillWidth: true
+                        from: 112
+                        to: 260
+                        stepSize: 8
+                        snapMode: T.Slider.SnapAlways
+                        value: root.wallpaperItemSize
+                        onMoved: root.wallpaperItemSize = Math.round(value / 8) * 8
+                    }
+                }
+
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    MD.Text {
+                        Layout.fillWidth: true
+                        text: qsTr("Fill mode")
+                        typescale: MD.Token.typescale.label_medium
+                        color: MD.Token.color.on_surface_variant
+                    }
+
+                    MD.SegmentedButtonGroup {
+                        size: MD.Enum.XS
+
+                        MD.SegmentedButton {
+                            text: qsTr("Fill cell")
+                            checked: root.wallpaperItemLayoutMode === root.wallpaperItemLayoutFillCell
+                            onClicked: root.wallpaperItemLayoutMode = root.wallpaperItemLayoutFillCell
+                        }
+
+                        MD.SegmentedButton {
+                            text: qsTr("Fixed")
+                            checked: root.wallpaperItemLayoutMode === root.wallpaperItemLayoutFixed
+                            onClicked: root.wallpaperItemLayoutMode = root.wallpaperItemLayoutFixed
                         }
                     }
                 }
