@@ -24,7 +24,7 @@ MD.Page {
         , 3 // PRESERVE_ASPECT_CROP
         , 7  // CENTERED
     ]
-    readonly property var kFillModeLabels: ["Stretch", "Fit (preserve aspect)", "Crop (preserve aspect)", "Center (1:1)"]
+    readonly property var kFillModeLabels: ["Stretch", "Fit", "Crop", "Center"]
     function fillmodeIndex(value) {
         const i = root.kFillModeValues.indexOf(value);
         return i < 0 ? 0 : i;
@@ -113,19 +113,42 @@ MD.Page {
     readonly property var selected: selectedDisplay()
 
     ColumnLayout {
+        id: pageLayout
         anchors.fill: parent
         anchors.leftMargin: 12
         anchors.rightMargin: 12
         spacing: 16
 
+        property bool paneAnimationsEnabled: false
+        readonly property bool detailsVisible: !!root.selected
+        readonly property real paneAvailableHeight: Math.max(0, height - (detailsVisible ? spacing : 0))
+
+        Timer {
+            interval: 0
+            running: true
+            repeat: false
+            onTriggered: pageLayout.paneAnimationsEnabled = true
+        }
+
         MD.Pane {
             id: displaysPane
             Layout.fillWidth: true
-            Layout.fillHeight: true
+            Layout.preferredHeight: pageLayout.detailsVisible
+                ? pageLayout.paneAvailableHeight / 3
+                : pageLayout.paneAvailableHeight
             leftPadding: 16
             rightPadding: 16
             radius: 16
             backgroundColor: MD.MProp.color.surface
+
+            Behavior on Layout.preferredHeight {
+                enabled: pageLayout.paneAnimationsEnabled
+
+                NumberAnimation {
+                    duration: 200
+                    easing.type: Easing.InOutCubic
+                }
+            }
 
             contentItem: Item {
                 id: canvas
@@ -208,7 +231,7 @@ MD.Page {
 
                         MouseArea {
                             anchors.fill: parent
-                            onClicked: root.selectedId = rectItem.d.id
+                            onClicked: root.selectedId = rectItem.isSelected ? null : rectItem.d.id
                         }
 
                         ColumnLayout {
@@ -254,101 +277,116 @@ MD.Page {
             }
         }
 
-        // --- Inline details panel (squeezes out below canvas) ---
+        // --- Details panel ---
         MD.Pane {
             id: detailsPane
             Layout.fillWidth: true
-            Layout.preferredHeight: root.selected ? implicitHeight : 0
+            Layout.preferredHeight: pageLayout.detailsVisible
+                ? pageLayout.paneAvailableHeight * 2 / 3
+                : 0
+            visible: pageLayout.detailsVisible || Layout.preferredHeight > 0.5
 
             leftPadding: 16
             rightPadding: 16
             bottomPadding: 12
 
             radius: 16
+            corners: MD.Util.corners(radius, radius, 0, 0)
             backgroundColor: MD.MProp.color.surface
-            visible: Layout.preferredHeight > 0.5
             clip: true
 
             Behavior on Layout.preferredHeight {
+                enabled: pageLayout.paneAnimationsEnabled
+
                 NumberAnimation {
                     duration: 200
                     easing.type: Easing.InOutCubic
                 }
             }
 
-            contentItem: ColumnLayout {
-                id: detailsContent
-                spacing: 8
+            contentItem: MD.Flickable2 {
+                id: detailsFlick
+                clip: true
+                contentWidth: width
+                contentHeight: root.selected ? detailsContent.implicitHeight : 0
+                flickableDirection: MD.Flickable2.VerticalFlick
+                interactive: contentHeight > height
 
-                RowLayout {
-                    Layout.fillWidth: true
+                ColumnLayout {
+                    id: detailsContent
+                    width: detailsFlick.contentWidth
                     spacing: 8
+                    visible: !!root.selected
 
-                    readonly property bool canRename: W.Util.supportsDisplayRename
-
-                    MD.TextField {
-                        id: aliasField
+                    RowLayout {
                         Layout.fillWidth: true
-                        visible: parent.canRename
-                        placeholderText: root.selected ? (root.selected.name || ("Display " + root.selected.id)) : ""
-                        readonly property string serverAlias: root.selected ? (root.selected.alias || "") : ""
-                        onServerAliasChanged: if (!activeFocus) text = serverAlias
-                        Component.onCompleted: text = serverAlias
-                        Connections {
-                            target: root
-                            function onSelectedIdChanged() {
-                                aliasField.text = aliasField.serverAlias;
+                        spacing: 8
+
+                        readonly property bool canRename: W.Util.supportsDisplayRename
+
+                        MD.TextField {
+                            id: aliasField
+                            Layout.fillWidth: true
+                            visible: parent.canRename
+                            placeholderText: root.selected ? (root.selected.name || ("Display " + root.selected.id)) : ""
+                            readonly property string serverAlias: root.selected ? (root.selected.alias || "") : ""
+                            onServerAliasChanged: if (!activeFocus) text = serverAlias
+                            Component.onCompleted: text = serverAlias
+                            Connections {
+                                target: root
+                                function onSelectedIdChanged() {
+                                    aliasField.text = aliasField.serverAlias;
+                                }
+                            }
+                            function commit() {
+                                if (!root.selected)
+                                    return;
+                                const trimmed = text.trim();
+                                if (trimmed === serverAlias)
+                                    return;
+                                renameQuery.name = root.selected.name;
+                                renameQuery.displayId = root.selected.id;
+                                renameQuery.alias = trimmed;
+                                renameQuery.clear = (trimmed.length === 0);
+                                renameQuery.reload();
+                            }
+                            onAccepted: commit()
+                            onActiveFocusChanged: if (!activeFocus) commit()
+                        }
+
+                        MD.Text {
+                            Layout.fillWidth: true
+                            visible: !parent.canRename
+                            text: root.selected ? (root.selected.displayLabel || root.selected.name || ("Display " + root.selected.id)) : ""
+                            typescale: MD.Token.typescale.title_medium
+                            color: MD.Token.color.on_surface
+                            elide: Text.ElideRight
+                        }
+
+                        MD.IconButton {
+                            visible: parent.canRename && !!root.selected && (root.selected.alias || "").length > 0
+                            icon.name: MD.Token.icon.refresh
+                            MD.ToolTip {
+                                visible: parent.hovered
+                                text: "Reset to compositor name"
+                            }
+                            onClicked: {
+                                if (!root.selected)
+                                    return;
+                                renameQuery.name = root.selected.name;
+                                renameQuery.displayId = root.selected.id;
+                                renameQuery.alias = "";
+                                renameQuery.clear = true;
+                                renameQuery.reload();
+                                aliasField.text = "";
                             }
                         }
-                        function commit() {
-                            if (!root.selected)
-                                return;
-                            const trimmed = text.trim();
-                            if (trimmed === serverAlias)
-                                return;
-                            renameQuery.name = root.selected.name;
-                            renameQuery.displayId = root.selected.id;
-                            renameQuery.alias = trimmed;
-                            renameQuery.clear = (trimmed.length === 0);
-                            renameQuery.reload();
-                        }
-                        onAccepted: commit()
-                        onActiveFocusChanged: if (!activeFocus) commit()
-                    }
 
-                    MD.Text {
-                        Layout.fillWidth: true
-                        visible: !parent.canRename
-                        text: root.selected ? (root.selected.displayLabel || root.selected.name || ("Display " + root.selected.id)) : ""
-                        typescale: MD.Token.typescale.title_medium
-                        color: MD.Token.color.on_surface
-                        elide: Text.ElideRight
-                    }
-
-                    MD.IconButton {
-                        visible: parent.canRename && !!root.selected && (root.selected.alias || "").length > 0
-                        icon.name: MD.Token.icon.refresh
-                        MD.ToolTip {
-                            visible: parent.hovered
-                            text: "Reset to compositor name"
-                        }
-                        onClicked: {
-                            if (!root.selected)
-                                return;
-                            renameQuery.name = root.selected.name;
-                            renameQuery.displayId = root.selected.id;
-                            renameQuery.alias = "";
-                            renameQuery.clear = true;
-                            renameQuery.reload();
-                            aliasField.text = "";
+                        MD.IconButton {
+                            icon.name: MD.Token.icon.close
+                            onClicked: root.selectedId = null
                         }
                     }
-
-                    MD.IconButton {
-                        icon.name: MD.Token.icon.close
-                        onClicked: root.selectedId = null
-                    }
-                }
 
                 RowLayout {
                     Layout.fillWidth: true
@@ -409,13 +447,13 @@ MD.Page {
                 }
 
                 MD.Text {
-                    text: "Connected renderer"
+                    text: "Connected"
                     typescale: MD.Token.typescale.title_small
                     color: MD.Token.color.on_surface
                 }
 
                 RowLayout {
-                    id: connectedRendererRow
+                    id: connectedRow
                     readonly property string connectedId: {
                         if (!root.selected)
                             return "";
@@ -430,55 +468,116 @@ MD.Page {
                         const _ = W.App.rendererManager.renderers;
                         return connectedId.length > 0 ? W.App.rendererManager.get(connectedId) : null;
                     }
+                    readonly property int activePlaylistId: root.selected ? Number(root.selected.activePlaylistId || 0) : 0
+                    readonly property var playlistStatus: root.selected ? (root.selected.playlistStatus || ({})) : ({})
+                    readonly property bool hasPlaylist: activePlaylistId > 0
+                    readonly property string playlistDetail: {
+                        const status = playlistStatus || ({});
+                        const parts = [];
+                        const count = Number(status.count || 0);
+                        const position = Number(status.position || 0);
+                        const remaining = Number(status.remainingSecs || 0);
+                        if (count > 0)
+                            parts.push(Math.min(position + 1, count) + " / " + count);
+                        if (remaining > 0)
+                            parts.push(Math.ceil(remaining / 60) + " min left");
+                        return parts.join(" · ");
+                    }
                     Layout.fillWidth: true
-                    spacing: 8
+                    spacing: 16
 
-                    MD.Icon {
-                        readonly property string status: connectedRendererRow.renderer ? connectedRendererRow.renderer.status : ""
-                        name: {
-                            if (!connectedRendererRow.renderer)
-                                return MD.Token.icon.pause;
-                            return status === "paused" ? MD.Token.icon.pause : MD.Token.icon.play_arrow;
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Layout.minimumWidth: 0
+                        spacing: 8
+
+                        MD.Icon {
+                            readonly property string status: connectedRow.renderer ? connectedRow.renderer.status : ""
+                            name: {
+                                if (!connectedRow.renderer)
+                                    return MD.Token.icon.pause;
+                                return status === "paused" ? MD.Token.icon.pause : MD.Token.icon.play_arrow;
+                            }
+                            size: 24
+                            color: !connectedRow.renderer || status === "paused" ? MD.Token.color.on_surface_variant : MD.Token.color.primary
                         }
-                        size: 24
-                        color: !connectedRendererRow.renderer || status === "paused" ? MD.Token.color.on_surface_variant : MD.Token.color.primary
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Layout.minimumWidth: 0
+                            spacing: 0
+
+                            MD.Text {
+                                Layout.fillWidth: true
+                                text: {
+                                    const r = connectedRow.renderer;
+                                    if (r) {
+                                        const name = (r.name && r.name.length) ? r.name : "renderer";
+                                        return r.pid > 0 ? (name + "-" + r.pid) : name;
+                                    }
+                                    if (connectedRow.connectedId.length > 0) {
+                                        return connectedRow.connectedId;
+                                    }
+                                    return "Idle";
+                                }
+                                typescale: MD.Token.typescale.body_medium
+                                color: connectedRow.renderer ? MD.Token.color.on_surface : MD.Token.color.on_surface_variant
+                                font.family: connectedRow.renderer ? "monospace" : ""
+                                elide: Text.ElideMiddle
+                            }
+
+                            MD.Text {
+                                Layout.fillWidth: true
+                                visible: !!connectedRow.renderer
+                                text: {
+                                    const r = connectedRow.renderer;
+                                    if (!r)
+                                        return "";
+                                    const resolution = root.selected
+                                        ? (root.selected.width + " × " + root.selected.height)
+                                        : "";
+                                    return (r.status || "") + " · " + (r.fps || 0) + " fps · " + resolution;
+                                }
+                                typescale: MD.Token.typescale.label_small
+                                color: MD.Token.color.on_surface_variant
+                                elide: Text.ElideRight
+                            }
+                        }
                     }
 
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 0
+                    RowLayout {
+                        visible: connectedRow.hasPlaylist
+                        Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+                        Layout.maximumWidth: Math.max(220, connectedRow.width * 0.4)
+                        spacing: 8
 
-                        MD.Text {
-                            Layout.fillWidth: true
-                            text: {
-                                const r = connectedRendererRow.renderer;
-                                if (r) {
-                                    const name = (r.name && r.name.length) ? r.name : "renderer";
-                                    return r.pid > 0 ? (name + "-" + r.pid) : name;
-                                }
-                                if (connectedRendererRow.connectedId.length > 0) {
-                                    return connectedRendererRow.connectedId;
-                                }
-                                return "Idle — no renderer connected.";
-                            }
-                            typescale: MD.Token.typescale.body_medium
-                            color: connectedRendererRow.renderer ? MD.Token.color.on_surface : MD.Token.color.on_surface_variant
-                            font.family: connectedRendererRow.renderer ? "monospace" : ""
-                            elide: Text.ElideMiddle
+                        MD.Icon {
+                            name: MD.Token.icon.playlist_play
+                            size: 24
+                            color: MD.Token.color.primary
                         }
 
-                        MD.Text {
+                        ColumnLayout {
                             Layout.fillWidth: true
-                            visible: !!connectedRendererRow.renderer
-                            text: {
-                                const r = connectedRendererRow.renderer;
-                                if (!r)
-                                    return "";
-                                return (r.status || "") + " · " + (r.fps || 0) + " fps";
+                            Layout.minimumWidth: 0
+                            spacing: 0
+
+                            MD.Text {
+                                Layout.fillWidth: true
+                                text: "Playlist #" + connectedRow.activePlaylistId
+                                typescale: MD.Token.typescale.body_medium
+                                color: MD.Token.color.on_surface
+                                elide: Text.ElideRight
                             }
-                            typescale: MD.Token.typescale.label_small
-                            color: MD.Token.color.on_surface_variant
-                            elide: Text.ElideRight
+
+                            MD.Text {
+                                Layout.fillWidth: true
+                                visible: connectedRow.playlistDetail.length > 0
+                                text: connectedRow.playlistDetail
+                                typescale: MD.Token.typescale.label_small
+                                color: MD.Token.color.on_surface_variant
+                                elide: Text.ElideRight
+                            }
                         }
                     }
                 }
@@ -537,14 +636,23 @@ MD.Page {
                     }
                 }
 
-                RowLayout {
+                Flow {
+                    id: layoutFlow
+                    readonly property var effective: root.selected ? (root.selected.effectiveLayout || ({})) : ({})
+                    readonly property int currentX: root.clampPercent(effective.locationX ?? 50)
+                    readonly property int currentY: root.clampPercent(effective.locationY ?? 50)
+                    readonly property bool locationEnabled: {
+                        if (!root.selected)
+                            return false;
+                        const eff = root.selected.effectiveLayout || ({});
+                        return (eff.fillmode || 0) !== 1;
+                    }
                     Layout.fillWidth: true
                     visible: !!root.selected
                     spacing: 12
 
                     ColumnLayout {
-                        id: locationGroup
-                        Layout.fillWidth: true
+                        width: Math.min(layoutFlow.width, 220)
                         spacing: 4
 
                         MD.Text {
@@ -583,31 +691,21 @@ MD.Page {
                     }
 
                     ColumnLayout {
-                        Layout.fillWidth: true
+                        width: Math.min(layoutFlow.width, 260)
                         spacing: 4
 
-                        readonly property var effective: root.selected ? (root.selected.effectiveLayout || ({})) : ({})
-                        readonly property int currentX: root.clampPercent(effective.locationX ?? 50)
-                        readonly property int currentY: root.clampPercent(effective.locationY ?? 50)
-
-                        enabled: {
-                            if (!root.selected)
-                                return false;
-                            const eff = root.selected.effectiveLayout || ({});
-                            return (eff.fillmode || 0) !== 1;
-                        }
+                        enabled: layoutFlow.locationEnabled
                         opacity: enabled ? 1.0 : 0.4
+
+                        MD.Text {
+                            text: "Horizontal"
+                            typescale: MD.Token.typescale.label_medium
+                            color: MD.Token.color.on_surface_variant
+                        }
 
                         RowLayout {
                             Layout.fillWidth: true
-                            spacing: 8
-
-                            MD.Text {
-                                Layout.preferredWidth: 72
-                                text: "Horizontal"
-                                typescale: MD.Token.typescale.label_medium
-                                color: MD.Token.color.on_surface_variant
-                            }
+                            spacing: 6
 
                             MD.Slider {
                                 id: horizontalLocation
@@ -615,29 +713,36 @@ MD.Page {
                                 from: 0
                                 to: 100
                                 stepSize: 1
-                                value: locationGroup.currentX
+                                value: layoutFlow.currentX
                                 onMoved: root.applyLocation(value, verticalLocation.value)
                             }
 
                             MD.Text {
-                                Layout.preferredWidth: 44
-                                text: qsTr("%1%").arg(root.clampPercent(horizontalLocation.value))
+                                Layout.minimumWidth: 24
+                                text: root.clampPercent(horizontalLocation.value)
                                 typescale: MD.Token.typescale.label_medium
                                 color: MD.Token.color.on_surface_variant
-                                horizontalAlignment: Text.AlignRight
+                                horizontalAlignment: Text.AlignLeft
                             }
+                        }
+                    }
+
+                    ColumnLayout {
+                        width: Math.min(layoutFlow.width, 260)
+                        spacing: 4
+
+                        enabled: layoutFlow.locationEnabled
+                        opacity: enabled ? 1.0 : 0.4
+
+                        MD.Text {
+                            text: "Vertical"
+                            typescale: MD.Token.typescale.label_medium
+                            color: MD.Token.color.on_surface_variant
                         }
 
                         RowLayout {
                             Layout.fillWidth: true
-                            spacing: 8
-
-                            MD.Text {
-                                Layout.preferredWidth: 72
-                                text: "Vertical"
-                                typescale: MD.Token.typescale.label_medium
-                                color: MD.Token.color.on_surface_variant
-                            }
+                            spacing: 6
 
                             MD.Slider {
                                 id: verticalLocation
@@ -645,21 +750,22 @@ MD.Page {
                                 from: 0
                                 to: 100
                                 stepSize: 1
-                                value: locationGroup.currentY
+                                value: layoutFlow.currentY
                                 onMoved: root.applyLocation(horizontalLocation.value, value)
                             }
 
                             MD.Text {
-                                Layout.preferredWidth: 44
-                                text: qsTr("%1%").arg(root.clampPercent(verticalLocation.value))
+                                Layout.minimumWidth: 24
+                                text: root.clampPercent(verticalLocation.value)
                                 typescale: MD.Token.typescale.label_medium
                                 color: MD.Token.color.on_surface_variant
-                                horizontalAlignment: Text.AlignRight
+                                horizontalAlignment: Text.AlignLeft
                             }
                         }
                     }
 
                     ColumnLayout {
+                        width: Math.min(layoutFlow.width, implicitWidth)
                         spacing: 4
 
                         MD.Text {
@@ -723,13 +829,9 @@ MD.Page {
                             }
                         }
                     }
-
-                    Item {
-                        Layout.fillWidth: true
-                    }
                 }
             }
         }
-        Item {}
     }
+}
 }
