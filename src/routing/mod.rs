@@ -18,6 +18,6 @@ pub mod table;
 
 pub use router::{
     DisplayHandle, DisplayLinkSnapshot, DisplayOutEvent, DisplayRegistration, DisplaySnapshot,
-    LibrarySnapshot, RendererSnapshot, RendererStatus, Router, RouterEvent,
+    LayoutSource, LibrarySnapshot, RendererSnapshot, RendererStatus, Router, RouterEvent,
 };
 pub use table::{Link, LinkId, RoutingTable};

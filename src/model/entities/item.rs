@@ -53,6 +53,9 @@ pub struct Model {
     /// on apply so the renderer's unknown-key path routes them to
     /// `setPropertyString`. `None` when the user hasn't edited anything.
     pub user_property_overrides: Option<String>,
+    /// JSON map of daemon-owned per-wallpaper display layout override.
+    /// This is intentionally separate from renderer user properties.
+    pub wallpaper_layout_override: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

@@ -20,7 +20,6 @@ use crate::queue::rotator::RotationConfig;
 use crate::queue::Mode;
 use crate::renderer_manager;
 use crate::scheduler::DisplayId;
-use crate::wallpaper_properties::split_renderer_properties;
 use crate::wallpaper_type::WallpaperEntry;
 use crate::AppState;
 
@@ -285,20 +284,22 @@ async fn apply_wallpaper_core(
     // separate JSON blob in `Init.user_properties`; daemon-owned
     // display layout keys are consumed below as wallpaper-local layout
     // overrides.
-    let mut raw_user_properties_json: Option<String> = None;
+    let mut user_properties_json: Option<String> = None;
+    let mut wallpaper_layout_override = Default::default();
     if !entry.library_root.is_empty() {
         if let Some(rel) = crate::queue::relative_under_root(&entry.library_root, &entry.resource) {
             if let Ok(Some(it)) =
                 repo::find_item_by_library_path(&app.db, &entry.library_root, &rel).await
             {
-                raw_user_properties_json = repo::get_user_property_overrides_raw(&app.db, it.id)
-                    .await
-                    .unwrap_or(None);
+                if let Ok((renderer_json, layout)) =
+                    repo::get_wallpaper_render_properties(&app.db, it.id).await
+                {
+                    user_properties_json = renderer_json;
+                    wallpaper_layout_override = layout;
+                }
             }
         }
     }
-    let (user_properties_json, wallpaper_layout_override) =
-        split_renderer_properties(raw_user_properties_json.as_deref());
     let spawn_req = renderer_manager::SpawnRequest {
         wp_type: entry.wp_type.clone(),
         extras,

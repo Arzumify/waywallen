@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::display::layout::{FillMode, Location, Rotation};
 use crate::settings::ResolvedLayout;
+use serde::{Deserialize, Serialize};
 
 const SCHEME_COLOR_KEY: &str = "waywallen.scheme_color";
 const FILL_MODE_KEY: &str = "waywallen.fill_mode";
@@ -11,23 +12,41 @@ const LOCATION_Y_KEY: &str = "waywallen.location_y";
 
 const LEGACY_SCHEME_COLOR_KEY: &str = "schemecolor";
 
-const PREDEFINED_SCHEMA_KEYS: &[&str] = &[
-    SCHEME_COLOR_KEY,
-    LEGACY_SCHEME_COLOR_KEY,
-    FILL_MODE_KEY,
-    ROTATION_KEY,
-    LOCATION_X_KEY,
-    LOCATION_Y_KEY,
-];
+const DAEMON_LAYOUT_SCHEMA_KEYS: &[&str] =
+    &[FILL_MODE_KEY, ROTATION_KEY, LOCATION_X_KEY, LOCATION_Y_KEY];
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
 pub struct WallpaperLayoutOverride {
     pub fillmode: Option<FillMode>,
     pub location: Option<Location>,
     pub rotation: Option<Rotation>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct PersistedWallpaperLayoutOverride {
+    fillmode: FillMode,
+    location: Location,
+    rotation: Rotation,
+}
+
 impl WallpaperLayoutOverride {
+    pub fn from_resolved(layout: ResolvedLayout) -> Self {
+        Self {
+            fillmode: Some(layout.fillmode),
+            location: Some(layout.location),
+            rotation: Some(layout.rotation),
+        }
+    }
+
+    pub fn materialize(self) -> ResolvedLayout {
+        self.apply_to(ResolvedLayout {
+            fillmode: FillMode::default(),
+            location: Location::default(),
+            rotation: Rotation::default(),
+        })
+    }
+
     pub fn apply_to(self, base: ResolvedLayout) -> ResolvedLayout {
         ResolvedLayout {
             fillmode: self.fillmode.unwrap_or(base.fillmode),
@@ -41,15 +60,37 @@ impl WallpaperLayoutOverride {
     }
 }
 
+pub fn wallpaper_layout_override_from_json(raw: &str) -> Option<WallpaperLayoutOverride> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Ok(persisted) = serde_json::from_str::<PersistedWallpaperLayoutOverride>(raw) {
+        return Some(WallpaperLayoutOverride::from_resolved(ResolvedLayout {
+            fillmode: persisted.fillmode,
+            location: persisted.location,
+            rotation: persisted.rotation,
+        }));
+    }
+    let parsed = serde_json::from_str::<WallpaperLayoutOverride>(raw).ok()?;
+    (!parsed.is_empty()).then_some(parsed)
+}
+
+pub fn wallpaper_layout_override_to_json(
+    layout: ResolvedLayout,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&PersistedWallpaperLayoutOverride {
+        fillmode: layout.fillmode,
+        location: layout.location,
+        rotation: layout.rotation,
+    })
+}
+
 pub fn is_daemon_display_property_key(key: &str) -> bool {
     matches!(
         key,
         FILL_MODE_KEY | ROTATION_KEY | LOCATION_X_KEY | LOCATION_Y_KEY
     )
-}
-
-pub fn is_predefined_property_key(key: &str) -> bool {
-    PREDEFINED_SCHEMA_KEYS.contains(&key)
 }
 
 pub fn canonical_user_property_key(key: &str) -> &str {
@@ -70,7 +111,16 @@ pub fn dedupe_predefined_schema(raw: &str) -> String {
     let Some(map) = value.as_object_mut() else {
         return raw.to_string();
     };
-    map.retain(|key, _| !is_predefined_property_key(key));
+    let mut remapped = serde_json::Map::new();
+    let old = std::mem::take(map);
+    for (key, value) in old {
+        let canonical = canonical_user_property_key(&key);
+        if key == canonical || !remapped.contains_key(canonical) {
+            remapped.insert(canonical.to_string(), value);
+        }
+    }
+    remapped.retain(|key, _| !DAEMON_LAYOUT_SCHEMA_KEYS.contains(&key.as_str()));
+    *map = remapped;
     if map.is_empty() {
         String::new()
     } else {
@@ -211,22 +261,28 @@ mod tests {
     }
 
     #[test]
-    fn removes_predefined_properties_from_schema() {
+    fn keeps_scheme_color_default_when_filtering_schema() {
         let raw = r#"{
-            "waywallen.scheme_color": { "type": "color" },
+            "waywallen.scheme_color": { "type": "color", "value": [0.1, 0.2, 0.3] },
             "ui_browse_properties_scheme_color": { "type": "color" },
-            "schemecolor": { "type": "color" },
+            "schemecolor": { "type": "color", "value": [0.9, 0.8, 0.7] },
             "waywallen.fill_mode": { "type": "combo" },
             "speed": { "type": "slider" }
         }"#;
         let filtered = dedupe_predefined_schema(raw);
         let value: serde_json::Value = serde_json::from_str(&filtered).unwrap();
         let obj = value.as_object().unwrap();
-        assert!(!obj.contains_key("waywallen.scheme_color"));
+        assert!(obj.contains_key("waywallen.scheme_color"));
         assert!(!obj.contains_key("schemecolor"));
         assert!(!obj.contains_key("waywallen.fill_mode"));
         assert!(obj.contains_key("ui_browse_properties_scheme_color"));
         assert!(obj.contains_key("speed"));
+        assert_eq!(
+            obj.get("waywallen.scheme_color")
+                .and_then(|v| v.as_object())
+                .and_then(|v| v.get("value")),
+            Some(&serde_json::json!([0.1, 0.2, 0.3]))
+        );
     }
 
     #[test]

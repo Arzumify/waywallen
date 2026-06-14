@@ -75,6 +75,7 @@ message Request {
     RemoteUninstallRequest    remote_uninstall = 53;
     RemoteDetailsRequest      remote_details = 54;
     PlaylistJumpToRequest     playlist_jump_to = 58;
+    WallpaperLayoutSetRequest wallpaper_layout_set = 59;
   }
 }
 
@@ -137,6 +138,7 @@ message Response {
     RemoteUninstallResponse    remote_uninstall = 53;
     RemoteDetailsResponse      remote_details = 54;
     Empty                      playlist_jump_to = 58;
+    WallpaperLayoutSetResponse wallpaper_layout_set = 59;
   }
 }
 
@@ -347,6 +349,10 @@ message WallpaperEntry {
   // Stable source/plugin identifier (e.g. Wallpaper Engine workshop id).
   // Empty when the source didn't set one.
   string external_id = 15;
+  // Per-wallpaper display layout override. When set, this whole layout
+  // wins over the display's own layout while the wallpaper is active.
+  LayoutPrefs wallpaper_layout_override = 16;
+  bool wallpaper_layout_override_set = 17;
 }
 
 message WallpaperListRequest {
@@ -403,6 +409,18 @@ message WallpaperPropertySetRequest {
   string value = 3;
 }
 message WallpaperPropertySetResponse {}
+
+// Commit or clear the per-wallpaper display layout override. Unlike
+// `WallpaperPropertySetRequest`, this is daemon-owned data and is
+// persisted outside renderer user-property overrides.
+message WallpaperLayoutSetRequest {
+  string wallpaper_id = 1;
+  bool clear = 2;
+  LayoutPrefs layout = 3;
+}
+message WallpaperLayoutSetResponse {
+  WallpaperEntry entry = 1;
+}
 
 message WallpaperScanRequest {}
 // Ack-only — the rescan now runs asynchronously on the daemon. `count`
@@ -556,6 +574,13 @@ message LayoutOverride {
   reserved "clear_rgba_set", "clear_rgba";
 }
 
+enum LayoutSource {
+  LAYOUT_SOURCE_UNSPECIFIED = 0;
+  LAYOUT_SOURCE_GLOBAL = 1;
+  LAYOUT_SOURCE_DISPLAY = 2;
+  LAYOUT_SOURCE_WALLPAPER = 3;
+}
+
 message DisplayInfo {
   uint64 display_id  = 1;
   string name        = 2;
@@ -577,6 +602,11 @@ message DisplayInfo {
   uint32 drm_render_major = 9;
   uint32 drm_render_minor = 10;
   string alias = 11;
+  // Resolved layout from global + display preferences, before any
+  // active wallpaper-local override is applied. UI edit forms bind to
+  // this value so display settings remain independently editable.
+  LayoutPrefs display_layout = 12;
+  LayoutSource effective_layout_source = 13;
 }
 
 message DisplayRenameRequest {

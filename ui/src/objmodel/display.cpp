@@ -34,13 +34,29 @@ auto Display::linksFromPb(const proto::DisplayInfo& info) -> QVariantList {
 auto Display::effectiveLayoutFromPb(const proto::DisplayInfo& info) -> QVariantMap {
     QVariantMap m;
     if (! info.hasEffectiveLayout()) return m;
-    const auto& l    = info.effectiveLayout();
-    m[u"fillmode"_s] = static_cast<int>(l.fillmode());
-    m[u"align"_s]    = static_cast<int>(l.align());
+    const auto& l     = info.effectiveLayout();
+    m[u"fillmode"_s]  = static_cast<int>(l.fillmode());
+    m[u"align"_s]     = static_cast<int>(l.align());
     m[u"locationX"_s] = l.locationX();
     m[u"locationY"_s] = l.locationY();
-    m[u"rotation"_s] = static_cast<int>(l.rotation());
+    m[u"rotation"_s]  = static_cast<int>(l.rotation());
     return m;
+}
+
+auto Display::displayLayoutFromPb(const proto::DisplayInfo& info) -> QVariantMap {
+    QVariantMap m;
+    if (! info.hasDisplayLayout()) return m;
+    const auto& l     = info.displayLayout();
+    m[u"fillmode"_s]  = static_cast<int>(l.fillmode());
+    m[u"align"_s]     = static_cast<int>(l.align());
+    m[u"locationX"_s] = l.locationX();
+    m[u"locationY"_s] = l.locationY();
+    m[u"rotation"_s]  = static_cast<int>(l.rotation());
+    return m;
+}
+
+auto Display::layoutOverriddenByWallpaperFromPb(const proto::DisplayInfo& info) -> bool {
+    return info.effectiveLayoutSource() == proto::LayoutSource::LAYOUT_SOURCE_WALLPAPER;
 }
 
 auto Display::layoutOverrideFromPb(const proto::DisplayInfo& info) -> QVariantMap {
@@ -82,6 +98,8 @@ Display::Display(const proto::DisplayInfo& info, QObject* parent)
       m_refresh_mhz(info.refreshMhz()),
       m_links(linksFromPb(info)),
       m_effective_layout(effectiveLayoutFromPb(info)),
+      m_display_layout(displayLayoutFromPb(info)),
+      m_layout_overridden_by_wallpaper(layoutOverriddenByWallpaperFromPb(info)),
       m_layout_override(layoutOverrideFromPb(info)),
       m_drm_render_major(info.drmRenderMajor()),
       m_drm_render_minor(info.drmRenderMinor()) {}
@@ -120,11 +138,16 @@ void Display::updateFrom(const proto::DisplayInfo& info) {
         m_links = std::move(new_links);
         Q_EMIT linksChanged();
     }
-    auto new_eff = effectiveLayoutFromPb(info);
-    auto new_ovr = layoutOverrideFromPb(info);
-    if (m_effective_layout != new_eff || m_layout_override != new_ovr) {
-        m_effective_layout = std::move(new_eff);
-        m_layout_override  = std::move(new_ovr);
+    auto new_eff            = effectiveLayoutFromPb(info);
+    auto new_display_layout = displayLayoutFromPb(info);
+    auto new_overridden     = layoutOverriddenByWallpaperFromPb(info);
+    auto new_ovr            = layoutOverrideFromPb(info);
+    if (m_effective_layout != new_eff || m_display_layout != new_display_layout ||
+        m_layout_overridden_by_wallpaper != new_overridden || m_layout_override != new_ovr) {
+        m_effective_layout               = std::move(new_eff);
+        m_display_layout                 = std::move(new_display_layout);
+        m_layout_overridden_by_wallpaper = new_overridden;
+        m_layout_override                = std::move(new_ovr);
         Q_EMIT layoutChanged();
     }
 }

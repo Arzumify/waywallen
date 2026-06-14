@@ -19,6 +19,9 @@ QString propertiesSection() { return QStringLiteral("Properties"); }
 QString userPropertiesSection() { return QStringLiteral("User properties"); }
 QString builtinKind() { return QStringLiteral("property"); }
 QString userKind() { return QStringLiteral("user"); }
+QString schemeColorKey() { return QStringLiteral("waywallen.scheme_color"); }
+
+bool isPredefinedKey(const QString& key) { return key == schemeColorKey(); }
 
 QString jsonValueToWireString(const QJsonValue& v) {
     switch (v.type()) {
@@ -117,6 +120,21 @@ QString UserPropertyListModel::currentValueFor_(qsizetype row) const {
     return e.default_wire;
 }
 
+auto UserPropertyListModel::hasPredefinedPropertyOverrides() const -> bool {
+    return hasOverridesForKind_(builtinKind());
+}
+
+auto UserPropertyListModel::hasUserPropertyOverrides() const -> bool {
+    return hasOverridesForKind_(userKind());
+}
+
+auto UserPropertyListModel::hasOverridesForKind_(const QString& kind) const -> bool {
+    for (const auto& e : m_entries) {
+        if (e.kind == kind && m_overrides.contains(e.key)) return true;
+    }
+    return false;
+}
+
 void UserPropertyListModel::setSchemaJson(const QString& v) {
     if (v == m_schema_json) return;
     m_schema_json = v;
@@ -146,59 +164,65 @@ void UserPropertyListModel::setOverridesJson(const QString& v) {
                            index(static_cast<int>(m_entries.size()) - 1),
                            { CurrentValueRole, HasAlphaRole });
     }
+    Q_EMIT overrideStateChanged();
 }
 
 void UserPropertyListModel::rebuildEntries_() {
     beginResetModel();
     m_entries.clear();
-    appendPredefinedEntries_();
+    QJsonObject schema_obj;
     if (! m_schema_json.isEmpty()) {
         QJsonParseError err {};
         const auto      doc = QJsonDocument::fromJson(m_schema_json.toUtf8(), &err);
         if (err.error == QJsonParseError::NoError && doc.isObject()) {
-            const auto obj = doc.object();
-            QList<Entry> user_entries;
-            user_entries.reserve(obj.size());
-            for (auto it = obj.constBegin(); it != obj.constEnd(); ++it) {
-                const auto v = it.value().toObject();
-                Entry      e;
-                e.key     = it.key();
-                e.label   = v.value(QStringLiteral("text")).toString();
-                e.section = userPropertiesSection();
-                e.kind    = userKind();
-                if (e.label.isEmpty()) e.label = e.key;
-                e.type = v.value(QStringLiteral("type")).toString().toLower();
-                if (v.value(QStringLiteral("options")).isArray()) {
-                    const auto opts = v.value(QStringLiteral("options")).toArray();
-                    e.option_labels.reserve(opts.size());
-                    e.option_values.reserve(opts.size());
-                    for (const auto& opt_value : opts) {
-                        const auto opt = opt_value.toObject();
-                        QString value  = jsonValueToWireString(opt.value(QStringLiteral("value")));
-                        QString label  = opt.value(QStringLiteral("label")).toString();
-                        if (label.isEmpty()) label = value;
-                        e.option_values.append(std::move(value));
-                        e.option_labels.append(std::move(label));
-                    }
-                }
-                e.supported    = isSupported(e.type, ! e.option_values.isEmpty());
-                e.min_val      = v.value(QStringLiteral("min")).toDouble(0.0);
-                e.max_val      = v.value(QStringLiteral("max")).toDouble(1.0);
-                e.default_wire = coerceDefaultWireString(v.value(QStringLiteral("value")), e.type);
-                e.order        = v.value(QStringLiteral("order")).toDouble(0.0);
-                user_entries.append(std::move(e));
-            }
-            std::sort(user_entries.begin(), user_entries.end(), [](const Entry& a, const Entry& b) {
-                return a.order < b.order;
-            });
-            m_entries.append(user_entries);
+            schema_obj = doc.object();
         }
+    }
+    appendPredefinedEntries_(schema_obj);
+    if (! schema_obj.isEmpty()) {
+        QList<Entry> user_entries;
+        user_entries.reserve(schema_obj.size());
+        for (auto it = schema_obj.constBegin(); it != schema_obj.constEnd(); ++it) {
+            if (isPredefinedKey(it.key())) continue;
+            const auto v = it.value().toObject();
+            Entry      e;
+            e.key     = it.key();
+            e.label   = v.value(QStringLiteral("text")).toString();
+            e.section = userPropertiesSection();
+            e.kind    = userKind();
+            if (e.label.isEmpty()) e.label = e.key;
+            e.type = v.value(QStringLiteral("type")).toString().toLower();
+            if (v.value(QStringLiteral("options")).isArray()) {
+                const auto opts = v.value(QStringLiteral("options")).toArray();
+                e.option_labels.reserve(opts.size());
+                e.option_values.reserve(opts.size());
+                for (const auto& opt_value : opts) {
+                    const auto opt   = opt_value.toObject();
+                    QString    value = jsonValueToWireString(opt.value(QStringLiteral("value")));
+                    QString    label = opt.value(QStringLiteral("label")).toString();
+                    if (label.isEmpty()) label = value;
+                    e.option_values.append(std::move(value));
+                    e.option_labels.append(std::move(label));
+                }
+            }
+            e.supported    = isSupported(e.type, ! e.option_values.isEmpty());
+            e.min_val      = v.value(QStringLiteral("min")).toDouble(0.0);
+            e.max_val      = v.value(QStringLiteral("max")).toDouble(1.0);
+            e.default_wire = coerceDefaultWireString(v.value(QStringLiteral("value")), e.type);
+            e.order        = v.value(QStringLiteral("order")).toDouble(0.0);
+            user_entries.append(std::move(e));
+        }
+        std::sort(user_entries.begin(), user_entries.end(), [](const Entry& a, const Entry& b) {
+            return a.order < b.order;
+        });
+        m_entries.append(user_entries);
     }
     endResetModel();
     Q_EMIT countChanged();
+    Q_EMIT overrideStateChanged();
 }
 
-void UserPropertyListModel::appendPredefinedEntries_() {
+void UserPropertyListModel::appendPredefinedEntries_(const QJsonObject& schema) {
     auto make = [](QString key, QString label, QString type, QString value) {
         Entry e;
         e.key          = std::move(key);
@@ -211,95 +235,58 @@ void UserPropertyListModel::appendPredefinedEntries_() {
         return e;
     };
 
-    auto scheme = make(QStringLiteral("waywallen.scheme_color"),
-                       QStringLiteral("Scheme color"),
-                       QStringLiteral("color"),
-                       QStringLiteral("0.0000 0.0000 0.0000 1.0000"));
+    const auto scheme_schema = schema.value(schemeColorKey()).toObject();
+    auto       scheme_label  = scheme_schema.value(QStringLiteral("text")).toString();
+    if (scheme_label.isEmpty()) scheme_label = QStringLiteral("Scheme color");
+    auto scheme_default = coerceDefaultWireString(scheme_schema.value(QStringLiteral("value")),
+                                                  QStringLiteral("color"));
+    if (scheme_default.isEmpty()) scheme_default = QStringLiteral("0.0000 0.0000 0.0000 1.0000");
+    auto scheme =
+        make(schemeColorKey(), std::move(scheme_label), QStringLiteral("color"), scheme_default);
     m_entries.append(std::move(scheme));
-
-    auto fill = make(QStringLiteral("waywallen.fill_mode"),
-                     QStringLiteral("Fill mode"),
-                     QStringLiteral("combo"),
-                     QStringLiteral("preserve_aspect_crop"));
-    fill.option_labels = {
-        QStringLiteral("Stretch"),
-        QStringLiteral("Fit"),
-        QStringLiteral("Crop"),
-        QStringLiteral("Center"),
-    };
-    fill.option_values = {
-        QStringLiteral("stretched"),
-        QStringLiteral("preserve_aspect_fit"),
-        QStringLiteral("preserve_aspect_crop"),
-        QStringLiteral("centered"),
-    };
-    m_entries.append(std::move(fill));
-
-    auto rotation = make(QStringLiteral("waywallen.rotation"),
-                         QStringLiteral("Rotation"),
-                         QStringLiteral("combo"),
-                         QStringLiteral("normal"));
-    rotation.option_labels = {
-        QStringLiteral("0°"),
-        QStringLiteral("90°"),
-        QStringLiteral("180°"),
-        QStringLiteral("270°"),
-    };
-    rotation.option_values = {
-        QStringLiteral("normal"),
-        QStringLiteral("cw_90"),
-        QStringLiteral("cw_180"),
-        QStringLiteral("cw_270"),
-    };
-    m_entries.append(std::move(rotation));
-
-    auto location_x = make(QStringLiteral("waywallen.location_x"),
-                           QStringLiteral("Horizontal location"),
-                           QStringLiteral("slider"),
-                           QStringLiteral("50"));
-    location_x.min_val = 0.0;
-    location_x.max_val = 100.0;
-    m_entries.append(std::move(location_x));
-
-    auto location_y = make(QStringLiteral("waywallen.location_y"),
-                           QStringLiteral("Vertical location"),
-                           QStringLiteral("slider"),
-                           QStringLiteral("50"));
-    location_y.min_val = 0.0;
-    location_y.max_val = 100.0;
-    m_entries.append(std::move(location_y));
 }
 
 void UserPropertyListModel::setValue(const QString& key, const QString& value) {
-    m_overrides.insert(key, value);
+    if (value.isEmpty()) {
+        m_overrides.remove(key);
+    } else {
+        m_overrides.insert(key, value);
+    }
     notifyCurrentChanged_(key);
+    Q_EMIT overrideStateChanged();
     Q_EMIT valueChanged(key, value);
 }
 
 void UserPropertyListModel::resetAll() {
     for (const auto& e : m_entries) {
-        m_overrides.insert(e.key, e.default_wire);
+        if (! m_overrides.contains(e.key)) continue;
+        m_overrides.remove(e.key);
         notifyCurrentChanged_(e.key);
-        Q_EMIT valueChanged(e.key, e.default_wire);
+        Q_EMIT valueChanged(e.key, QString {});
     }
+    Q_EMIT overrideStateChanged();
 }
 
 void UserPropertyListModel::resetPredefinedProperties() {
     for (const auto& e : m_entries) {
         if (e.kind != builtinKind()) continue;
-        m_overrides.insert(e.key, e.default_wire);
+        if (! m_overrides.contains(e.key)) continue;
+        m_overrides.remove(e.key);
         notifyCurrentChanged_(e.key);
-        Q_EMIT valueChanged(e.key, e.default_wire);
+        Q_EMIT valueChanged(e.key, QString {});
     }
+    Q_EMIT overrideStateChanged();
 }
 
 void UserPropertyListModel::resetUserProperties() {
     for (const auto& e : m_entries) {
         if (e.kind != userKind()) continue;
-        m_overrides.insert(e.key, e.default_wire);
+        if (! m_overrides.contains(e.key)) continue;
+        m_overrides.remove(e.key);
         notifyCurrentChanged_(e.key);
-        Q_EMIT valueChanged(e.key, e.default_wire);
+        Q_EMIT valueChanged(e.key, QString {});
     }
+    Q_EMIT overrideStateChanged();
 }
 
 void UserPropertyListModel::notifyCurrentChanged_(const QString& key) {

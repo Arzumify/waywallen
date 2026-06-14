@@ -602,16 +602,24 @@ MD.Page {
                         color: MD.Token.color.on_surface
                     }
 
+                    MD.AssistChip {
+                        visible: !!root.selected && root.selected.layoutOverriddenByWallpaper
+                        text: "Wallpaper override"
+                    }
+
                     Item {
                         implicitWidth: children[0].implicitWidth
                         MD.IconButton {
                             anchors.verticalCenter: parent.verticalCenter
                             mdState.size: MD.Enum.XS
-                            visible: {
+                            enabled: {
                                 if (!root.selected)
                                     return false;
                                 const ovr = root.selected.layoutOverride || ({});
-                                return ovr.fillmodeSet === true || ovr.locationSet === true || ovr.alignSet === true;
+                                return ovr.fillmodeSet === true
+                                    || ovr.locationSet === true
+                                    || ovr.alignSet === true
+                                    || ovr.rotationSet === true;
                             }
                             icon.name: MD.Token.icon.refresh
                             MD.ToolTip {
@@ -629,7 +637,7 @@ MD.Page {
                                 layoutSetQuery.clearFillmode = true;
                                 layoutSetQuery.clearLocation = true;
                                 layoutSetQuery.clearAlign = true;
-                                layoutSetQuery.clearRotation = false;
+                                layoutSetQuery.clearRotation = true;
                                 layoutSetQuery.reload();
                             }
                         }
@@ -638,14 +646,16 @@ MD.Page {
 
                 Flow {
                     id: layoutFlow
-                    readonly property var effective: root.selected ? (root.selected.effectiveLayout || ({})) : ({})
-                    readonly property int currentX: root.clampPercent(effective.locationX ?? 50)
-                    readonly property int currentY: root.clampPercent(effective.locationY ?? 50)
+                    readonly property var displayLayout: root.selected
+                        ? (root.selected.displayLayout || root.selected.effectiveLayout || ({}))
+                        : ({})
+                    readonly property int currentX: root.clampPercent(displayLayout.locationX ?? 50)
+                    readonly property int currentY: root.clampPercent(displayLayout.locationY ?? 50)
                     readonly property bool locationEnabled: {
                         if (!root.selected)
                             return false;
-                        const eff = root.selected.effectiveLayout || ({});
-                        return (eff.fillmode || 0) !== 1;
+                        const layout = root.selected.displayLayout || root.selected.effectiveLayout || ({});
+                        return (layout.fillmode || 0) !== 1;
                     }
                     Layout.fillWidth: true
                     visible: !!root.selected
@@ -668,8 +678,8 @@ MD.Page {
                             currentIndex: {
                                 if (!root.selected)
                                     return 0;
-                                const eff = root.selected.effectiveLayout || ({});
-                                return root.fillmodeIndex(eff.fillmode || 0);
+                                const layout = root.selected.displayLayout || root.selected.effectiveLayout || ({});
+                                return root.fillmodeIndex(layout.fillmode || 0);
                             }
                             onActivated: idx => {
                                 if (!root.selected)
@@ -803,8 +813,8 @@ MD.Page {
                             function isChecked(rotationValue) {
                                 if (!root.selected)
                                     return rotationValue === 1; // ROTATION_NORMAL
-                                const eff = root.selected.effectiveLayout || ({});
-                                return (eff.rotation || 0) === rotationValue;
+                                const layout = root.selected.displayLayout || root.selected.effectiveLayout || ({});
+                                return (layout.rotation || 0) === rotationValue;
                             }
 
                             MD.SegmentedButton {

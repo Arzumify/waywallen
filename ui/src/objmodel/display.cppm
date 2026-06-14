@@ -39,6 +39,9 @@ class Display : public QObject {
     /// (per-display override on top of global defaults). Map keys:
     /// `fillmode` (int), `locationX` / `locationY` (0..100).
     Q_PROPERTY(QVariantMap effectiveLayout READ effectiveLayout NOTIFY layoutChanged FINAL)
+    Q_PROPERTY(QVariantMap displayLayout READ displayLayout NOTIFY layoutChanged FINAL)
+    Q_PROPERTY(bool layoutOverriddenByWallpaper READ layoutOverriddenByWallpaper NOTIFY
+                   layoutChanged FINAL)
     /// Sparse per-display override. Same key set as effectiveLayout
     /// plus `fillmodeSet` / `locationSet` booleans
     /// indicating whether each field is explicitly overridden vs. inherited.
@@ -62,6 +65,8 @@ public:
     auto refreshMhz() const -> quint32 { return m_refresh_mhz; }
     auto links() const -> const QVariantList& { return m_links; }
     auto effectiveLayout() const -> const QVariantMap& { return m_effective_layout; }
+    auto displayLayout() const -> const QVariantMap& { return m_display_layout; }
+    auto layoutOverriddenByWallpaper() const -> bool { return m_layout_overridden_by_wallpaper; }
     auto layoutOverride() const -> const QVariantMap& { return m_layout_override; }
     auto drmRenderMajor() const -> quint32 { return m_drm_render_major; }
     auto drmRenderMinor() const -> quint32 { return m_drm_render_minor; }
@@ -85,6 +90,8 @@ public:
 private:
     static auto linksFromPb(const proto::DisplayInfo& info) -> QVariantList;
     static auto effectiveLayoutFromPb(const proto::DisplayInfo& info) -> QVariantMap;
+    static auto displayLayoutFromPb(const proto::DisplayInfo& info) -> QVariantMap;
+    static auto layoutOverriddenByWallpaperFromPb(const proto::DisplayInfo& info) -> bool;
     static auto layoutOverrideFromPb(const proto::DisplayInfo& info) -> QVariantMap;
     static auto playlistStatusFromPb(const proto::PlaylistDisplayStatus* status) -> QVariantMap;
 
@@ -96,6 +103,8 @@ private:
     quint32      m_refresh_mhz;
     QVariantList m_links;
     QVariantMap  m_effective_layout;
+    QVariantMap  m_display_layout;
+    bool         m_layout_overridden_by_wallpaper { false };
     QVariantMap  m_layout_override;
     quint32      m_drm_render_major;
     quint32      m_drm_render_minor;

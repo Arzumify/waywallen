@@ -216,7 +216,16 @@ pub struct DisplaySnapshot {
     pub links: Vec<DisplayLinkSnapshot>,
     pub drm_render_major: u32,
     pub drm_render_minor: u32,
+    pub display_layout: ResolvedLayout,
     pub effective_layout: ResolvedLayout,
+    pub effective_layout_source: LayoutSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutSource {
+    Global,
+    Display,
+    Wallpaper,
 }
 
 struct DisplayState {
@@ -406,6 +415,27 @@ impl Router {
             .copied()
             .unwrap_or_default()
             .apply_to(self.resolved_layout(info))
+    }
+
+    fn display_layout_source(&self, info: &DisplayInfo) -> LayoutSource {
+        let Some(s) = self.settings.get() else {
+            return LayoutSource::Global;
+        };
+        let prefs = if let Some(iid) = info.instance_id.as_deref() {
+            s.display_prefs(iid).or_else(|| s.display_prefs(&info.name))
+        } else {
+            s.display_prefs(&info.name)
+        };
+        if prefs.as_ref().is_some_and(|p| {
+            p.fillmode.is_some()
+                || p.location.is_some()
+                || p.align.is_some()
+                || p.rotation.is_some()
+        }) {
+            LayoutSource::Display
+        } else {
+            LayoutSource::Global
+        }
     }
 
     /// Settings TOML key used for this display's persistent prefs.
@@ -1445,10 +1475,21 @@ impl Router {
             .into_iter()
             .filter(|l| l.enabled)
             .collect();
-        let effective_layout = link_rows
-            .first()
-            .map(|l| self.resolved_layout_for_renderer(&s.info, &l.renderer_id, &inner))
-            .unwrap_or_else(|| self.resolved_layout(&s.info));
+        let display_layout = self.resolved_layout(&s.info);
+        let display_layout_source = self.display_layout_source(&s.info);
+        let wallpaper_layout_override = link_rows.first().and_then(|l| {
+            inner
+                .wallpaper_layout_overrides
+                .get(&l.renderer_id)
+                .copied()
+                .filter(|layout| !layout.is_empty())
+        });
+        let (effective_layout, effective_layout_source) =
+            if let Some(layout) = wallpaper_layout_override {
+                (layout.apply_to(display_layout), LayoutSource::Wallpaper)
+            } else {
+                (display_layout, display_layout_source)
+            };
         let links = link_rows
             .into_iter()
             .map(|l| DisplayLinkSnapshot {
@@ -1466,7 +1507,9 @@ impl Router {
             links,
             drm_render_major: s.gpu.major,
             drm_render_minor: s.gpu.minor,
+            display_layout,
             effective_layout,
+            effective_layout_source,
         })
     }
 
@@ -1541,10 +1584,21 @@ impl Router {
                     .into_iter()
                     .filter(|l| l.enabled)
                     .collect();
-                let effective_layout = link_rows
-                    .first()
-                    .map(|l| self.resolved_layout_for_renderer(&s.info, &l.renderer_id, &inner))
-                    .unwrap_or_else(|| self.resolved_layout(&s.info));
+                let display_layout = self.resolved_layout(&s.info);
+                let display_layout_source = self.display_layout_source(&s.info);
+                let wallpaper_layout_override = link_rows.first().and_then(|l| {
+                    inner
+                        .wallpaper_layout_overrides
+                        .get(&l.renderer_id)
+                        .copied()
+                        .filter(|layout| !layout.is_empty())
+                });
+                let (effective_layout, effective_layout_source) =
+                    if let Some(layout) = wallpaper_layout_override {
+                        (layout.apply_to(display_layout), LayoutSource::Wallpaper)
+                    } else {
+                        (display_layout, display_layout_source)
+                    };
                 let links = link_rows
                     .into_iter()
                     .map(|l| DisplayLinkSnapshot {
@@ -1562,7 +1616,9 @@ impl Router {
                     links,
                     drm_render_major: s.gpu.major,
                     drm_render_minor: s.gpu.minor,
+                    display_layout,
                     effective_layout,
+                    effective_layout_source,
                 })
             })
             .collect()

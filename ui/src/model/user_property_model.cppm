@@ -28,6 +28,10 @@ class UserPropertyListModel : public QAbstractListModel {
     Q_PROPERTY(
         QString overridesJson READ overridesJson WRITE setOverridesJson NOTIFY overridesJsonChanged)
     Q_PROPERTY(int count READ rowCount NOTIFY countChanged)
+    Q_PROPERTY(bool hasPredefinedPropertyOverrides READ hasPredefinedPropertyOverrides NOTIFY
+                   overrideStateChanged)
+    Q_PROPERTY(
+        bool hasUserPropertyOverrides READ hasUserPropertyOverrides NOTIFY overrideStateChanged)
 
 public:
     enum Roles
@@ -63,6 +67,9 @@ public:
     Q_SIGNAL void overridesJsonChanged();
 
     Q_SIGNAL void countChanged();
+    auto          hasPredefinedPropertyOverrides() const -> bool;
+    auto          hasUserPropertyOverrides() const -> bool;
+    Q_SIGNAL void overrideStateChanged();
 
     // Mutate the local value for a single key. Internal state +
     // `dataChanged` + `valueChanged` all fire synchronously. UI
@@ -72,8 +79,8 @@ public:
     // overrides rebuilds.
     Q_INVOKABLE void setValue(const QString& key, const QString& value);
 
-    // `setValue` each matching key back to its default. One
-    // `valueChanged` per key, in order.
+    // Clear each matching override. One empty `valueChanged` per key,
+    // in order.
     Q_INVOKABLE void resetAll();
     Q_INVOKABLE void resetPredefinedProperties();
     Q_INVOKABLE void resetUserProperties();
@@ -100,9 +107,10 @@ private:
     };
 
     void    rebuildEntries_();
-    void    appendPredefinedEntries_();
+    void    appendPredefinedEntries_(const QJsonObject& schema);
     QString currentValueFor_(qsizetype row) const;
     void    notifyCurrentChanged_(const QString& key);
+    auto    hasOverridesForKind_(const QString& kind) const -> bool;
 
     QString                 m_schema_json;
     QString                 m_overrides_json;

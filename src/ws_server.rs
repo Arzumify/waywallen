@@ -20,14 +20,16 @@ use crate::ipc::proto::ControlMsg;
 use crate::model::repo;
 use crate::queue;
 use crate::renderer_manager;
-use crate::routing::{DisplaySnapshot, LibrarySnapshot, RendererSnapshot, RouterEvent};
+use crate::routing::{
+    DisplaySnapshot, LayoutSource, LibrarySnapshot, RendererSnapshot, RouterEvent,
+};
 use crate::settings::{
     FilterLogicState, SettingsStore, WallpaperFilterRuleState, WallpaperFilterState,
     WallpaperIntFilterState, WallpaperSortRuleState, WallpaperStringFilterState,
 };
 use crate::tasks;
 use crate::wallpaper_properties::{
-    dedupe_predefined_schema, is_daemon_display_property_key, split_renderer_properties,
+    dedupe_predefined_schema, is_daemon_display_property_key, WallpaperLayoutOverride,
 };
 use crate::wallpaper_sort::apply_wallpaper_sorts;
 use crate::AppState;
@@ -317,6 +319,16 @@ fn display_snapshot_to_pb(s: DisplaySnapshot, settings: &SettingsStore) -> pb::D
         drm_render_major: s.drm_render_major,
         drm_render_minor: s.drm_render_minor,
         alias: override_prefs.alias.clone().unwrap_or_default(),
+        display_layout: Some(layout_prefs_to_pb_resolved(&s.display_layout)),
+        effective_layout_source: layout_source_to_pb(s.effective_layout_source) as i32,
+    }
+}
+
+fn layout_source_to_pb(source: LayoutSource) -> pb::LayoutSource {
+    match source {
+        LayoutSource::Global => pb::LayoutSource::Global,
+        LayoutSource::Display => pb::LayoutSource::Display,
+        LayoutSource::Wallpaper => pb::LayoutSource::Wallpaper,
     }
 }
 
@@ -429,6 +441,20 @@ fn align_from_pb(v: i32) -> Option<crate::display::layout::Align> {
 
 fn location_from_pb(x: u32, y: u32) -> crate::display::layout::Location {
     crate::display::layout::Location::new(x.min(100) as u8, y.min(100) as u8)
+}
+
+fn resolved_layout_from_pb(p: &pb::LayoutPrefs) -> crate::settings::ResolvedLayout {
+    crate::settings::ResolvedLayout {
+        fillmode: fillmode_from_pb(p.fillmode).unwrap_or_default(),
+        location: if p.location_set {
+            location_from_pb(p.location_x, p.location_y)
+        } else {
+            align_from_pb(p.align)
+                .map(crate::display::layout::Location::from_align)
+                .unwrap_or_default()
+        },
+        rotation: rotation_from_pb(p.rotation).unwrap_or_default(),
+    }
 }
 
 fn autopause_mode_to_pb(m: crate::settings::AutopauseMode) -> pb::AutopauseMode {
@@ -1093,7 +1119,7 @@ async fn dispatch_inner(
                 .into_iter()
                 .map(|e| {
                     let tags = tag_map.get(&e.item_id).cloned().unwrap_or_default();
-                    entry_to_pb(e, tags, String::new(), String::new())
+                    entry_to_pb(e, tags, String::new(), String::new(), None)
                 })
                 .collect();
 
@@ -1126,9 +1152,17 @@ async fn dispatch_inner(
             let overrides = repo::get_user_property_overrides_raw(&state.db, entry.item_id)
                 .await?
                 .unwrap_or_default();
+            let layout_override =
+                repo::get_wallpaper_layout_override_with_legacy(&state.db, entry.item_id).await?;
 
             Res::WallpaperGet(pb::WallpaperGetResponse {
-                entry: Some(entry_to_pb(&entry, tags, schema, overrides)),
+                entry: Some(entry_to_pb(
+                    &entry,
+                    tags,
+                    schema,
+                    overrides,
+                    layout_override,
+                )),
             })
         }
 
@@ -1152,9 +1186,8 @@ async fn dispatch_inner(
                 .await;
             let push_tag = if is_daemon_display_property_key(&r.key) {
                 if let Some(h) = live_renderer {
-                    let raw =
-                        repo::get_user_property_overrides_raw(&state.db, entry.item_id).await?;
-                    let (_, wallpaper_layout_override) = split_renderer_properties(raw.as_deref());
+                    let (_, wallpaper_layout_override) =
+                        repo::get_wallpaper_render_properties(&state.db, entry.item_id).await?;
                     let id = h.id.clone();
                     state
                         .router
@@ -1195,6 +1228,50 @@ async fn dispatch_inner(
                 push_tag
             );
             Res::WallpaperPropertySet(pb::WallpaperPropertySetResponse {})
+        }
+
+        Req::WallpaperLayoutSet(r) => {
+            let entry = match r.wallpaper_id.parse::<i64>() {
+                Ok(iid) => repo::get_entry(&state.db, iid).await?,
+                Err(_) => None,
+            };
+            let entry = entry.ok_or_else(|| Error::WallpaperNotFound(r.wallpaper_id.clone()))?;
+            let layout = if r.clear {
+                None
+            } else {
+                let Some(layout) = r.layout.as_ref() else {
+                    return Err(Error::InvalidArgument(
+                        "wallpaper_layout_set requires layout unless clear=true".to_string(),
+                    ));
+                };
+                Some(resolved_layout_from_pb(layout))
+            };
+            repo::set_wallpaper_layout_override(&state.db, entry.item_id, layout).await?;
+
+            let live_renderer = state
+                .renderer_manager
+                .find_by_resource(&entry.resource)
+                .await;
+            if let Some(h) = live_renderer {
+                let override_layout = layout
+                    .map(WallpaperLayoutOverride::from_resolved)
+                    .unwrap_or_default();
+                state
+                    .router
+                    .set_renderer_wallpaper_layout_override(&h.id, override_layout)
+                    .await;
+            }
+
+            let layout_override = layout.map(WallpaperLayoutOverride::from_resolved);
+            Res::WallpaperLayoutSet(pb::WallpaperLayoutSetResponse {
+                entry: Some(entry_to_pb(
+                    &entry,
+                    entry.tags.clone(),
+                    String::new(),
+                    String::new(),
+                    layout_override,
+                )),
+            })
         }
 
         Req::WallpaperScan(_) => {
@@ -1419,10 +1496,8 @@ async fn dispatch_inner(
             // a separate JSON payload in `Init.user_properties`.
             // Daemon-owned predefined display keys become
             // wallpaper-local layout overrides on the router instead.
-            let raw_user_properties_json =
-                repo::get_user_property_overrides_raw(&state.db, entry.item_id).await?;
             let (user_properties_json, wallpaper_layout_override) =
-                split_renderer_properties(raw_user_properties_json.as_deref());
+                repo::get_wallpaper_render_properties(&state.db, entry.item_id).await?;
 
             // SPAWN_VERSION 3: extras (canonical `path` + manifest
             // whitelist like `assets`/`workshop_id`) ride as CLI
@@ -2069,9 +2144,11 @@ fn entry_to_pb(
     tags: Vec<String>,
     user_properties_schema: String,
     user_property_overrides: String,
+    wallpaper_layout_override: Option<WallpaperLayoutOverride>,
 ) -> pb::WallpaperEntry {
     // `e` is reconstructed from the DB (the source of truth), so its
     // fields are already the freshest values — no overlay needed.
+    let wallpaper_layout_override_set = wallpaper_layout_override.is_some();
     pb::WallpaperEntry {
         id: e.item_id.to_string(),
         name: e.name.clone(),
@@ -2090,6 +2167,9 @@ fn entry_to_pb(
         user_property_overrides,
         description: e.description.clone().unwrap_or_default(),
         external_id: e.external_id.clone().unwrap_or_default(),
+        wallpaper_layout_override: wallpaper_layout_override
+            .map(|layout| layout_prefs_to_pb_resolved(&layout.materialize())),
+        wallpaper_layout_override_set,
     }
 }
 
