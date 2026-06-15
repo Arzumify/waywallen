@@ -257,6 +257,10 @@ impl RendererHandle {
         self.events.subscribe()
     }
 
+    pub fn frame_ready_seen(&self) -> bool {
+        self.sync_fds.lock().map(|g| !g.is_empty()).unwrap_or(false)
+    }
+
     /// Borrow the cached bind snapshot. Returns `None` until the host's
     /// first frame has been rendered and the fds arrived.
     pub fn bind_snapshot(&self) -> Arc<StdMutex<Option<BindSnapshot>>> {
@@ -813,6 +817,77 @@ impl RendererManager {
     pub async fn list(&self) -> Vec<RendererId> {
         let inner = self.inner.lock().await;
         inner.renderers.keys().cloned().collect()
+    }
+
+    pub async fn wait_for_first_frame(&self, id: &str, timeout: Duration) -> Result<()> {
+        let handle = self
+            .get(id)
+            .await
+            .ok_or_else(|| Error::RendererNotFound(id.to_string()))?;
+        if handle.frame_ready_seen() {
+            return Ok(());
+        }
+
+        let mut events = handle.events();
+        let deadline = tokio::time::sleep(timeout);
+        tokio::pin!(deadline);
+        let mut liveness = tokio::time::interval(Duration::from_millis(100));
+
+        loop {
+            if handle.frame_ready_seen() {
+                return Ok(());
+            }
+
+            tokio::select! {
+                _ = &mut deadline => {
+                    return Err(Error::RendererFrameFailed(format!(
+                        "timed out after {}s waiting for renderer '{id}' to send its first frame",
+                        timeout.as_secs()
+                    )));
+                }
+                _ = liveness.tick() => {
+                    if self.get(id).await.is_none() {
+                        return Err(Error::RendererFrameFailed(format!(
+                            "renderer '{id}' exited before its first frame"
+                        )));
+                    }
+
+                    let mut child_guard = handle.child.lock().await;
+                    if let Some(child) = child_guard.as_mut() {
+                        match child.try_wait() {
+                            Ok(Some(status)) => {
+                                self.mark_dead(id);
+                                return Err(Error::RendererFrameFailed(format!(
+                                    "renderer '{id}' exited before its first frame: {status}"
+                                )));
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                return Err(Error::RendererFrameFailed(format!(
+                                    "failed to check renderer '{id}' liveness: {e}"
+                                )));
+                            }
+                        }
+                    }
+                }
+                recv = events.recv() => {
+                    match recv {
+                        Ok(EventMsg::FrameReady { .. }) => return Ok(()),
+                        Ok(_) => {}
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            if handle.frame_ready_seen() {
+                                return Ok(());
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            return Err(Error::RendererFrameFailed(format!(
+                                "renderer '{id}' event stream closed before its first frame"
+                            )));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Fire-and-forget control send. Returns an error if the renderer

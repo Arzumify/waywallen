@@ -116,9 +116,15 @@ Item {
 
     Connections {
         target: applyQuery
-        function onRendererIdChanged() {
-            if (applyQuery.rendererId)
+        function onStatusChanged() {
+            if (applyQuery.status === 2) {
                 wallpaperGetQuery.reload();
+            } else if (applyQuery.status === 3) {
+                const message = applyQuery.error && applyQuery.error.length > 0
+                    ? applyQuery.error
+                    : qsTr("Apply failed");
+                W.Action.toast(message, 6000, 1, null);
+            }
         }
     }
 
@@ -893,21 +899,6 @@ Item {
                 MD.ToolTip {
                     visible: applyBtn.hovered && !applyBtn.enabled
                     text: "No display connected"
-                }
-            }
-
-            RowLayout {
-                visible: applyQuery.status === 3
-                spacing: 8
-                MD.Icon {
-                    name: MD.Token.icon.check
-                    size: 20
-                    color: MD.Token.color.primary
-                }
-                MD.Text {
-                    text: "Applied"
-                    typescale: MD.Token.typescale.label_large
-                    color: MD.Token.color.primary
                 }
             }
         }

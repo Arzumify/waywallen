@@ -127,6 +127,11 @@ pub enum Error {
     #[error("renderer control failed: {0}")]
     RendererControlFailed(String),
 
+    /// Apply path: the renderer connected but never produced a usable
+    /// frame, or exited before doing so.
+    #[error("renderer did not produce a frame: {0}")]
+    RendererFrameFailed(String),
+
     /// Source-plugin Lua name was not in the registered set.
     #[error("source plugin '{0}' not found")]
     SourcePluginNotFound(String),
@@ -248,6 +253,7 @@ impl Error {
             Self::RendererTypeMismatch { .. } => E::RendererTypeMismatch,
             Self::RendererSpawnFailed(_) => E::RendererSpawnFailed,
             Self::RendererControlFailed(_) => E::RendererControlFailed,
+            Self::RendererFrameFailed(_) => E::RendererFrameFailed,
             Self::SourcePluginNotFound(_) => E::SourcePluginNotFound,
             Self::SourceExtrasFailed { .. } => E::SourceExtrasFailed,
             Self::PluginInstallFailed(_) => E::PluginInstallFailed,
@@ -291,6 +297,7 @@ impl Error {
             | E::Db
             | E::RendererSpawnFailed
             | E::RendererControlFailed
+            | E::RendererFrameFailed
             | E::SourceExtrasFailed
             | E::PluginInstallFailed
             | E::SettingsApplyFailed

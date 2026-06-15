@@ -18,6 +18,8 @@ use crate::control;
 use crate::control_proto as pb;
 use crate::error::{ok_response, Error};
 use crate::events::GlobalEvent;
+
+const APPLY_FIRST_FRAME_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 use crate::ipc::proto::ControlMsg;
 use crate::model::repo;
 use crate::plugin::source_manager::DiscoverDownload;
@@ -1981,6 +1983,16 @@ async fn dispatch_inner(
                     .router
                     .relink_displays_to(&r.display_ids, &renderer_id)
                     .await;
+            }
+
+            if let Err(e) = state
+                .renderer_manager
+                .wait_for_first_frame(&renderer_id, APPLY_FIRST_FRAME_TIMEOUT)
+                .await
+            {
+                state.router.unregister_renderer(&renderer_id).await;
+                let _ = state.renderer_manager.kill(&renderer_id).await;
+                return Err(e);
             }
 
             // Mirror the persistence side-effects of
