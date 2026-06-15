@@ -20,18 +20,16 @@ jobs:
     env:
       DEBIAN_FRONTEND: noninteractive
       WAYWALLEN_CONDA_ENV: waywallen
-      CCACHE_DIR: ${{ github.workspace }}/.ccache
-      CCACHE_MAXSIZE: 2G
     steps:
       - name: Install OS prereqs
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             curl ca-certificates git bzip2 file xz-utils \
-            build-essential pkg-config glslang-tools ccache \
+            build-essential pkg-config glslang-tools \
             libfuse2 libxkbcommon0 libgl1 libegl1 libpulse-dev \
             libglib2.0-0 libgles-dev libgbm-dev libfreetype-dev \
-            libpipewire-0.3-dev
+            libpipewire-0.3-dev libarchive-tools
 
       - uses: actions/checkout@v4
         with:
@@ -54,7 +52,7 @@ jobs:
       - uses: actions/cache@v4
         with:
           path: ~/miniconda/envs/waywallen
-          key: conda-${{ runner.os }}-${{ hashFiles('environment.yml') }}
+          key: conda-${{ runner.os }}-${{ hashFiles('environment.yml', 'scripts/build_ffmpeg.sh') }}
 
       - uses: actions/cache@v4
         with:
@@ -64,19 +62,8 @@ jobs:
             build/clang-release/cargo
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.toml', 'displays/*/Cargo.toml') }}
 
-      - uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/.ccache
-          key: ccache-${{ runner.os }}-${{ github.sha }}
-          restore-keys: |
-            ccache-${{ runner.os }}-
-
       - name: Build AppImage
         run: bash ./scripts/build_appimage.sh
-
-      - name: ccache stats
-        if: always()
-        run: ccache -s
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

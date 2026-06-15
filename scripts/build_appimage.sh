@@ -115,16 +115,9 @@ if [[ ! -f "$CONDA_PREFIX/lib/cmake/Qt6Protobuf/Qt6ProtobufConfig.cmake" ]]; the
     cmake --install "$QTGRPC_BUILD"
 fi
 
-# Use ccache as the compiler launcher when available (speeds up CI rebuilds).
-CCACHE_ARGS=()
-if command -v ccache >/dev/null 2>&1; then
-    CCACHE_ARGS=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
-fi
-
 step "CMake configure (daemon + UI + image/video renderer plugins)"
 pushd "$PROJECT_DIR"
 cmake -S "$PROJECT_DIR" --preset clang-release \
-    "${CCACHE_ARGS[@]}" \
     -DCMAKE_SYSROOT="$CONDA_BUILD_SYSROOT" \
     `# Under sysroot 2.28 pthread lives in libpthread, not libc — pthread must
      # be enabled globally, otherwise C++20 PCMs produced by rstd / qextra etc.
