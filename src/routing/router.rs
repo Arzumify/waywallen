@@ -18,21 +18,13 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use std::collections::HashSet;
 
 use tokio::sync::{broadcast, broadcast::error::RecvError, mpsc, Mutex as TokioMutex, Notify};
 use tokio::task::JoinHandle;
 
-/// Backstop only. The mainline path is `Router::mark_orphan`, which
-/// schedules a per-renderer timer when a renderer loses its last
-/// enabled link. This timeout exists purely to catch renderers that
-/// somehow ended up paused without going through the orphan-marking
-/// path (defensive — should never fire in practice).
-const IDLE_KILL_TIMEOUT: Duration = Duration::from_secs(3600);
-/// How often the backstop reaper task wakes up to scan for stragglers.
-const IDLE_SCAN_INTERVAL: Duration = Duration::from_secs(60);
 /// Grace period an orphan renderer keeps running before it is killed.
 /// Only granted when the daemon has zero displays AND the orphan is
 /// the only renderer in the system — the grace window absorbs a quick
@@ -275,9 +267,6 @@ struct Inner {
     /// carries the snapshot taken at spawn time and is a no-op if the
     /// counter has advanced (i.e. a newer transition invalidated it).
     session_gen: u64,
-    /// Timestamp of the Pause transition for each paused renderer.
-    /// Consumed by the reaper task to enforce `IDLE_KILL_TIMEOUT`.
-    paused_since: HashMap<RendererId, Instant>,
     /// Pending orphan-reap timers, keyed by renderer id. Inserted by
     /// `mark_orphan` and cleared by `cancel_orphan_timer`. The task
     /// itself also clears its own entry once it commits to the kill
@@ -337,7 +326,6 @@ impl Router {
                 displays: HashMap::new(),
                 renderer_tasks: HashMap::new(),
                 paused_renderers: std::collections::HashSet::new(),
-                paused_since: HashMap::new(),
                 orphan_timers: HashMap::new(),
                 unbind_acks_pending: HashMap::new(),
                 wallpaper_layout_overrides: HashMap::new(),
@@ -352,17 +340,6 @@ impl Router {
             settings: std::sync::OnceLock::new(),
             unbind_ack_notify: Notify::new(),
         });
-        // Spawn the idle-renderer reaper.
-        {
-            let weak = Arc::downgrade(&router);
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(IDLE_SCAN_INTERVAL).await;
-                    let Some(this) = weak.upgrade() else { return };
-                    this.reap_idle_renderers().await;
-                }
-            });
-        }
         router
     }
 
@@ -645,34 +622,6 @@ impl Router {
         self.emit(RouterEvent::DisplaysReplace(snap));
     }
 
-    /// Kill renderers that have been paused longer than
-    /// `IDLE_KILL_TIMEOUT`. Called periodically by the reaper task
-    /// spawned in `new()`.
-    async fn reap_idle_renderers(self: &Arc<Self>) {
-        let now = Instant::now();
-        let victims: Vec<RendererId> = {
-            let inner = self.inner.lock().await;
-            inner
-                .paused_since
-                .iter()
-                .filter_map(|(id, t)| {
-                    if now.duration_since(*t) >= IDLE_KILL_TIMEOUT {
-                        Some(id.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-        for id in victims {
-            log::info!("router: reaping idle renderer {id}");
-            self.unregister_renderer(&id).await;
-            if let Err(e) = self.mgr.kill(&id).await {
-                log::warn!("router: reaper kill {id}: {e}");
-            }
-        }
-    }
-
     // ---------------------------------------------------------------
     // Renderer lifecycle
     // ---------------------------------------------------------------
@@ -759,7 +708,6 @@ impl Router {
                 task.abort();
             }
             inner.paused_renderers.remove(id);
-            inner.paused_since.remove(id);
             removed.into_iter().map(|(_, did)| did).collect()
         };
         self.emit(RouterEvent::RendererRemoved(id.to_string()));
@@ -2024,7 +1972,6 @@ impl Router {
                 let was_paused = inner.paused_renderers.contains(&rid);
                 if !should_pause && was_paused {
                     inner.paused_renderers.remove(&rid);
-                    inner.paused_since.remove(&rid);
                     let cause = if has_active_link {
                         "autopause-clear"
                     } else {
@@ -2033,7 +1980,6 @@ impl Router {
                     out.push((rid, ControlMsg::Play, cause));
                 } else if should_pause && !was_paused {
                     inner.paused_renderers.insert(rid.clone());
-                    inner.paused_since.insert(rid.clone(), Instant::now());
                     let cause = if has_active_link {
                         "autopause"
                     } else {
@@ -3298,6 +3244,7 @@ mod tests {
             .await;
         assert!(router.is_paused("r1").await);
 
+        tokio::task::yield_now().await;
         // Advance past the resume window. The spawned timer fires and
         // flips `requested` → reconcile_lifecycle sends Play. The
         // spawned task takes multiple awaits to land (lock + reconcile
