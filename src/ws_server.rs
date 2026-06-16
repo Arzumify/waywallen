@@ -31,7 +31,8 @@ use crate::routing::{
 use crate::settings::{SettingsStore, WallpaperFilterState, WallpaperSortRuleState};
 use crate::tasks;
 use crate::wallpaper_properties::{
-    dedupe_predefined_schema, is_daemon_display_property_key, WallpaperLayoutOverride,
+    dedupe_predefined_schema, is_daemon_display_property_key, user_property_default_wire_value,
+    WallpaperLayoutOverride,
 };
 use crate::wallpaper_sort::apply_wallpaper_sorts;
 use crate::AppState;
@@ -1413,7 +1414,30 @@ async fn dispatch_inner(
                 // through setPropertyString -> MainSetProperty ->
                 // shader cbuffer.
                 if let Some(h) = live_renderer {
-                    let kv = vec![(r.key.clone(), r.value.clone())];
+                    let value = if r.value.is_empty() {
+                        let schema = state
+                            .source_manager
+                            .lock()
+                            .await
+                            .call_properties(&entry.plugin_name, &entry)
+                            .await
+                            .ok()
+                            .flatten();
+                        schema
+                            .as_deref()
+                            .and_then(|schema| user_property_default_wire_value(schema, &r.key))
+                            .unwrap_or_else(|| {
+                                log::warn!(
+                                    "WallpaperPropertySet: reset {} on {} has no default value",
+                                    r.key,
+                                    r.wallpaper_id
+                                );
+                                r.value.clone()
+                            })
+                    } else {
+                        r.value.clone()
+                    };
+                    let kv = vec![(r.key.clone(), value)];
                     let id = h.id.clone();
                     state
                         .renderer_manager

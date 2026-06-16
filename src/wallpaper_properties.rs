@@ -128,6 +128,64 @@ pub fn dedupe_predefined_schema(raw: &str) -> String {
     }
 }
 
+pub fn user_property_default_wire_value(raw_schema: &str, key: &str) -> Option<String> {
+    let raw_schema = raw_schema.trim();
+    if raw_schema.is_empty() {
+        return None;
+    }
+    let value = serde_json::from_str::<serde_json::Value>(raw_schema).ok()?;
+    let map = value.as_object()?;
+    let canonical = canonical_user_property_key(key);
+    let prop = map.get(canonical).or_else(|| {
+        map.iter()
+            .find(|(k, _)| canonical_user_property_key(k) == canonical)
+            .map(|(_, v)| v)
+    })?;
+    let prop = prop.as_object()?;
+    let ty = prop
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let default = prop.get("value")?;
+    coerce_default_wire_value(default, &ty)
+}
+
+fn coerce_default_wire_value(value: &serde_json::Value, ty: &str) -> Option<String> {
+    match ty {
+        "color" => match value {
+            serde_json::Value::Array(values) => values
+                .iter()
+                .map(|v| v.as_f64().map(|n| format!("{n:.4}")))
+                .collect::<Option<Vec<_>>>()
+                .map(|v| v.join(" ")),
+            serde_json::Value::String(value) => Some(value.clone()),
+            _ => json_value_to_wire_string(value),
+        },
+        "bool" => value
+            .as_bool()
+            .map(|v| if v { "true" } else { "false" }.to_string())
+            .or_else(|| json_value_to_wire_string(value)),
+        "slider" => json_value_to_wire_string(value),
+        "combo" => json_value_to_wire_string(value),
+        _ => json_value_to_wire_string(value),
+    }
+}
+
+fn json_value_to_wire_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Bool(value) => Some(if *value { "true" } else { "false" }.to_string()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(|v| v.as_f64().map(|n| format!("{n:.4}")))
+            .collect::<Option<Vec<_>>>()
+            .map(|v| v.join(" ")),
+        _ => None,
+    }
+}
+
 pub fn normalize_user_property_overrides(map: HashMap<String, String>) -> HashMap<String, String> {
     let mut out = HashMap::with_capacity(map.len());
     for (key, value) in map {
@@ -317,5 +375,42 @@ mod tests {
             Some("0.4 0.5 0.6")
         );
         assert!(!normalized.contains_key("schemecolor"));
+    }
+
+    #[test]
+    fn reads_default_wire_values_from_property_schema() {
+        let raw = r#"{
+            "waywallen.scheme_color": { "type": "color", "value": [0.1, 0.2, 0.3, 1.0] },
+            "speed": { "type": "slider", "value": 1.5 },
+            "enabled": { "type": "bool", "value": true },
+            "mode": { "type": "combo", "value": "pulse" }
+        }"#;
+        assert_eq!(
+            user_property_default_wire_value(raw, "waywallen.scheme_color").as_deref(),
+            Some("0.1000 0.2000 0.3000 1.0000")
+        );
+        assert_eq!(
+            user_property_default_wire_value(raw, "speed").as_deref(),
+            Some("1.5")
+        );
+        assert_eq!(
+            user_property_default_wire_value(raw, "enabled").as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            user_property_default_wire_value(raw, "mode").as_deref(),
+            Some("pulse")
+        );
+    }
+
+    #[test]
+    fn reads_default_wire_value_by_canonical_key() {
+        let raw = r#"{
+            "schemecolor": { "type": "color", "value": "0.4 0.5 0.6" }
+        }"#;
+        assert_eq!(
+            user_property_default_wire_value(raw, "waywallen.scheme_color").as_deref(),
+            Some("0.4 0.5 0.6")
+        );
     }
 }
