@@ -12,7 +12,6 @@ pub mod queue;
 pub mod renderer_manager;
 pub mod routing;
 pub mod scheduler;
-pub mod self_test;
 pub mod settings;
 pub mod sync;
 pub mod tasks;

@@ -23,7 +23,6 @@ mod queue;
 mod renderer_manager;
 mod routing;
 mod scheduler;
-mod self_test;
 mod session_monitor;
 mod settings;
 mod sync;
@@ -199,14 +198,6 @@ fn resolve_ui_path(explicit: Option<PathBuf>) -> Option<PathBuf> {
 }
 
 fn main() -> anyhow::Result<()> {
-    // Detect the user-runnable diagnostic path before daemon bootstrap.
-    // It must not touch DBus, DB, or plugins.
-    let argv: Vec<String> = std::env::args().collect();
-    if argv.iter().any(|a| a == "--test") {
-        env_logger::init();
-        return self_test::run(argv);
-    }
-
     env_logger::init();
 
     // Explicit runtime with a bounded `shutdown_timeout`.

@@ -1377,7 +1377,7 @@ impl RendererHandle {
 
 impl RendererHandle {
     /// Construct a `RendererHandle` with no running child process.
-    /// Used by routing-table unit tests and runtime self-test.
+    /// Used by routing-table unit tests.
     pub fn test_stub(id: &str, wp_type: &str) -> Arc<Self> {
         let (a, _b) = StdUnixStream::pair().expect("UnixStream pair");
         let (events_tx, _) = broadcast::channel::<EventMsg>(8);
@@ -1401,23 +1401,6 @@ impl RendererHandle {
             events_subscribed: Arc::new(Vec::new()),
             clear_rgba: Arc::new(StdMutex::new([0.0, 0.0, 0.0, 1.0])),
         })
-    }
-
-    /// self_test (runtime `--test`): broadcast an event as if the
-    /// renderer subprocess had emitted it.
-    pub fn push_self_test_event(&self, ev: EventMsg) {
-        let _ = self.events.send(ev);
-    }
-
-    /// self_test (runtime `--test`): stash a per-frame acquire sync_fd
-    /// the way the manager's reader thread does for production.
-    pub fn push_self_test_sync_fd(&self, seq: u64, fd: OwnedFd) {
-        if let Ok(mut g) = self.sync_fds.lock() {
-            g.push_back((seq, fd));
-            while g.len() > SYNC_FD_RETENTION {
-                g.pop_front();
-            }
-        }
     }
 }
 

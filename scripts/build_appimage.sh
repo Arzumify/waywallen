@@ -13,20 +13,27 @@
 # Optional environment variables:
 #   WAYWALLEN_CONDA_ENV     conda env name, default "waywallen"
 #   OWE_PLUGIN_ZIP          prebuilt OWE plugin zip path or URL
+#   WAYWALLEN_DISPLAY_REPO  layer-shell source repo URL
+#   WAYWALLEN_DISPLAY_REF   layer-shell source git ref
+#   WAYWALLEN_DISPLAY_SRC   layer-shell source cache dir
 
 set -euo pipefail
 
 # Script lives in <repo>/scripts/, so PROJECT_DIR is one level up.
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_NAME="${WAYWALLEN_CONDA_ENV:-waywallen}"
+TMP_DIR="${TMPDIR:-/tmp}"
 OWE_PLUGIN_VER="0.1.7"
 OWE_PLUGIN_ZIP="https://github.com/waywallen/open-wallpaper-engine/releases/download/v${OWE_PLUGIN_VER}/org.waywallen.open-wallpaper-engine-${OWE_PLUGIN_VER}-linux-x86_64.zip"
 OWE_PLUGIN_ID="org.waywallen.open-wallpaper-engine"
+WAYWALLEN_DISPLAY_REPO="${WAYWALLEN_DISPLAY_REPO:-https://github.com/waywallen/waywallen-display.git}"
+WAYWALLEN_DISPLAY_REF="${WAYWALLEN_DISPLAY_REF:-6dc8e9ad6cb17452e7affe9390238cfb3e995a9f}"
 APPDIR="$PROJECT_DIR/build/AppDir"
 INSTALL_DIR="$APPDIR/usr"          # AppDir's /usr is the cmake install prefix
 PLUGINS_DIR="$INSTALL_DIR/share/waywallen/plugins"
 OWE_PLUGIN_DIR="$PLUGINS_DIR/$OWE_PLUGIN_ID"
 TOOLS_DIR="$PROJECT_DIR/build/_tools"
+WAYWALLEN_DISPLAY_SRC="${WAYWALLEN_DISPLAY_SRC:-$TMP_DIR/waywallen-display-src}"
 
 step() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 fail() { printf '\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -79,6 +86,8 @@ command -v curl >/dev/null \
     || fail "curl not found. Install curl first, then re-run."
 command -v bsdtar >/dev/null \
     || fail "bsdtar not found. Install libarchive/bsdtar first, then re-run."
+command -v git >/dev/null \
+    || fail "git not found. Install git first, then re-run."
 
 # ---- Set up the conda environment ----
 # Make `conda activate` available inside this script.
@@ -161,9 +170,22 @@ step "Installing into AppDir: $APPDIR"
 cmake --install build/clang-release
 
 step "Building and installing waywallen-layer-shell"
-cargo build --package waywallen-display --bin waywallen-layer-shell --release --locked
+if [[ -d "$WAYWALLEN_DISPLAY_SRC/.git" ]]; then
+    git -C "$WAYWALLEN_DISPLAY_SRC" remote set-url origin "$WAYWALLEN_DISPLAY_REPO"
+else
+    rm -rf "$WAYWALLEN_DISPLAY_SRC"
+    git clone "$WAYWALLEN_DISPLAY_REPO" "$WAYWALLEN_DISPLAY_SRC"
+fi
+git -C "$WAYWALLEN_DISPLAY_SRC" fetch --tags origin "$WAYWALLEN_DISPLAY_REF" \
+    || git -C "$WAYWALLEN_DISPLAY_SRC" fetch --tags origin
+git -C "$WAYWALLEN_DISPLAY_SRC" checkout --detach "$WAYWALLEN_DISPLAY_REF"
+cargo build \
+    --manifest-path "$WAYWALLEN_DISPLAY_SRC/Cargo.toml" \
+    --bin waywallen-layer-shell \
+    --release \
+    --locked
 install -Dm755 \
-    "$PROJECT_DIR/target/release/waywallen-layer-shell" \
+    "$WAYWALLEN_DISPLAY_SRC/target/release/waywallen-layer-shell" \
     "$INSTALL_DIR/bin/waywallen-layer-shell"
 
 popd
