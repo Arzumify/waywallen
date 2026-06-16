@@ -1,13 +1,3 @@
-//! wayproto-gen — XML protocol description → Rust / C codegen.
-//!
-//! Phase 1 only supports `--out-rust`. C codegen is deferred to Phase 2.
-//!
-//! Usage:
-//!     wayproto-gen --in <xml> --out-rust <file>
-//!
-//! The same logic is exposed as a library (`wayproto_gen::`) for
-//! in-process use from a `build.rs`.
-
 use std::fs;
 use std::path::PathBuf;
 use std::process::ExitCode;

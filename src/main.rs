@@ -29,9 +29,11 @@ mod settings;
 mod sync;
 mod tasks;
 mod tray;
-mod wallpaper_properties;
-mod wallpaper_sort;
-mod wallpaper_type;
+mod wallpaper {
+    pub mod properties;
+    pub mod sort;
+    pub mod types;
+}
 mod ws_server;
 
 /// Shared state handed to every ws connection.
@@ -42,45 +44,31 @@ pub struct AppState {
     /// surfaced to the UI via `PluginListRequest` for a plugin-centric view.
     pub plugins: Arc<Vec<plugin::renderer_registry::PluginPackageMeta>>,
     /// The installed source plugins (types/labels/hints). The only
-    /// scan-derived state not in the DB: the Add-Library UI needs it
-    /// even before any library exists. Populated at startup and after
-    /// each scan; wallpaper reads themselves go straight to the DB.
+    /// scan-derived state outside the DB for the Add-Library UI.
     pub source_plugins: Arc<tokio::sync::RwLock<Vec<plugin::source_manager::SourcePluginInfo>>>,
     pub router: Arc<routing::Router>,
     pub settings: Arc<settings::SettingsStore>,
     /// Snapshot of `/dev/dri` taken at startup. Read-only after construction;
-    /// surfaced to UI via `GpuListRequest` and used by `RendererManager`
-    /// to translate per-plugin `gpu_drm_dev` settings into `render_node`
-    /// paths injected into Init.settings.
+    /// surfaced to UI and used by RendererManager spawn resolution.
     pub gpus: Arc<Vec<gpu::GpuInfo>>,
     pub db: sea_orm::DatabaseConnection,
     pub queue: tokio::sync::Mutex<control::QueueState>,
     /// Auto-rotation control handle. The rotator task watches the
-    /// matching `watch::Receiver` and re-arms its deadline on every
-    /// edit (interval change OR a manual `kick`).
+    /// matching receiver and re-arms its deadline on config changes.
     pub rotation: queue::RotationHandle,
-    /// Process-wide event bus. Carries phase markers (sources ready,
-    /// display ready) the boot coordinator gates on, plus transient
-    /// notifications about restore success/failure.
+    /// Process-wide event bus.
+    /// Carries readiness markers and transient status events.
     pub events: events::EventBus,
     pub ws_port: std::sync::atomic::AtomicU16,
     /// True while `control::refresh_sources` is between `ScanStarted`
-    /// and `ScanCompleted`/`ScanFailed`. Snapshotted into the
-    /// `StatusSync` server event so the UI can show a spinner without
-    /// relying on transient start/end notifications.
+    /// and completion. Snapshotted into status events.
     pub scan_in_progress: std::sync::atomic::AtomicBool,
     pub ui_path: std::sync::Mutex<Option<PathBuf>>,
     /// Live DBus connection. Populated by `dbus_iface::serve` once the
-    /// `Daemon1` interface is published. Used by control:: setters to
-    /// emit `PropertiesChanged` when mutations bypass the DBus method
-    /// path (rotator auto-tick, WS settings updates).
+    /// Daemon1 interface is published for property notifications.
     pub dbus_conn: std::sync::Mutex<Option<Arc<zbus::Connection>>>,
     /// Daemon-wide shutdown signal. Flips `false` → `true` exactly once.
-    /// Every long-lived task (display endpoint, per-client loops, tray,
-    /// ws server) should race its work against
-    /// `shutdown.subscribe().wait_for(|v| *v)` so that a D-Bus `Quit`
-    /// (or Ctrl-C) tears everything down without leaving blocking I/O
-    /// parked in `recvmsg`.
+    /// Long-lived tasks subscribe and exit cooperatively.
     pub shutdown: tokio::sync::watch::Sender<bool>,
     /// Background task supervisor. Used to off-load startup scanning,
     /// DB sync, and similar work so `async_main` stays responsive.
@@ -98,9 +86,8 @@ impl AppState {
         let _ = self.shutdown.send(true);
     }
 
-    /// Subscribe for shutdown notification. Await with
-    /// `rx.wait_for(|v| *v).await` — that returns immediately if we're
-    /// already shutting down, otherwise parks until the flag flips.
+    /// Subscribe for shutdown notification.
+    /// `rx.wait_for(|v| *v).await` returns immediately once set.
     pub fn shutdown_subscribe(&self) -> tokio::sync::watch::Receiver<bool> {
         self.shutdown.subscribe()
     }
@@ -115,9 +102,8 @@ struct Args {
     /// Force a specific display backend by manifest `name`, bypassing
     /// DE auto-detection. Still subject to "exists in the registry".
     display_backend: Option<String>,
-    /// Disable the daemon's display-backend auto-spawn entirely. The
-    /// UDS endpoint still listens for external consumers (e.g. an
-    /// already-installed waywallen-kde kpackage).
+    /// Disable daemon-managed display backend auto-spawn.
+    /// The UDS endpoint still listens for external consumers.
     no_display: bool,
     /// Restore the last applied wallpaper on startup.
     restore_last: bool,
@@ -177,9 +163,8 @@ fn parse_args() -> Args {
     args
 }
 
-/// Spawn the `waywallen-ui` subprocess fire-and-forget. UI reads the WS
-/// port from the `org.waywallen.waywallen.Daemon1` DBus interface; its lifecycle is
-/// independent of the daemon.
+/// Spawn the `waywallen-ui` subprocess fire-and-forget.
+/// The UI reads the WS port from the Daemon1 DBus interface.
 pub fn spawn_ui(state: &AppState) -> bool {
     let ui_bin = match state.ui_path.lock().unwrap().clone() {
         Some(p) => p,
@@ -200,7 +185,6 @@ pub fn spawn_ui(state: &AppState) -> bool {
 
 /// Resolve the UI executable path.  Order:
 /// 1. Explicit `--ui PATH`
-/// 2. `waywallen-ui` next to the current executable
 fn resolve_ui_path(explicit: Option<PathBuf>) -> Option<PathBuf> {
     if let Some(p) = explicit {
         return Some(p);
@@ -215,9 +199,8 @@ fn resolve_ui_path(explicit: Option<PathBuf>) -> Option<PathBuf> {
 }
 
 fn main() -> anyhow::Result<()> {
-    // `--test` is the user-runnable diagnostic path. Detect it before
-    // any daemon bootstrap (DBus, DB, plugins) so the test never
-    // touches the user's persisted state.
+    // Detect the user-runnable diagnostic path before daemon bootstrap.
+    // It must not touch DBus, DB, or plugins.
     let argv: Vec<String> = std::env::args().collect();
     if argv.iter().any(|a| a == "--test") {
         env_logger::init();
@@ -226,12 +209,8 @@ fn main() -> anyhow::Result<()> {
 
     env_logger::init();
 
-    // Explicit runtime + `shutdown_timeout` safety net: if any
-    // `spawn_blocking` task is still parked in a syscall when the
-    // runtime is torn down (e.g. a display-client reader stuck in
-    // `recvmsg` because its client never sent anything and didn't
-    // drop the socket), we give it a bounded window to unwind and
-    // then drop the runtime anyway instead of hanging the process.
+    // Explicit runtime with a bounded `shutdown_timeout`.
+    // Blocking tasks still parked in syscalls cannot stall process exit.
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -250,10 +229,8 @@ async fn async_main() -> anyhow::Result<()> {
     let dbus_conn = dbus_iface::acquire_or_handoff(handoff_ui).await;
     log::info!("DBus name acquired: {}", dbus_iface::BUS_NAME);
 
-    // Scan installable plugins (`plugins/<id>/plugin.toml`) from the
-    // standard roots plus any extra `--plugin PATH/plugins` dirs. Each
-    // plugin contributes renderer components (registered below) and an
-    // optional source component (loaded by the startup task further down).
+    // Scan installable plugins from standard roots plus extra
+    // `--plugin PATH/plugins` dirs.
     let mut plugin_scan = plugin::renderer_registry::build_default_plugin_scan();
     for plugin_dir in &cli.plugin_dirs {
         let plugins_dir = plugin_dir.join("plugins");
@@ -275,11 +252,8 @@ async fn async_main() -> anyhow::Result<()> {
     // and the sync layer so libavformat is dlopen-ed at most once.
     let probe = Arc::new(AvFormatProbe::new()) as Arc<dyn MediaProbe>;
 
-    // Source management: create an empty manager now, defer loading
-    // the Lua plugins + scanning their directories to a background
-    // task. A cold scan over a large image library is easily seconds
-    // of synchronous filesystem work; keeping it on the startup hot
-    // path means UDS/WS/DBus/layer-shell spawn all wait on it.
+    // Create an empty source manager now; Lua loading and source scans
+    // run later in a background task.
     let source_mgr = Arc::new(tokio::sync::Mutex::new(
         plugin::source_manager::SourceManager::with_probe(probe.clone())
             .expect("failed to create source manager"),
@@ -341,8 +315,7 @@ async fn async_main() -> anyhow::Result<()> {
         .with_context(|| format!("open database {}", db_path.display()))?;
 
     // Hand the DB to the source manager so `ctx.library_meta_*`
-    // (registered as mlua async functions) can read/write
-    // `library.metadata` from inside Lua source plugins.
+    // mlua functions can read and write library metadata.
     {
         let mut sm = source_mgr.lock().await;
         sm.attach_db(db.clone());
@@ -377,9 +350,8 @@ async fn async_main() -> anyhow::Result<()> {
         playlists: playlist::engine::Engine::new(),
     });
 
-    // Auto-rotation service. Runs forever (or until shutdown), parked
-    // on a watch channel until the user activates a playlist with a
-    // non-zero `interval_secs` or kicks it via Next/Previous.
+    // Auto-rotation service. Runs until shutdown, parked on a watch
+    // channel until the user activates a playlist.
     {
         let app_for_rot = state.clone();
         let shutdown_for_rot = state.shutdown_subscribe();
@@ -392,15 +364,11 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // Session-level autopause monitor. Watches D-Bus for lock-screen and
-    // user-switch events and forwards them to the router as session state
-    // changes. Errors connecting to D-Bus are non-fatal and logged as
-    // warnings; the rest of the daemon continues unaffected.
+    // user-switch events, then forwards them to the router.
     session_monitor::spawn(router.clone(), state.shutdown_subscribe());
 
-    // Display infrastructure first. The UDS endpoint and (if applicable)
-    // the daemon-managed display backend subprocess are queued *before*
-    // any source-side work so they hit the runtime as early as
-    // possible — display registration must not wait on the Lua scan.
+    // Start display infrastructure before work that may need a display.
+    // This covers both UDS endpoint and daemon-managed backends.
     let mut display_registry =
         plugin::display_registry::build_default_registry().unwrap_or_else(|e| {
             log::warn!("display registry init failed: {e:#}");
@@ -482,18 +450,12 @@ async fn async_main() -> anyhow::Result<()> {
         );
     }
 
-    // Single in-process consumer of the global event bus. Spawned
-    // before any phase-marker publisher (source loader, display
-    // watcher, …) so the dispatcher's subscribe is in place by the
-    // time those events fire; for safety it also re-reads the
-    // latches after subscribing.
+    // Single in-process consumer of the global event bus. Spawn before
+    // source/display publishers so no boot marker is missed.
     event_process::spawn(state.clone(), cli.restore_last);
 
-    // Off-load source-plugin loading + scanning + DB sync + initial
-    // playlist seed onto the TaskManager. `async_main` proceeds
-    // immediately to bind UDS/WS/DBus; the UI will see an empty
-    // playlist until the task completes and populates it. Display
-    // registration runs in parallel — it does not gate on this task.
+    // Off-load source loading, scanning, DB sync, and playlist seeding so
+    // async_main can continue bringing up services.
     {
         let source_mgr = source_mgr.clone();
         let source_refs = source_refs.clone();
@@ -501,8 +463,8 @@ async fn async_main() -> anyhow::Result<()> {
         state
             .tasks
             .spawn_async(tasks::TaskKind::Startup, "startup/sources", async move {
-                // Step 1 — load Lua source components off the blocking
-                // pool. Each ref carries the owning plugin's domain id.
+                // Load Lua source components on the blocking pool; each ref
+                // carries the owning plugin domain id.
                 tokio::task::spawn_blocking(move || {
                     let mut sm = source_mgr.blocking_lock();
                     for r in &source_refs {
@@ -514,11 +476,8 @@ async fn async_main() -> anyhow::Result<()> {
                 .await
                 .map_err(|e| anyhow::anyhow!("plugin load join: {e}"))?;
 
-                // Step 1.5 — register loaded plugins in `source_plugin` so
-                // `auto_detect_libraries` can resolve them by name even on
-                // first boot (no libraries configured yet → step 2 below
-                // skips `refresh_sources`, which would otherwise be the
-                // first place an `upsert_plugin` runs).
+                // Register loaded plugins before auto-detect so names resolve
+                // even when no libraries exist yet.
                 {
                     let infos = {
                         let sm = state_for_task.source_manager.lock().await;
@@ -544,17 +503,10 @@ async fn async_main() -> anyhow::Result<()> {
 
                 // Always publish the source-plugin list into the
                 // snapshot up front. It's static (from loaded plugins)
-                // and the Add-Library UI needs it even with no libraries
-                // — otherwise the scan below (which populates it as a
-                // side effect) is skipped and the source list is empty.
                 control::refresh_source_plugins(&state_for_task).await;
 
-                // Step 2 — scan against DB-driven libraries + sync results
-                // + seed the playlist. Skip when no libraries are
-                // configured: a brand-new user has nothing to scan, and
-                // `refresh_sources` would flip `scan_in_progress` true →
-                // false in a tight window, flashing the UI loading
-                // indicator on first launch.
+                // Scan DB-driven libraries and sync results. Skip when no
+                // libraries are configured.
                 let skip_refresh = crate::model::repo::list_libraries(&state_for_task.db)
                     .await
                     .map(|v| v.is_empty())
@@ -565,11 +517,8 @@ async fn async_main() -> anyhow::Result<()> {
                     log::warn!("initial source refresh failed: {e:#}");
                 }
 
-                // Sources + initial DB sync done. Publish the latched
-                // phase marker so external observers can tell the
-                // daemon has finished bringing sources online. The
-                // global `event_process` dispatcher picks this up and
-                // spawns the wallpaper-recall watcher.
+                // Sources and initial DB sync are done; publish the latched
+                // marker for external observers.
                 state_for_task
                     .events
                     .publish(events::GlobalEvent::SourcesReady);
@@ -577,10 +526,8 @@ async fn async_main() -> anyhow::Result<()> {
             });
     }
 
-    // Display watcher: bridge from `Router` events to the global
-    // event bus. Fires `DisplayReady` exactly once, on the first
-    // display registration. Runs forever (kept simple) but is a
-    // no-op after the latch is set.
+    // Bridge router display events to the global event bus.
+    // Fires `DisplayReady` once, on the first display.
     {
         let watcher_state = state.clone();
         state.tasks.spawn_async(
@@ -628,9 +575,8 @@ async fn async_main() -> anyhow::Result<()> {
         );
     }
 
-    // Restore queue mode + rotation cadence from disk. These don't
-    // depend on display readiness — per-display wallpaper restoration
-    // is event-driven below.
+    // Restore queue mode and rotation cadence from disk.
+    // Per-display wallpaper restoration is handled elsewhere.
     {
         let restore_state = state.clone();
         state
@@ -649,10 +595,8 @@ async fn async_main() -> anyhow::Result<()> {
         });
     }
 
-    // Background media-probe scheduler. Pulls items with NULL media
-    // metadata + probable extension out of the DB on a tick and fills
-    // them in via libavformat. Decoupled from scan/sync so adding a
-    // big library doesn't stall the source refresh path.
+    // Background media-probe scheduler.
+    // Pulls unprobed media items from the DB and fills metadata.
     {
         let probe_for_task = probe.clone();
         let db_for_task = db.clone();
@@ -700,9 +644,8 @@ async fn async_main() -> anyhow::Result<()> {
         log::warn!("DBus Ready emit failed: {e}");
     }
 
-    // Latch DaemonReady and broadcast a fresh StatusSync so live WS
-    // clients flip phase=READY. Late connections pick the latched
-    // value up via the connect-time snapshot.
+    // Latch DaemonReady and broadcast fresh status.
+    // Late connections observe readiness from the latch.
     state
         .events
         .publish(crate::events::GlobalEvent::DaemonReady);
@@ -710,9 +653,7 @@ async fn async_main() -> anyhow::Result<()> {
         .events
         .publish(crate::events::GlobalEvent::StatusChanged);
 
-    // Tray icon (StatusNotifierItem) — best-effort. Requires a
-    // StatusNotifierWatcher (Plasma, AppIndicator extension, waybar
-    // tray, ...). No host ⇒ warn & keep running headless.
+    // Tray icon is best-effort and requires a StatusNotifierWatcher.
     if !cli.no_tray {
         let conn = dbus_conn.clone();
         let state_t = state.clone();
@@ -725,9 +666,6 @@ async fn async_main() -> anyhow::Result<()> {
 
     // SIGTERM (default `kill <pid>`, systemd stop) needs an explicit
     // listener — `tokio::signal::ctrl_c()` only catches SIGINT.
-    // Without this branch the runtime tears down abruptly and the
-    // settings debounced-writer task is dropped mid-sleep, losing any
-    // pending `last_wallpaper` / `active_playlist_id` updates.
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     tokio::select! {
@@ -750,18 +688,10 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
-    // Belt-and-suspenders: regardless of which arm woke us (ws exit,
-    // ctrl-c, D-Bus Quit) make sure every subscriber sees the shutdown
-    // flag. This is what lets the display endpoint's blocking reader
-    // threads be kicked out of `recvmsg`.
+    // Whatever woke us, make sure every subscriber observes shutdown.
     state.shutdown_now();
 
-    // Flush settings synchronously so the in-flight debounced write
-    // (last_wallpaper / rotation_secs / active_playlist_id /
-    // playlist_mode set within the last DEBOUNCE_WRITE seconds) lands
-    // on disk before the runtime tears down. Without this, a SIGTERM
-    // that arrives shortly after a setting change loses the change
-    // and the next daemon start can't restore playback.
+    // Flush settings synchronously so any pending debounced write lands.
     state.settings.flush_now().await;
 
     if let Err(e) = dbus_iface::emit_shutting_down(&dbus_conn).await {

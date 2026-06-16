@@ -1,5 +1,3 @@
-//! Cheap filesystem stat. One syscall per file → size + mtime.
-
 use std::fs;
 use std::time::UNIX_EPOCH;
 

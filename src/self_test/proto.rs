@@ -58,7 +58,6 @@ pub enum TestMsg {
         frame_count: u32,
         // Cross-vendor (AMD↔NVIDIA) OPAQUE_FD timeline import isn't
         // interoperable; on cross_gpu the orchestrator drops timelines
-        // and the socket roundtrip becomes the per-frame fence.
         #[serde(default = "default_true")]
         use_timelines: bool,
     },

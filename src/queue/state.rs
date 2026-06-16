@@ -1,11 +1,3 @@
-//! Queue cursor state.
-//!
-//! Plays from a filter (proto rules + logics, sourced from
-//! `settings.global.wallpaper_filter`) — no in-memory item list. The
-//! step routines that need DB access live in `crate::control::step`.
-//! This module is pure data + RNG + shuffle round materialization
-//! helpers.
-
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -45,13 +37,11 @@ pub struct QueueState {
     pub mode: Mode,
     /// Last-applied entry id (UI display).
     pub current: Option<String>,
-    /// DB id of the last-applied item. Anchor for sequential/random
-    /// stepping; survives daemon restarts via settings persistence
-    /// (Phase 5 wires this).
+    /// DB id of the last-applied item.
+    /// Anchors sequential/random traversal across restarts.
     pub last_db_id: Option<i64>,
-    /// Permutation of DB ids matching the active filter at the time
-    /// the round was built. Empty = no round; rebuilt lazily by the
-    /// shuffle step path.
+    /// Permutation of DB ids matching the active filter.
+    /// Empty means no round; it is rebuilt lazily.
     pub shuffle_round: Vec<i64>,
     pub shuffle_pos: usize,
     pub shuffle_seed: ShuffleSeed,
@@ -77,9 +67,7 @@ impl QueueState {
     }
 
     /// Build a fresh permutation of `candidates` into `shuffle_round`.
-    /// If `avoid` is `Some`, the slot at `target_pos` is guaranteed
-    /// not to equal it — used so wrap-forward (target=0) and
-    /// wrap-backward (target=len-1) never replay the just-played id.
+    /// If possible, keeps `avoid` out of `target_pos`.
     pub fn build_shuffle_round(
         &mut self,
         candidates: Vec<i64>,

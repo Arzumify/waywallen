@@ -1,5 +1,3 @@
-//! `tag` table — case-insensitive unique names, shared across plugins.
-
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]

@@ -1,22 +1,3 @@
-//! Session-level autopause monitor.
-//!
-//! Runs as a background task and watches two D-Bus signals:
-//!
-//! * **Lock screen** — `org.freedesktop.ScreenSaver.ActiveChanged(bool)`
-//!   on the session bus.  Provided by kscreenlocker on KDE Plasma.
-//!
-//! * **User switch** — `org.freedesktop.login1.Session` `Active` property
-//!   changes on the system bus.  When the user switches to another session
-//!   via the display manager the current session's `Active` property becomes
-//!   `false`.
-//!
-//! Each signal is monitored in its own sub-task; a shared channel delivers
-//! [`SessionEvent`] values to the main loop, which calls
-//! [`Router::update_session_state`].  All D-Bus errors are treated as
-//! non-fatal: if a service is unavailable the corresponding sub-task exits
-//! and logs a warning, while the rest of the daemon (and the other trigger)
-//! continues unaffected.
-
 use std::sync::Arc;
 
 use futures_util::StreamExt;
@@ -28,7 +9,6 @@ use crate::routing::Router;
 
 // ---------------------------------------------------------------------------
 // D-Bus proxy definitions
-// ---------------------------------------------------------------------------
 
 #[proxy(
     interface = "org.freedesktop.ScreenSaver",
@@ -57,7 +37,6 @@ trait Login1Session {
 
 // ---------------------------------------------------------------------------
 // Internal event type
-// ---------------------------------------------------------------------------
 
 enum SessionEvent {
     /// The screen-saver / lock screen changed state.
@@ -68,7 +47,6 @@ enum SessionEvent {
 
 // ---------------------------------------------------------------------------
 // Public entry point
-// ---------------------------------------------------------------------------
 
 /// Spawn the session monitor.  Returns immediately; monitoring runs in the
 /// background until `shutdown` signals `true`.
@@ -139,7 +117,6 @@ async fn run(router: Arc<Router>, mut shutdown: watch::Receiver<bool>) {
 
 // ---------------------------------------------------------------------------
 // Screen saver sub-task
-// ---------------------------------------------------------------------------
 
 async fn monitor_screen_saver(conn: zbus::Connection, tx: mpsc::Sender<SessionEvent>) {
     log::info!(
@@ -197,7 +174,6 @@ async fn monitor_screen_saver(conn: zbus::Connection, tx: mpsc::Sender<SessionEv
 
 // ---------------------------------------------------------------------------
 // Login session sub-task
-// ---------------------------------------------------------------------------
 
 async fn monitor_login_session(conn: zbus::Connection, tx: mpsc::Sender<SessionEvent>) {
     // Derive session path from $XDG_SESSION_ID — avoids the privileged

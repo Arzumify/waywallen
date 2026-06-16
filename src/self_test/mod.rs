@@ -23,11 +23,8 @@ pub struct TestArgs {
     pub vk_uuid: Option<[u8; 16]>,
     pub socket: Option<PathBuf>,
     pub slot: u32,
-    /// 1..=2 entries: `[orch_idx]` or `[orch_idx, child_idx]`. Empty
-    /// means auto-pick (discrete > integrated > virtual > cpu) for
-    /// both. Two distinct indices put the orchestrator and its
-    /// children on different physical devices, exercising the
-    /// cross-GPU dma-buf path.
+    /// 1..=2 entries: `[orch_idx]` or `[orch_idx, child_idx]`.
+    /// Empty means each role auto-picks a device.
     pub device_indices: Vec<usize>,
     pub skip_fanout: bool,
     // Display-child only: forwarded into `register_display`.

@@ -10,8 +10,7 @@ pub struct ModCap {
 }
 
 /// Pretty-print a 4-character fourcc as ASCII when printable, else
-/// fall back to the raw hex literal. Used in cap logs so operators
-/// can see `'AB24'` instead of `0x34324241`.
+/// fall back to the raw hex literal for capability logs.
 fn fourcc_str(fourcc: u32) -> String {
     let b = fourcc.to_le_bytes();
     if b.iter().all(|&c| (0x20..=0x7e).contains(&c)) {
@@ -39,10 +38,7 @@ pub struct FormatCaps {
 }
 
 /// Producer or consumer device identity. UUID source: Vulkan
-/// `VkPhysicalDeviceIDProperties.{deviceUUID,driverUUID}`; DRM render
-/// node from `VK_EXT_physical_device_drm` or
-/// `EGL_DRM_RENDER_NODE_FILE_EXT`. All-zero UUID means "unknown" and
-/// the picker falls back to DRM major:minor for same-device matching.
+/// `VkPhysicalDeviceIDProperties`; DRM render node is the fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeviceIdentity {
     pub device_uuid: [u8; 16],
@@ -58,12 +54,6 @@ impl DeviceIdentity {
     };
 
     /// Whether two identities refer to the same physical GPU.
-    ///
-    /// UUID is *authoritative* when both sides have one — DRM minors
-    /// can be remapped across container/namespace boundaries, while
-    /// the Vulkan device UUID is stable. Falls back to DRM
-    /// major:minor only when at least one side lacks a UUID. Returns
-    /// false when neither path can produce a positive answer.
     pub fn same_device(&self, other: &Self) -> bool {
         let self_uuid_known = self.device_uuid != [0u8; 16];
         let other_uuid_known = other.device_uuid != [0u8; 16];
@@ -88,20 +78,13 @@ pub struct PeerCaps {
     pub mem_hint: u32,
     pub extent_max: (u32, u32),
     /// (fourcc, modifier) pairs the daemon previously tried and the
-    /// peer rejected via `bind_failed`. Filtered out at every `pick`
-    /// call. Daemon owns mutation; engines are pure.
+    /// peer rejected via `bind_failed`; filtered out by every pick.
     pub blacklist: HashSet<(u32, u64)>,
 }
 
 impl PeerCaps {
     /// Multi-line dump of every advertised (fourcc, modifier) pair
-    /// plus the secondary cap surface. Each line is logged at DEBUG
-    /// with `prefix` (e.g. `"renderer R1: format_caps"` or
-    /// `"display 7: consumer_caps"`) so an operator can see exactly
-    /// what each peer told the daemon when running with
-    /// `RUST_LOG=debug`. The one-line "imported N fourccs" summary
-    /// at the call site stays at INFO so default-log operators
-    /// still see arrival.
+    /// plus the secondary cap surface, logged at DEBUG.
     pub fn log_dump(&self, prefix: &str) {
         log::debug!(
             "{prefix}: device_uuid={} driver_uuid={} drm_render={}:{} \
@@ -136,9 +119,7 @@ impl PeerCaps {
 }
 
 /// Path category — wire-mirrored to ipc-v3
-/// `ww_evt_in_negotiate_buffers_t.path` and `ww_path_category` in
-/// `<waywallen-bridge/pool.h>`. The bridge dispatches its allocation
-/// path purely on this; modifier is the operand.
+/// `ww_evt_in_negotiate_buffers_t.path` and bridge `ww_path_category`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum PathCategory {
@@ -146,35 +127,27 @@ pub enum PathCategory {
     /// (potentially tile/vendor) modifier.
     OptimizedSameDevice = 0,
     /// Reserved wire-stable value `1`. The topology-first picker
-    /// never emits this — any cross-device pair (including same
-    /// driver) goes to [`CompatLinear`]. Tile-modifier PRIME across
-    /// distinct GPUs has no portable correctness story, so this
-    /// optimization tier was retired.
+    /// never emits this; cross-device pairs use CompatLinear.
     OptimizedSameVendor = 1,
     /// Cross-device pair, OR same-device with the modifier
     /// intersection collapsing to LINEAR. Bridge takes its LINEAR
-    /// allocation path (`GBM_BO_USE_LINEAR` / Vulkan dma-buf-
-    /// exportable LINEAR-tiled).
     CompatLinear = 2,
-    /// Reserved Iter 3+: render to GPU memory, copy back to CPU,
-    /// ship pixels through a separate channel. Daemon never emits in
-    /// Iter 1.
+    /// Reserved wire-stable value for a future CPU-readback path.
+    /// The daemon never emits this today.
     CompatCpuReadback = 3,
 }
 
 /// Memory source — wire-mirrored to ipc-v3
-/// `ww_evt_in_negotiate_buffers_t.mem_source` and `ww_mem_source` in
-/// `<waywallen-bridge/pool.h>`.
+/// `ww_evt_in_negotiate_buffers_t.mem_source` and bridge `ww_mem_source`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum MemSource {
     /// GBM_BO_USE_RENDERING / Vulkan DEVICE_LOCAL exportable.
     GpuNative = 0,
     /// GBM_BO_USE_LINEAR / Vulkan LINEAR-tiled exportable. Always
-    /// non-tiled, GTT-backed on every Mesa driver, PRIME-importable
-    /// across GPUs.
+    /// non-tiled, GTT-backed, and PRIME-importable on Mesa.
     GpuLinear = 1,
-    /// `/dev/dma_heap/system` — Iter 1 not implemented.
+    /// `/dev/dma_heap/system` — reserved for future use.
     DmabufHeap = 2,
 }
 
@@ -216,21 +189,14 @@ pub enum NegotiateError {
 }
 
 // ---------------------------------------------------------------------------
-// Wire-bit constants. Mirrored on every renderer + consumer; both
-// sides MUST cite the same numbers. Documented in
-// `protocol/waywallen_ipc_v1.xml::format_caps` and
-// `protocol/waywallen_display_v1.xml::consumer_caps`.
-// ---------------------------------------------------------------------------
+// Wire-bit constants mirrored by every renderer and consumer.
 
 pub const MEM_HINT_DEVICE_LOCAL: u32 = 1 << 0;
 pub const MEM_HINT_HOST_VISIBLE: u32 = 1 << 1;
 pub const MEM_HINT_SCANOUT_CAPABLE: u32 = 1 << 2;
 pub const MEM_HINT_PROTECTED: u32 = 1 << 3;
 /// Reserved wire-stable bit `1 << 4`. The topology-first picker
-/// no longer reads this — cross-device topology drives
-/// [`PathCategory::CompatLinear`] directly, and same-device falls
-/// through to LINEAR via the per-peer blacklist. Bridges may stop
-/// setting it; the daemon ignores it either way.
+/// no longer reads this; topology drives cross-device decisions.
 #[deprecated = "no longer drives the picker; topology decides path"]
 pub const MEM_HINT_LINEAR_ONLY: u32 = 1 << 4;
 
@@ -240,9 +206,6 @@ pub const SYNC_SYNCOBJ_TIMELINE: u32 = 1 << 2;
 
 // Color (packed):
 //   bits 0..4  encoding bitset
-//   bits 5..6  range bitset
-//   bit  7     alpha PREMUL supported
-//   bit  8     alpha STRAIGHT supported
 pub const COLOR_ENC_SRGB: u32 = 1 << 0;
 pub const COLOR_ENC_LINEAR: u32 = 1 << 1;
 pub const COLOR_ENC_BT601: u32 = 1 << 2;
@@ -269,11 +232,9 @@ pub const DRM_FORMAT_XRGB8888: u32 = 0x3432_5258; // 'XR24'
 
 // ---------------------------------------------------------------------------
 // Decoder
-// ---------------------------------------------------------------------------
 
 /// Wire parallel arrays → structured [`PeerCaps`]. Single point of
-/// schema-level validation: every length invariant the picker depends
-/// on is enforced here so [`pick`] can stay a pure transform.
+/// schema validation for every length invariant the picker depends on.
 #[allow(clippy::too_many_arguments)]
 pub fn unflatten_caps(
     fourccs: &[u32],
@@ -324,7 +285,6 @@ pub fn unflatten_caps(
         cursor += n;
         // Defensive: a peer that lists the same fourcc twice gets its
         // entries merged; the last-written cap wins per modifier. Both
-        // ends should never do this but the protocol doesn't forbid it.
         by_fourcc.entry(fourcc).or_default().extend(caps);
     }
 
@@ -353,7 +313,6 @@ fn pack_uuid_words(words: &[u32]) -> [u8; 16] {
 
 // ---------------------------------------------------------------------------
 // Picker
-// ---------------------------------------------------------------------------
 
 /// Color sub-axis masks for per-axis intersection.
 const COLOR_MASK_ENCODING: u32 =
@@ -366,32 +325,6 @@ const DEFAULT_POOL_COUNT: u32 = 3;
 
 /// Pick a buffer scheme for a producer/consumer pair at `extent`.
 ///
-/// Topology-first dispatch:
-///   * **Same physical GPU** → optimized: intersect modifiers, prefer
-///     non-LINEAR; LINEAR is the within-fourcc fallback driven by
-///     the per-peer blacklist (`bind_failed` blacklists the failing
-///     modifier and the next call falls through). Path is
-///     `OptimizedSameDevice` for tile picks, `CompatLinear` when the
-///     intersection collapses to LINEAR.
-///   * **Different GPU** (any cross-device, including same-vendor
-///     dual-card) → compat: fourcc-set intersection only, modifier
-///     forced to LINEAR, path `CompatLinear`. The bridge's
-///     compat-linear allocator handles the source (GBM USE_LINEAR /
-///     Vulkan dma-buf-exportable). No modifier intersection is run
-///     across vendor or device boundaries — kernel PRIME with tile
-///     modifiers across heterogeneous GPUs has no safe story.
-///
-/// Sync: `producer.sync & consumer.sync` then keep the highest bit
-/// in priority order TIMELINE > BINARY > IMPLICIT.
-///
-/// Color: per-axis bitwise AND of `producer.color` and
-/// `consumer.color`; pick the lowest set bit per axis. If an axis
-/// has no overlap, fall back to that axis of [`DEFAULT_COLOR`].
-///
-/// Mem hint: same-device only — `producer.mem_hint & consumer.mem_hint`,
-/// preferring DEVICE_LOCAL when available. Cross-device emits 0; the
-/// bridge's compat-linear path picks any dma-buf-exportable memory
-/// type without consulting this field.
 pub fn pick(producer: &PeerCaps, consumer: &PeerCaps) -> Result<NegotiatedScheme, NegotiateError> {
     let same_dev = producer.identity.same_device(&consumer.identity);
     let sync_mode = pick_sync(producer.sync, consumer.sync)?;
@@ -404,10 +337,8 @@ pub fn pick(producer: &PeerCaps, consumer: &PeerCaps) -> Result<NegotiatedScheme
             &producer.blacklist,
             &consumer.blacklist,
         )?;
-        // LINEAR within the same-device intersection means every
-        // tile modifier was either absent or blacklisted — fall to
-        // CompatLinear so the bridge takes its LINEAR allocation
-        // path (GBM_BO_USE_LINEAR / Vulkan LINEAR-tiled exportable).
+        // LINEAR within same-device means tiled modifiers were absent or
+        // blacklisted, so use the compatible linear path.
         let (path, mem_source) = if modifier == DRM_FORMAT_MOD_LINEAR {
             (PathCategory::CompatLinear, MemSource::GpuLinear)
         } else {
@@ -448,11 +379,7 @@ pub fn pick(producer: &PeerCaps, consumer: &PeerCaps) -> Result<NegotiatedScheme
 }
 
 /// Cross-device fourcc selection: walk producer order (BTreeMap is
-/// sorted), pick the first fourcc the consumer also lists where
-/// `(fourcc, LINEAR)` isn't blacklisted on either side. No modifier
-/// intersection — the bridge's compat-linear allocator will produce
-/// LINEAR via its own path regardless of what either peer advertised
-/// at the modifier level.
+/// sorted), then pick the first non-blacklisted consumer match.
 fn pick_fourcc_only(
     producer: &FormatCaps,
     consumer: &FormatCaps,
@@ -480,13 +407,8 @@ fn pick_format_same_device(
     p_blacklist: &HashSet<(u32, u64)>,
     c_blacklist: &HashSet<(u32, u64)>,
 ) -> Result<(u32, u64, u32), NegotiateError> {
-    // Walk fourccs in sorted order so the picker's choice is stable
-    // across runs (BTreeMap iteration). Within a fourcc we walk
-    // *producer order* so the producer's preference (its slot pool's
-    // pinned modifier) lands first — without this, the daemon would
-    // pick the lowest-numbered modifier and bounce through every
-    // wrong one via `bind_failed` before converging on what the
-    // producer actually allocated.
+    // Walk fourccs in sorted order for stable picks; within one fourcc,
+    // preserve producer modifier order.
     let mut best_non_linear: Option<(u32, u64, u32)> = None;
     let mut linear_fallback: Option<(u32, u64, u32)> = None;
 
@@ -494,11 +416,8 @@ fn pick_format_same_device(
         let Some(c_mods) = consumer.by_fourcc.get(&fourcc) else {
             continue;
         };
-        // Modifier intersection on this fourcc, excluding either
-        // side's blacklist. Preserve producer order — the producer
-        // ships its preferred modifier first; the first non-LINEAR
-        // entry of the intersection is therefore what the producer
-        // pre-allocated against.
+        // Intersect modifiers on this fourcc, excluding either side's
+        // blacklist while preserving producer order.
         let mut intersect: Vec<(u64, u32)> = Vec::new(); // (modifier, plane_count)
         for pc in p_mods {
             if p_blacklist.contains(&(fourcc, pc.modifier)) {
@@ -510,8 +429,7 @@ fn pick_format_same_device(
                 }
                 if pc.modifier == cc.modifier {
                     // plane_count must agree across sides; if it doesn't
-                    // the renderer can't allocate something the consumer
-                    // can import — skip.
+                    // the renderer cannot allocate something importable.
                     if pc.plane_count != cc.plane_count {
                         continue;
                     }
@@ -589,14 +507,12 @@ fn pick_mem_hint_same_dev(producer: u32, consumer: u32) -> u32 {
     } else {
         // Nothing in common on same device — guess HOST_VISIBLE
         // (system memory always works). Cross-device path emits 0
-        // and never reaches this function.
         MEM_HINT_HOST_VISIBLE
     }
 }
 
 // ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -815,9 +731,7 @@ mod tests {
     }
 
     /// Same-driver, different-device identity. `driver_byte` matches
-    /// the peer it's paired with; `device_byte` and DRM minor differ
-    /// so `same_device` is false but driver_uuid match makes
-    /// `same_driver` true.
+    /// the peer it is paired with; device UUID and DRM minor differ.
     fn ident_split_uuid(driver_byte: u8, device_byte: u8, drm_minor: u32) -> DeviceIdentity {
         DeviceIdentity {
             device_uuid: [device_byte; 16],
@@ -859,9 +773,8 @@ mod tests {
 
     #[test]
     fn pick_cross_device_uses_compat_linear() {
-        // Different UUIDs; both advertise LINEAR + a non-LINEAR
-        // modifier. Topology-first dispatch ignores modifier
-        // intersection on cross-device pairs and emits LINEAR.
+        // Different UUIDs force the cross-device branch even when both
+        // peers advertise a matching non-LINEAR modifier.
         let nl: u64 = 0x0100_0000_0000_0001;
         let p = caps_one_fourcc(
             DRM_FORMAT_ABGR8888,
@@ -940,8 +853,7 @@ mod tests {
     }
 
     /// Build a PeerCaps with multiple fourccs, each carrying a list of
-    /// (modifier, plane_count). Used by the cross-device fourcc-only
-    /// tests below.
+    /// `(modifier, plane_count)` pairs.
     fn caps_multi_fourcc(entries: &[(u32, &[(u64, u32)])], identity: DeviceIdentity) -> PeerCaps {
         let fourccs: Vec<u32> = entries.iter().map(|(f, _)| *f).collect();
         let mod_counts: Vec<u32> = entries.iter().map(|(_, m)| m.len() as u32).collect();
@@ -981,11 +893,8 @@ mod tests {
 
     #[test]
     fn pick_cross_device_only_tile_modifiers_in_producer() {
-        // The user-reported NVIDIA mpv ↔ AMD layer-shell scenario:
-        // producer (NVIDIA EGL) advertises an NV-tile modifier without
-        // LINEAR; consumer (AMD Vulkan) advertises an AMD-tile + LINEAR.
-        // Pre-refactor this hit NoFormatIntersection; topology-first
-        // gives ABGR + LINEAR.
+        // NVIDIA producer without LINEAR still falls back to the consumer's
+        // LINEAR import path when topology is cross-device.
         let nv_tile: u64 = 0x0300_0000_0060_6010;
         let amd_tile: u64 = 0x0200_0000_0008_2305;
         let p = caps_one_fourcc(
@@ -1111,10 +1020,8 @@ mod tests {
 
     #[test]
     fn pick_color_per_axis_intersect() {
-        // Producer: BT709 + full range + premul; Consumer: BT709 +
-        // limited range + premul. Encoding axis intersect = BT709,
-        // range axis intersect = empty → falls back to DEFAULT range
-        // (LIMITED).
+        // Encoding and alpha intersect, but range does not; range falls
+        // back to DEFAULT_COLOR.
         let p_color = COLOR_ENC_BT709 | COLOR_RANGE_FULL | COLOR_ALPHA_PREMUL;
         let c_color = COLOR_ENC_BT709 | COLOR_RANGE_LIMITED | COLOR_ALPHA_PREMUL;
         let p = caps_one_fourcc(

@@ -1,5 +1,3 @@
-//! Lightweight background-task manager.
-
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
@@ -12,20 +10,16 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 
-/// How long the supervisor waits after `abort_all` for in-flight tasks
-/// to clean up before it returns anyway. The daemon's own `async_main`
-/// applies a shorter runtime shutdown timeout on top of this.
+/// How long the supervisor waits after `abort_all` for in-flight tasks.
+/// After this deadline shutdown continues anyway.
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(3);
 
-/// Capacity of the broadcast channel used for `TaskEvent`. Slow
-/// subscribers that lag behind will see `RecvError::Lagged` and
-/// must re-snapshot via `list()` — the supervisor never stalls on
-/// them.
+/// Capacity of the broadcast channel used for `TaskEvent`.
+/// Slow subscribers observe `RecvError::Lagged` when they fall behind.
 const EVENT_CHANNEL_CAP: usize = 256;
 
 // ---------------------------------------------------------------------------
 // Types
-// ---------------------------------------------------------------------------
 
 /// Unique per-process task identifier. Monotonically increasing; the
 /// first task submitted gets 1.
@@ -41,7 +35,6 @@ pub enum TaskKind {
     Apply,
     /// Long-running infrastructure loop (UDS endpoint, layer-shell
     /// supervisor). One entry per long-lived service; stays `Running`
-    /// for the lifetime of the daemon.
     Service,
     /// Fallback bucket for everything not otherwise classified.
     Generic,
@@ -58,9 +51,8 @@ impl TaskKind {
     }
 }
 
-/// Lifecycle state of a task record. `Failed` carries the error
-/// message formatted with `{:#}` so stringly-typed consumers
-/// (DBus, logs) can show a one-line reason.
+/// Lifecycle state of a task record.
+/// `Failed` carries the `{:#}` formatted error message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskState {
     Running,
@@ -91,9 +83,8 @@ pub struct TaskRecord {
     pub state: TaskState,
 }
 
-/// Lifecycle events broadcast to every subscriber. `Started` carries
-/// a full record so late-joined subscribers can reconstruct state
-/// without racing against `list()`.
+/// Lifecycle events broadcast to every subscriber.
+/// `Started` carries a full record for local state reconstruction.
 #[derive(Debug, Clone)]
 pub enum TaskEvent {
     Started(TaskRecord),
@@ -104,7 +95,6 @@ pub enum TaskEvent {
 
 // ---------------------------------------------------------------------------
 // TaskManager — public handle
-// ---------------------------------------------------------------------------
 
 type BoxedResultFut = Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>;
 type BoxedResultFn = Box<dyn FnOnce() -> Result<()> + Send + 'static>;
@@ -127,23 +117,17 @@ pub struct TaskManager {
     next_id: AtomicU64,
     records: Arc<RwLock<HashMap<TaskId, TaskRecord>>>,
     events: broadcast::Sender<TaskEvent>,
-    /// Per-task cooperative cancellation handles. Entries are added at
-    /// submit time and removed once the task transitions out of
-    /// `Running` (regardless of success / failure / cancel). Async
-    /// tasks are wrapped in `select!` against the token before being
-    /// handed to the supervisor; blocking tasks ignore cancellation.
+    /// Per-task cooperative cancellation handles.
+    /// Entries live only while the task is running.
     cancel_tokens: Arc<RwLock<HashMap<TaskId, CancellationToken>>>,
-    /// Optional dedup key → currently-Running TaskId. `spawn_async_unique`
-    /// cancels any prior task under the same key before spawning a new
-    /// one. Stale entries (pointing to a finished task) are GC'd in
-    /// `handle_join`, so the map's footprint tracks active uniques.
+    /// Optional dedup key to currently-running TaskId.
+    /// `spawn_async_unique` cancels the prior task for the same key.
     unique_keys: Arc<RwLock<HashMap<String, TaskId>>>,
 }
 
 impl TaskManager {
-    /// Start a supervisor bound to the daemon's shutdown watch. The
-    /// returned handle is `Arc`-shareable; every clone feeds the same
-    /// supervisor.
+    /// Start a supervisor bound to the daemon shutdown watch.
+    /// Returned handles are shareable and feed the same supervisor.
     pub fn spawn(shutdown_rx: watch::Receiver<bool>) -> Arc<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
         let (events_tx, _) = broadcast::channel(EVENT_CHANNEL_CAP);
@@ -176,8 +160,6 @@ impl TaskManager {
 
     /// Submit an async task. Returns the freshly-assigned `TaskId` so
     /// callers can correlate their submission with later events / logs.
-    /// The task is wrapped in a `select!` against a per-task
-    /// `CancellationToken`; calling [`cancel`](Self::cancel) flips it.
     pub fn spawn_async<F>(&self, kind: TaskKind, name: impl Into<String>, fut: F) -> TaskId
     where
         F: Future<Output = Result<()>> + Send + 'static,
@@ -208,11 +190,8 @@ impl TaskManager {
         id
     }
 
-    /// Like [`spawn_async`] but de-duplicates by `key`. If a Running
-    /// task already exists under the same key, it is cancelled before
-    /// the new one is spawned. Useful for things like
-    /// `apply_wallpaper(display_id)` where rapid repeats should
-    /// supersede earlier attempts instead of stacking.
+    /// Like [`spawn_async`] but de-duplicates by `key`.
+    /// A running task under the same key is cancelled first.
     pub fn spawn_async_unique<F>(
         &self,
         kind: TaskKind,
@@ -227,8 +206,7 @@ impl TaskManager {
         let prev = self.unique_keys.read().unwrap().get(&key).copied();
         if let Some(prev_id) = prev {
             // Best-effort: cancel returns false if the task already
-            // finished — that's fine, the unique_keys entry is then
-            // stale and gets overwritten below.
+            // finished. The unique key will be replaced below.
             self.cancel(prev_id);
         }
         let id = self.spawn_async(kind, name, fut);
@@ -236,17 +214,14 @@ impl TaskManager {
         id
     }
 
-    /// Cooperatively cancel a Running task. Returns `true` if a token
-    /// existed (the task was Running at call time) — the task may not
-    /// observe the cancellation immediately if it's mid-syscall in a
-    /// non-async section. No-op for blocking tasks.
+    /// Cooperatively cancel a running task.
+    /// Returns `true` when a live cancellation token existed.
     pub fn cancel(&self, id: TaskId) -> bool {
         let token = self.cancel_tokens.read().unwrap().get(&id).cloned();
         let Some(token) = token else { return false };
         token.cancel();
-        // Pre-mark the record as Cancelled so handle_join's eventual
-        // observation of "task returned Err(cancelled)" doesn't promote
-        // the state to Failed.
+        // Pre-mark the record as Cancelled so a later cancelled error
+        // does not get promoted to Failed.
         let mut prev_state_was_running = false;
         if let Some(rec) = self.records.write().unwrap().get_mut(&id) {
             if matches!(rec.state, TaskState::Running) {
@@ -279,9 +254,8 @@ impl TaskManager {
         id
     }
 
-    /// Snapshot of all currently-tracked tasks (running + finished).
-    /// The registry is trimmed to a bounded history — see
-    /// `TRIM_COMPLETED_ABOVE`.
+    /// Snapshot of all currently tracked tasks.
+    /// Finished entries are capped by `TRIM_FINISHED_ABOVE`.
     pub fn list(&self) -> Vec<TaskRecord> {
         self.records.read().unwrap().values().cloned().collect()
     }
@@ -324,9 +298,8 @@ impl TaskManager {
     }
 }
 
-/// Cap the per-process record history so long-running daemons don't
-/// accumulate unbounded finished entries. Runtime cost of the trim is
-/// amortized across inserts.
+/// Cap record history so long-running daemons do not accumulate
+/// unbounded finished entries.
 const TRIM_FINISHED_ABOVE: usize = 512;
 
 fn trim_finished(recs: &mut HashMap<TaskId, TaskRecord>) {
@@ -354,7 +327,6 @@ pub(crate) fn now_ms() -> i64 {
 
 // ---------------------------------------------------------------------------
 // Supervisor
-// ---------------------------------------------------------------------------
 
 async fn supervisor(
     mut rx: mpsc::UnboundedReceiver<TaskMsg>,
@@ -440,10 +412,8 @@ fn handle_join(
             (id, name, TaskState::Failed(msg))
         }
         Err(e) if e.is_cancelled() => {
-            // JoinError::Cancelled is the JoinSet::abort_all path on
-            // shutdown — the task didn't get a chance to run its
-            // wrapper, so its record was never updated. Don't have an
-            // id to clean up here; bulk cleanup happens on shutdown.
+            // JoinError::Cancelled is the JoinSet::abort_all path.
+            // The task did not get to report its own final state.
             log::info!("task aborted during shutdown");
             return;
         }
@@ -458,9 +428,8 @@ fn handle_join(
     // GC any unique_keys mapping that pointed at us.
     unique_keys.write().unwrap().retain(|_, v| *v != id);
 
-    // Pre-cancellation: if `cancel(id)` already moved the record to
-    // Cancelled, leave it alone — the future returned Err("cancelled")
-    // but the user's intent was a cancel, not a failure.
+    // If `cancel(id)` already moved the record to Cancelled, keep that
+    // state even if the future later returns Err("cancelled").
     let already_cancelled = matches!(
         records.read().unwrap().get(&id).map(|r| r.state.clone()),
         Some(TaskState::Cancelled)
@@ -500,7 +469,6 @@ fn lookup_name(records: &Arc<RwLock<HashMap<TaskId, TaskRecord>>>, id: TaskId) -
 
 // ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

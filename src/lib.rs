@@ -16,5 +16,4 @@ pub mod self_test;
 pub mod settings;
 pub mod sync;
 pub mod tasks;
-pub mod wallpaper_properties;
-pub mod wallpaper_type;
+pub mod wallpaper;

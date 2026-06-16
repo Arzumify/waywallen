@@ -1,40 +1,3 @@
-//! Per-renderer release-fence reaper.
-//!
-//! Owns a Tokio task that drains [`FrameRecord`]s from
-//! `display::endpoint::forward_frame_ready`. Each frame fanned out to a
-//! consumer produces one record carrying:
-//!
-//!   - the producer-assigned `release_point` (the timeline value the
-//!     producer's later submit will WAIT on before reusing the slot),
-//!   - the daemon-allocated binary drm_syncobj handle for THIS consumer
-//!     (whose fd was sent to that consumer; the consumer signals it
-//!     from its release GPU work),
-//!   - `expected_count` — the fan-out width: how many records will
-//!     arrive for this `release_point` in total.
-//!
-//! The reaper buckets records by `release_point`. A bucket is flushed
-//! when it has collected `expected_count` records OR when its bucket
-//! deadline expires (`BUCKET_TIMEOUT`). On flush:
-//!
-//!   1. wait for every collected handle to signal (kernel ioctl,
-//!      `WAIT_ALL` flag, deadline = `WAIT_TIMEOUT`).
-//!   2. if any handle did not signal in time, force-SIGNAL it so the
-//!      producer's wait at this `release_point` doesn't deadlock.
-//!      The producer may then race against a still-reading consumer,
-//!      but a stalled producer is worse than a stale read on a
-//!      single-frame static image.
-//!   3. TRANSFER from one of the (now-signaled) consumer handles onto
-//!      the producer's release timeline at `release_point`. We do not
-//!      `SYNC_IOC_MERGE` the per-consumer fences first because, by
-//!      construction (step 1 just succeeded), every fence is already
-//!      signaled — the producer's wait passes regardless of which one
-//!      the timeline ends up holding. The merge would matter for
-//!      profiling tools that want to see cumulative wait stats; not a
-//!      concern in the prototype.
-//!
-//! The producer's release timeline syncobj is imported lazily into a
-//! daemon-side handle on the first flushed bucket and cached.
-
 use std::collections::HashMap;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -45,33 +8,23 @@ use tokio::time::Instant;
 
 use crate::sync::drm_syncobj::{DrmDevice, SyncobjHandle};
 
-/// Maximum age of a bucket before it gets force-flushed even if not
-/// every consumer has reported in. Sized so a 60 fps producer can
-/// burn through ~30 frames before back-pressuring; longer lets stuck
-/// consumers stall the producer for too long.
+/// Maximum bucket age before force-flush when consumers lag.
+/// Sized so a 60 fps producer has room for several frames.
 const BUCKET_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// Per-handle wait deadline inside the bucket-flush ioctl. If a
-/// consumer hasn't signaled by then we force-SIGNAL its handle (see
-/// module docs).
+/// Per-handle wait deadline inside the bucket-flush ioctl.
+/// Late consumers are force-signaled after this timeout.
 const WAIT_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Per-frame work item produced by `display::endpoint::forward_frame_ready`
 /// and consumed by [`spawn_reaper`].
 pub struct FrameRecord {
     pub release_point: u64,
-    /// `None` means the router had zero enabled recipients for this
-    /// frame (e.g. paused renderer, no displays linked). The reaper
-    /// still has to advance the producer's release timeline at
-    /// `release_point` — otherwise the producer's back-pressure
-    /// `wait_release_point` will time out forever once it cycles back
-    /// to this slot. With `None`, the reaper allocates a fresh
-    /// already-signaled binary syncobj and TRANSFERs it onto the
-    /// producer timeline directly, bypassing the bucket flow.
+    /// `None` means this frame had no enabled recipients.
+    /// The reaper advances the producer release point directly.
     pub consumer_handle: Option<SyncobjHandle>,
-    /// Total fan-out width — how many records the reaper should expect
-    /// to see with this `release_point` before flushing. `0` is only
-    /// valid alongside `consumer_handle == None`.
+    /// Total fan-out width for this `release_point`.
+    /// `0` is only used with `consumer_handle = None`.
     pub expected_count: u32,
 }
 
@@ -99,13 +52,8 @@ pub fn spawn_reaper(
             tokio::select! {
                 maybe_record = rx.recv() => {
                     let Some(record) = maybe_record else {
-                        // Channel closed: every Sender clone (i.e. the
-                        // RendererHandle) is gone, so the renderer has
-                        // been evicted. The producer's release_syncobj
-                        // timeline is no longer being waited on — just
-                        // drop pending buckets so their consumer handles
-                        // hit DESTROY without spending WAIT_TIMEOUT each
-                        // on signals that will never arrive.
+                        // Channel closed: every Sender clone is gone,
+                        // so the renderer handle has been dropped.
                         if !buckets.is_empty() {
                             log::info!(
                                 "reaper {renderer_id}: channel closed with {} pending bucket(s); dropping",
@@ -119,8 +67,6 @@ pub fn spawn_reaper(
                     let Some(consumer_handle) = record.consumer_handle else {
                         // No real recipients (paused / no enabled outputs).
                         // Advance the producer's release timeline directly
-                        // so its back-pressure wait at this point doesn't
-                        // hang forever.
                         advance_release_point(
                             drm, &renderer_id, &release_syncobj, &mut producer_handle,
                             record.release_point,
@@ -135,10 +81,7 @@ pub fn spawn_reaper(
                         }
                     });
                     // Defensive: if a later record reports a different
-                    // expected_count for the same release_point, take
-                    // the larger value. Means the reaper will wait
-                    // longer rather than flushing prematurely on an
-                    // off-by-one race in the router.
+                    // expected_count, use the wider fan-out.
                     entry.expected = entry.expected.max(record.expected_count);
                     entry.handles.push(consumer_handle);
                     if entry.handles.len() as u32 >= entry.expected {
@@ -147,9 +90,8 @@ pub fn spawn_reaper(
                     }
                 }
                 _ = sleep_until_or_pending(next_deadline) => {
-                    // Find every bucket whose deadline has passed and
-                    // flush them. Snapshot the keys first to keep the
-                    // iterator from outliving the mutable borrow.
+                    // Snapshot expired keys first so the map can be
+                    // mutated during flushing.
                     let now = Instant::now();
                     let expired: Vec<u64> = buckets
                         .iter()
@@ -181,12 +123,8 @@ async fn sleep_until_or_pending(deadline: Option<Instant>) {
     }
 }
 
-/// Dup the producer's release_syncobj fd out of the shared
-/// `Mutex<Option<OwnedFd>>` slot. Mirrors the equivalent helper on
-/// `RendererHandle` but without depending on the handle type — keeps
-/// the reaper free of any `Arc<RendererHandle>` reference (which used
-/// to form a self-keeping cycle through the Sender side of its own
-/// channel).
+/// Duplicate the producer release_syncobj fd out of the shared slot.
+/// The returned fd is owned by the caller.
 fn dup_release_syncobj_fd(slot: &StdMutex<Option<OwnedFd>>) -> Option<OwnedFd> {
     let guard = slot.lock().ok()?;
     let fd = guard.as_ref()?;
@@ -227,11 +165,8 @@ fn ensure_producer_handle(
     }
 }
 
-/// Used when the router has zero recipients for a frame: allocate a
-/// fresh binary syncobj, force-SIGNAL it, and TRANSFER it onto the
-/// producer's release timeline at `release_point`. The producer's
-/// next back-pressure wait at this point therefore returns
-/// immediately rather than timing out.
+/// Used when a frame has zero recipients.
+/// Signals a placeholder fence and transfers it to the producer timeline.
 async fn advance_release_point(
     drm: &'static DrmDevice,
     renderer_id: &str,
@@ -270,10 +205,8 @@ async fn advance_release_point(
     // already holds the signaled fence via TRANSFER, so this is safe.
 }
 
-/// Wait for every handle in `bucket` to signal (force-SIGNAL stragglers
-/// after `WAIT_TIMEOUT`), then TRANSFER one of them onto the producer's
-/// release timeline at `release_point`. Imports the producer timeline
-/// lazily on first call, caches in `producer_handle`.
+/// Wait for every handle in `bucket`, force-signaling stragglers.
+/// Then transfer the merged fence to the producer timeline.
 async fn flush_bucket(
     drm: &'static DrmDevice,
     renderer_id: &str,
@@ -299,7 +232,6 @@ async fn flush_bucket(
 
     // 1+2. Wait for all consumer signals; force-signal stragglers.
     // wait_handles_signaled wants ABSOLUTE CLOCK_MONOTONIC.
-    // Compute now + WAIT_TIMEOUT in nsec.
     let timeout_nsec = {
         let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
         let ok = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } == 0;
@@ -316,7 +248,6 @@ async fn flush_bucket(
 
     // Move ownership across spawn_blocking boundary to keep handles
     // alive on the blocking thread; ioctl needs &SyncobjHandle so we
-    // re-borrow there.
     let handles_for_blocking = std::mem::take(&mut bucket.handles);
     let join = tokio::task::spawn_blocking(move || {
         let refs: Vec<&SyncobjHandle> = handles_for_blocking.iter().collect();
@@ -360,9 +291,6 @@ async fn flush_bucket(
 
     // Fan-out merge:
     //   3a. EXPORT_SYNC_FILE on each consumer handle.
-    //   3b. Fold-merge sync_files via SYNC_IOC_MERGE.
-    //   3c. Allocate a temp binary syncobj, IMPORT_SYNC_FILE the merge.
-    //   3d. TRANSFER from temp into producer timeline at release_point.
     let mut sync_files: Vec<std::os::fd::OwnedFd> = Vec::with_capacity(n);
     let mut export_failed = false;
     for h in &handles {
@@ -380,7 +308,6 @@ async fn flush_bucket(
     if export_failed || sync_files.is_empty() {
         // Fall back to a single TRANSFER so the producer's wait at
         // this release_point still completes; we lose accurate fan-out
-        // fence content but at least don't deadlock.
         if let Err(e) = drm.transfer(&handles[0], 0, producer, release_point) {
             log::warn!(
                 "reaper {renderer_id}: fallback TRANSFER to point {release_point} failed: {e}"
@@ -424,8 +351,7 @@ async fn flush_bucket(
         return;
     }
     log::trace!("reaper {renderer_id}: flushed point {release_point} ({n} consumer fences merged)");
-    // temp_handle, merged sync_file, and consumer handles all drop
-    // here → kernel cleanup. The producer-side timeline holds the
-    // merged fence (already signaled, since wait_all returned Ok).
+    // Local handles drop here for kernel cleanup. The producer timeline
+    // already holds the merged fence after TRANSFER.
     drop(handles);
 }

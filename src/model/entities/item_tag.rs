@@ -1,6 +1,3 @@
-//! `item_tag` — M-to-M junction for items and tags. Composite primary
-//! key `(item_id, tag_id)`.
-
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]

@@ -1,7 +1,3 @@
-//! `library` table — a per-plugin logical group of items. `path` is a
-//! plugin-scoped key: a filesystem path for folder-style plugins, or a
-//! synthetic label for snapshot-style plugins.
-
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -13,7 +9,6 @@ pub struct Model {
     pub path: String,
     /// JSON-encoded `{string -> string}` map. Free-form per-plugin
     /// scratch space exposed to source plugins via `ctx.library_meta_*`.
-    /// Defaults to `"{}"` so legacy rows decode cleanly.
     pub metadata: String,
 }
 

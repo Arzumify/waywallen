@@ -1,16 +1,9 @@
-//! /dev/dri enumeration: collect every DRM node + its PCI/driver info,
-//! surface to UI via the control plane, and let `RendererManager` map a
-//! user-picked (major, minor) to a render-node path injected into
-//! `Init.settings`.
-
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Plugin-settings key that persists "preferred GPU" as `"<major>:<minor>"`.
-/// Daemon translates this to a `/dev/dri/renderD*` path at spawn time and
-/// injects the path as the existing `render_node` setting that subprocess
-/// plugins (notably `video`) already consume.
+/// The daemon translates it to a `/dev/dri/renderD*` path at spawn time.
 pub const GPU_DRM_DEV_KEY: &str = "gpu_drm_dev";
 
 /// Settings key that flows to the renderer subprocess's Init.settings.
@@ -62,10 +55,8 @@ pub(crate) fn enumerate_with_roots(dev_dri: &Path, sysfs_char: &Path) -> Vec<Gpu
         }
     };
 
-    // Group by PCI device directory so a single GPU's cardN + renderD1xx
-    // collapse to one GpuInfo. Key = canonical path of
-    // sysfs_char/<m>:<n>/device. Devices without a PCI parent (vgem etc.)
-    // get their own group keyed by node path.
+    // Group by PCI device directory so a single GPU's cardN and
+    // renderD1xx nodes collapse to one GpuInfo.
     let mut groups: BTreeMap<String, GpuInfo> = BTreeMap::new();
 
     for entry in entries.flatten() {
@@ -211,8 +202,6 @@ mod tests {
 
     /// Fake sysfs: an empty renderD128 in dev_dri, sysfs_char/<m>:<n>/device
     /// symlinked to a PCI dir with vendor/device/driver populated. mknod
-    /// would need root, so this exercises parse_pci_dir only; the
-    /// end-to-end enumerate path is covered by the `#[ignore]` live test.
     #[test]
     fn parse_pci_dir_reads_vendor_device_driver() {
         let tmp = tempfile::tempdir().unwrap();

@@ -238,7 +238,6 @@ impl Drop for OwnedImage {
     fn drop(&mut self) {
         // Image+memory lifetimes are owned by the calling phase, which
         // explicitly free_memory + destroy_image before VkDevice teardown.
-        // The raw vk handles intentionally leak if this Drop runs first.
     }
 }
 

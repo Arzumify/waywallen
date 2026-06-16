@@ -1,16 +1,9 @@
-//! Prost-generated control plane protobuf types.
-//!
-//! Source of truth: `proto/control.proto` + `proto/filter.proto`
-//! (package `waywallen.control.v1`).
-//! The generated Rust code lives in `$OUT_DIR/waywallen.control.v1.rs`.
-
 include!(concat!(env!("OUT_DIR"), "/waywallen.control.v1.rs"));
 
 use crate::plugin::renderer_registry::{SettingDef, SettingType};
 
 /// Stringify a `toml::Value` for the wire `default_value` / `min` /
-/// `max` / `step` fields. Empty string when the value is `None` /
-/// structurally absent — matches the proto convention ("empty = unset").
+/// `max` / `step` fields.
 fn toml_value_to_wire(v: &toml::Value) -> String {
     match v {
         toml::Value::String(s) => s.clone(),
@@ -18,8 +11,7 @@ fn toml_value_to_wire(v: &toml::Value) -> String {
         toml::Value::Float(f) => f.to_string(),
         toml::Value::Boolean(b) => b.to_string(),
         // Arrays/tables aren't valid setting scalars; fall back to the
-        // TOML debug repr so the UI at least sees something rather
-        // than silently dropping the manifest's intent.
+        // TOML repr so the UI sees a deterministic fallback string.
         other => other.to_string(),
     }
 }
@@ -34,9 +26,7 @@ fn setting_type_to_proto(ty: SettingType) -> i32 {
 }
 
 /// Convert one manifest `SettingDef` into the `SettingSchema` wire
-/// shape consumed by `RendererPluginInfo.settings`. Stringifies the
-/// `default` / `min` / `max` / `step` so the wire stays homogeneous
-/// with `PluginSettings.values`.
+/// shape consumed by `RendererPluginInfo.settings`.
 pub fn setting_def_to_proto(key: &str, def: &SettingDef) -> SettingSchema {
     SettingSchema {
         key: key.to_string(),

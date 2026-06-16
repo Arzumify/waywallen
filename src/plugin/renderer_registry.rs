@@ -2,15 +2,13 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::wallpaper_type::WallpaperType;
+use crate::wallpaper::types::WallpaperType;
 
 // ---------------------------------------------------------------------------
 // Installable-plugin manifest (`plugins/<dir>/plugin.toml`)
-// ---------------------------------------------------------------------------
 
-/// One installable plugin: a `[plugin]` header plus the components it
-/// provides — at most one `[source]` (Lua) and zero or more
-/// `[renderers.<name>]` map entries.
+/// One installable plugin: a `[plugin]` header plus components.
+/// A plugin may provide one Lua source and any number of renderers.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PluginManifest {
     pub plugin: PluginMeta,
@@ -30,14 +28,12 @@ pub struct PluginMeta {
     pub name: String,
     #[serde(default = "default_version")]
     pub version: String,
-    /// Declarative file manifest (paths relative to the plugin dir),
-    /// loaded during scanning from the plugin's required `files.txt`
-    /// (newline-separated). Not parsed from the TOML.
+    /// Declarative file manifest with paths relative to the plugin dir.
+    /// Loaded during scanning from the required `files.txt`.
     #[serde(skip)]
     pub files: Vec<String>,
-    /// True when the plugin lives outside `$XDG_DATA_HOME` (bundled /
-    /// system install or an explicit `--plugin` root). Computed at scan
-    /// time, not read from the manifest.
+    /// True when the plugin lives outside `$XDG_DATA_HOME`.
+    /// Covers bundled, system, and explicit `--plugin` roots.
     #[serde(skip)]
     pub system: bool,
 }
@@ -52,10 +48,8 @@ pub struct SourceComponent {
     pub lua: PathBuf,
 }
 
-/// A source component discovered in a plugin manifest. Carries the
-/// owning plugin's domain id so loaded source plugins can be tagged with
-/// their provenance at load time (name/version come from the Lua
-/// `info()` itself).
+/// Source component discovered in a plugin manifest.
+/// Carries the owning plugin domain id.
 #[derive(Debug, Clone)]
 pub struct SourceRef {
     pub plugin_id: String,
@@ -79,9 +73,8 @@ impl PluginScan {
         self.plugins.extend(other.plugins);
     }
 
-    /// Installable-plugin view of the scan: one entry per `[plugin]`, with
-    /// whether it ships a source component (renderer components are looked
-    /// up from the registry by `plugin_id` when needed).
+    /// Installable-plugin view of the scan.
+    /// One entry per `[plugin]`, with source presence included.
     pub fn packages(&self) -> Vec<PluginPackageMeta> {
         self.plugins
             .iter()
@@ -122,46 +115,26 @@ pub struct RendererDef {
     pub types: Vec<WallpaperType>,
     #[serde(default = "default_priority")]
     pub priority: u32,
-    /// Wire-protocol `Init.spawn_version` the daemon should emit when
-    /// spawning this renderer. `None` means "use the daemon's compile-
-    /// time `SPAWN_VERSION`" (legacy manifests). Step 2 keeps this
-    /// optional so old manifests behave identically; Step 3 will make
-    /// it the source of truth.
+    /// Wire-protocol `Init.spawn_version` to emit for this renderer.
+    /// `None` means use the daemon compile-time default.
     #[serde(default)]
     pub spawn_version: Option<u32>,
-    /// Allow-listed extra metadata keys (beyond the canonical `path`).
-    /// Forwarded verbatim as `Init.resource_extras`. The daemon warns
-    /// when source-plugin metadata carries a key that's neither `path`
-    /// nor in this list nor in `settings`; Step 3 will turn the warning
-    /// into an error.
-    ///
-    /// Empty (the default) means "no extras". A manifest is considered
-    /// "schema-bearing" iff it has a non-empty `extras` OR a non-empty
-    /// `settings` table — the legacy "no schema" fall-through stays in
-    /// place for old manifests until OWE migrates wescene.
+    /// Allow-listed metadata keys forwarded as `Init.resource_extras`.
+    /// The canonical `path` is always handled separately.
     #[serde(default)]
     pub extras: Vec<String>,
-    /// Optional schema for plugin-level settings (e.g. mpv's
-    /// `loop_file`, wescene's `volume`). Each entry declares a type
-    /// and a default; missing entries are filled from the default at
-    /// validation time. Empty (the default) means "no schema, no
-    /// validation".
+    /// Optional schema for plugin-level settings.
+    /// Each entry declares a type and validation envelope.
     #[serde(default)]
     pub settings: HashMap<String, SettingDef>,
-    /// Opt-in inbound-event subscriptions. Recognized values: "pointer"
-    /// (covers pointer_motion / pointer_button / pointer_axis as a
-    /// family). Empty = renderer receives only the always-on inbound
-    /// events (init / setting_changed / play / pause / set_fps /
-    /// shutdown / negotiate_buffers); the daemon drops everything
-    /// else before encoding.
+    /// Opt-in inbound-event subscriptions.
+    /// Recognized values include "pointer".
     #[serde(default)]
     pub events: Vec<String>,
 }
 
-/// Inbound-event family this renderer subscribed to via the manifest's
-/// `events` array. Recognized values are listed here so the daemon can
-/// reject unknown ones at parse time and keep the wire-side gating
-/// small and exhaustive.
+/// Inbound-event family subscribed via the manifest `events` array.
+/// Recognized values are listed here for validation.
 pub const EVENT_KIND_POINTER: &str = "pointer";
 
 /// Returns `true` when `name` matches one of the recognised
@@ -176,37 +149,29 @@ pub struct SettingDef {
     pub ty: SettingType,
     pub default: toml::Value,
     /// When `true` (the default), the setting participates in the
-    /// renderer's identity hash — changing it should respawn the
-    /// renderer. When `false`, the setting is hot-applicable and
-    /// changes should be dispatched as `ApplySettings` instead
-    /// (Step 4 work).
+    /// renderer's identity hash, so changes respawn the renderer.
     #[serde(default = "default_true")]
     pub identity: bool,
-    /// i18n key the UI binds to for the field label
-    /// (e.g. `"settings.video.loop_file"`). Optional — old manifests
-    /// without this stay valid; the UI falls back to the raw key name.
+    /// i18n key the UI binds to for the field label.
+    /// Optional for older manifests.
     #[serde(default)]
     pub label_key: Option<String>,
     /// Optional i18n key for a short helper / tooltip line.
     #[serde(default)]
     pub description_key: Option<String>,
     /// Numeric lower bound (inclusive) for `U32`/`F32` settings.
-    /// Ignored on string/bool. Out-of-range values from `SettingsSet`
-    /// are rejected; out-of-range values found at startup fall back
-    /// to `default` with a warning.
+    /// Ignored on string/bool; `SettingsSet` rejects out-of-range values.
     #[serde(default)]
     pub min: Option<toml::Value>,
     /// Numeric upper bound (inclusive). Same semantics as `min`.
     #[serde(default)]
     pub max: Option<toml::Value>,
-    /// Optional UI hint for slider/spinner step. Daemon does not
-    /// enforce step alignment (would block legitimate fine-grained
-    /// values); UIs can choose to snap.
+    /// Optional UI hint for slider/spinner increments.
+    /// The daemon validates range, not step alignment.
     #[serde(default)]
     pub step: Option<toml::Value>,
-    /// Allowed string values. Only valid for `String` settings;
-    /// values outside the list are rejected by `SettingsSet` and
-    /// reset to default at startup.
+    /// Allowed string values.
+    /// Only valid for `String`; `SettingsSet` rejects other values.
     #[serde(default)]
     pub choices: Option<Vec<String>>,
     /// Logical group key. UI groups settings sharing this name into
@@ -219,10 +184,8 @@ pub struct SettingDef {
 }
 
 impl SettingDef {
-    /// Bare-minimum constructor — fills the optional schema metadata
-    /// (`label_key`, `min`, `choices`, …) with `None`. Real manifests
-    /// flow through `serde::Deserialize` and never touch this; tests
-    /// and ad-hoc programmatic builds use it as a base.
+    /// Bare-minimum constructor for tests and generated defaults.
+    /// Optional schema metadata is filled with `None`.
     pub fn new(ty: SettingType, default: toml::Value, identity: bool) -> Self {
         Self {
             ty,
@@ -263,7 +226,6 @@ fn default_true() -> bool {
 
 // ---------------------------------------------------------------------------
 // Setting validation
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValidationError {
@@ -312,11 +274,8 @@ impl std::fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
-/// Validate one already-typecast setting value against the manifest's
-/// optional `min` / `max` / `choices` envelope. Returns `Ok(())` when
-/// the value is in range or no constraints apply. Used by
-/// `Settings::reconcile` (startup) and by the `SettingsSet` RPC
-/// handler (incoming user edits).
+/// Validate an already-typecast setting against the manifest envelope.
+/// Returns `Ok(())` when the value is accepted.
 pub fn check_setting_bounds(
     key: &str,
     coerced: &str,
@@ -379,9 +338,8 @@ pub fn check_setting_bounds(
     }
 }
 
-/// Top-level entry for `SettingsSet`: typecheck a raw user value
-/// against the manifest schema and run bounds validation. Returns the
-/// canonicalised string on success.
+/// Top-level entry for `SettingsSet`.
+/// Typechecks a raw user value and returns canonical string form.
 pub fn coerce_and_validate(
     key: &str,
     raw: &str,
@@ -432,9 +390,8 @@ fn toml_to_f32(v: &toml::Value) -> Option<f32> {
     }
 }
 
-/// Try to interpret a raw `String` as a value of `ty`. Returns the
-/// canonicalised string form on success (e.g. `"42"` for u32, `"true"`
-/// for bool). Returns `None` if the value can't be coerced.
+/// Try to interpret a raw `String` as a value of `ty`.
+/// Returns the canonical string form on success.
 fn coerce_setting(raw: &str, ty: SettingType) -> Option<String> {
     match ty {
         SettingType::U32 => raw.parse::<u32>().ok().map(|v| v.to_string()),
@@ -447,9 +404,8 @@ fn coerce_setting(raw: &str, ty: SettingType) -> Option<String> {
     }
 }
 
-/// Stringify a `toml::Value` default, coerced to `ty`. Returns `None`
-/// when the default is structurally incompatible (e.g. an array as a
-/// `u32` default).
+/// Stringify a `toml::Value` default coerced to `ty`.
+/// Returns `None` when the default is structurally incompatible.
 fn toml_default_to_string(value: &toml::Value, ty: SettingType) -> Option<String> {
     match (value, ty) {
         (toml::Value::Integer(i), SettingType::U32) => {
@@ -472,7 +428,6 @@ fn toml_default_to_string(value: &toml::Value, ty: SettingType) -> Option<String
 
 // ---------------------------------------------------------------------------
 // Registry
-// ---------------------------------------------------------------------------
 
 pub struct RendererRegistry {
     /// type → list of RendererDef sorted by descending priority.
@@ -503,8 +458,6 @@ impl RendererRegistry {
 
     /// Find a renderer by its manifest `name`, regardless of type.
     /// Returns the first occurrence — `register` keeps duplicates
-    /// across `by_type` so we walk every bucket and stop at the first
-    /// match.
     pub fn resolve_by_name(&self, name: &str) -> Option<&RendererDef> {
         self.by_type
             .values()
@@ -532,9 +485,8 @@ impl RendererRegistry {
     }
 }
 
-/// Scan a `plugins/` directory: each immediate subdirectory holding a
-/// `plugin.toml` is one installable plugin. Returns the renderer and
-/// source components it provides. Bad manifests are logged and skipped.
+/// Scan a `plugins/` directory.
+/// Each immediate subdirectory with `plugin.toml` is one plugin.
 pub fn scan_plugins(dir: &Path) -> PluginScan {
     let mut out = PluginScan::default();
     let user_root = standard_plugin_dirs("plugins").into_iter().next_back();
@@ -630,7 +582,6 @@ pub fn scan_plugins(dir: &Path) -> PluginScan {
 
 /// Whether `path` lives under `root` (the user XDG plugins dir). Compares
 /// canonicalized paths so symlinked install prefixes still match; falls
-/// back to a plain prefix check when canonicalization fails.
 fn is_under(path: &Path, root: Option<&Path>) -> bool {
     let Some(root) = root else { return false };
     match (path.canonicalize(), root.canonicalize()) {
@@ -650,10 +601,6 @@ fn resolve_rel(base: &Path, p: PathBuf) -> PathBuf {
 
 /// Scan the two canonical plugin roots:
 /// 1. `<exec>/../share/waywallen/plugins/`  (bundled / system install)
-/// 2. `$XDG_DATA_HOME/waywallen/plugins/`   (user overrides)
-///
-/// User-local plugins (XDG) are scanned last so they can shadow bundled
-/// ones by name. Non-existent directories are silently skipped.
 pub fn build_default_plugin_scan() -> PluginScan {
     let mut scan = PluginScan::default();
     for dir in standard_plugin_dirs("plugins") {
@@ -666,7 +613,6 @@ pub fn build_default_plugin_scan() -> PluginScan {
 
 /// Return the two canonical plugin directories (bundled + XDG) for a
 /// given subdirectory name (e.g. `"renderers"` or `"sources"`). Returned
-/// in load order: bundled first, user-local second.
 pub fn standard_plugin_dirs(subdir: &str) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
@@ -693,7 +639,6 @@ pub fn standard_plugin_dirs(subdir: &str) -> Vec<PathBuf> {
 
 // ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod schema_tests {
@@ -749,10 +694,8 @@ mod schema_tests {
 
     #[test]
     fn manifest_parses_source_extras_and_settings() {
-        // End-to-end: plugin.toml → source ref + RendererDef. Wire-level
-        // details (extras whitelist, per-key SettingDef shape) are
-        // exercised through deserialization here so a regression in the
-        // manifest grammar is caught.
+        // End-to-end: plugin.toml to source ref and RendererDef.
+        // Wire-level details are asserted by focused tests elsewhere.
         let src = r#"
             [plugin]
             id = "org.waywallen.mpv"

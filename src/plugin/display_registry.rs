@@ -1,21 +1,9 @@
-//! Display backend registry — scans `*.toml` manifests describing which
-//! executable should attach waywallen output to the desktop on each DE.
-//!
-//! Mirrors `renderer_registry.rs`: same manifest discovery paths (bundled
-//! `<exec>/../share/waywallen/displays/` + `$XDG_DATA_HOME/.../displays/`
-//! + `--plugin PATH/displays/`), same "relative `bin` is resolved against
-//! the TOML's directory" gotcha.
-//!
-//! Selection happens in `display::spawner`; this module is just storage +
-//! scan. Registry entries are ordered by descending `priority`.
-
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Manifest (TOML on disk)
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DisplayManifest {
@@ -50,9 +38,8 @@ pub struct DisplayDef {
     pub de: Vec<String>,
     #[serde(default = "default_priority")]
     pub priority: i32,
-    /// Optional capability tokens this backend needs. `display::spawner`
-    /// intersects these with probed Wayland globals (`wlr-layer-shell`,
-    /// `linux-dmabuf-v4`, …). Empty = no preconditions.
+    /// Optional capability tokens this backend needs.
+    /// `display::spawner` intersects them with probed Wayland globals.
     #[serde(default)]
     pub requires: Vec<String>,
     #[serde(default)]
@@ -67,7 +54,6 @@ fn default_priority() -> i32 {
 
 // ---------------------------------------------------------------------------
 // Registry
-// ---------------------------------------------------------------------------
 
 #[derive(Default)]
 pub struct DisplayRegistry {
@@ -82,7 +68,6 @@ impl DisplayRegistry {
 
     /// Scan a directory for `*.toml` display manifests and collect them.
     /// Non-parseable files are logged and skipped. Relative `bin` paths
-    /// are resolved against the manifest file's directory.
     pub fn scan(dir: &Path) -> Result<Self> {
         let mut reg = Self::new();
         let pattern = dir.join("*.toml");
@@ -142,10 +127,6 @@ impl DisplayRegistry {
 
 /// Build a registry by scanning the two canonical plugin paths:
 /// 1. `<exec>/../share/waywallen/displays/`   (bundled)
-/// 2. `$XDG_DATA_HOME/waywallen/displays/`    (user overrides)
-///
-/// Non-existent directories are silently skipped. User entries shadow
-/// bundled ones by name.
 pub fn build_default_registry() -> Result<DisplayRegistry> {
     let mut registry = DisplayRegistry::new();
     for dir in crate::plugin::renderer_registry::standard_plugin_dirs("displays") {

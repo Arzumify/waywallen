@@ -70,8 +70,6 @@ pub fn import_timeline_opaque_fd(vkd: &VkDevice, fd: OwnedFd) -> Result<Timeline
 
 /// Binary VkSemaphore exportable as SYNC_FD. Signal it via a queue submit
 /// then call [`export_signaled_sync_fd`] to take the dma_fence sync_file
-/// fd out — that fd is what the production display endpoint hands to
-/// each consumer as the per-frame acquire fence.
 pub fn create_binary_sync_fd_exportable(vkd: &VkDevice) -> Result<vk::Semaphore> {
     let mut export = vk::ExportSemaphoreCreateInfo::default()
         .handle_types(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD);
@@ -85,10 +83,8 @@ pub fn create_binary_sync_fd_exportable(vkd: &VkDevice) -> Result<vk::Semaphore>
     Ok(sem)
 }
 
-/// Export the SYNC_FD payload of a binary semaphore that has been (or
-/// will soon be) signaled via a queue submit. After export, the
-/// semaphore enters the unsignaled state per the SYNC_FD external
-/// semaphore handle semantics, ready for re-use on the next submit.
+/// Export the SYNC_FD payload of a binary semaphore.
+/// The semaphore payload is consumed by this operation.
 pub fn export_signaled_sync_fd(vkd: &VkDevice, sem: vk::Semaphore) -> Result<OwnedFd> {
     let raw = unsafe {
         vkd.ext_sem_fd.get_semaphore_fd(
@@ -103,7 +99,6 @@ pub fn export_signaled_sync_fd(vkd: &VkDevice, sem: vk::Semaphore) -> Result<Own
 
 /// Import a SYNC_FD into a binary semaphore as a TEMPORARY association
 /// (per spec: SYNC_FD imports are always temporary, so the next submit
-/// that waits on `sem` consumes the fence and resets the binding).
 pub fn import_sync_fd_temporary(vkd: &VkDevice, sem: vk::Semaphore, fd: OwnedFd) -> Result<()> {
     let raw = fd.into_raw_fd();
     unsafe {

@@ -1,18 +1,3 @@
-//! Thin wrapper around the kernel `DRM_IOCTL_SYNCOBJ_*` API.
-//!
-//! Used by the daemon to allocate per-consumer release syncobjs, import
-//! the producer's exported timeline syncobj, and (eventually) transfer
-//! consumer release fences onto producer timeline points.
-//!
-//! Only the subset the daemon needs is exposed here. Vulkan-side use
-//! (semaphore import/export) is not the daemon's concern — it's the
-//! producer/consumer subprocesses that touch Vulkan.
-//!
-//! Numeric ioctl base + sequence numbers come from `<linux/drm.h>`.
-//! `DRM_IOCTL_BASE` = `'d'`. Sequence numbers chosen here cover only
-//! what the daemon needs today; add more when the reaper grows
-//! `TIMELINE_WAIT` / `TIMELINE_SIGNAL` / `TRANSFER`.
-
 use nix::ioctl_readwrite;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -116,14 +101,11 @@ ioctl_readwrite!(
 
 // EXPORT_SYNC_FILE and IMPORT_SYNC_FILE are NOT separate ioctls — they
 // are HANDLE_TO_FD / FD_TO_HANDLE invoked with this flag bit set. The
-// kernel returns EACCES (or just plain rejects) anything else.
 pub const DRM_SYNCOBJ_HANDLE_TO_FD_FLAGS_EXPORT_SYNC_FILE: u32 = 1 << 0;
 pub const DRM_SYNCOBJ_FD_TO_HANDLE_FLAGS_IMPORT_SYNC_FILE: u32 = 1 << 0;
 
 // `<linux/sync_file.h>` SYNC_IOC_MERGE — merges two dma_fence sync_file
 // fds into a fresh sync_file fd whose fence becomes signaled iff both
-// inputs are signaled. Operates on the sync_file fd directly (not on
-// any DRM device); ioctl base is `'>'`, seq 3.
 const SYNC_IOC_MAGIC: u8 = b'>';
 #[repr(C)]
 pub struct SyncMergeData {
@@ -141,12 +123,6 @@ fn errno_to_io(e: nix::errno::Errno) -> io::Error {
 
 /// Open render node owning `fd`. The daemon needs this for every
 /// drm_syncobj ioctl. Today we open the first usable `/dev/dri/renderD*`
-/// because the daemon's per-consumer release syncobjs do not have to
-/// live on the same render node as the producer — drm_syncobj fds are
-/// portable across DRM devices that share the dma-fence infrastructure
-/// (i.e. all in-tree drivers). When the reaper learns to transfer onto
-/// the producer's timeline syncobj it will need to be smarter and use
-/// the producer-reported render node.
 pub struct DrmDevice {
     fd: OwnedFd,
     path: PathBuf,
@@ -191,9 +167,6 @@ impl DrmDevice {
 
     /// Allocate a fresh binary drm_syncobj. The returned handle owns the
     /// kernel object lifetime; drop it to issue `DRM_IOCTL_SYNCOBJ_DESTROY`.
-    /// Exported fds (via [`Self::handle_to_fd`]) hold their own refcount,
-    /// so it is safe to drop the handle after exporting an fd that
-    /// will be sent to a consumer.
     pub fn create_binary_syncobj(&self) -> io::Result<SyncobjHandle> {
         let mut arg = DrmSyncobjCreate {
             handle: 0,
@@ -228,13 +201,8 @@ impl DrmDevice {
         Ok(unsafe { OwnedFd::from_raw_fd(arg.fd) })
     }
 
-    /// Import an external syncobj fd (e.g. one a producer exported via
-    /// `vkGetSemaphoreFdKHR(OPAQUE_FD)` from a TIMELINE semaphore) into
-    /// a fresh handle on this device. The handle is owned by the
-    /// returned [`SyncobjHandle`]; dropping it issues
-    /// `DRM_IOCTL_SYNCOBJ_DESTROY` (which only releases this device's
-    /// reference — the kernel object lives as long as any other fd or
-    /// handle still refers to it). The original `fd` is unaffected.
+    /// Import an external syncobj fd into this DRM device.
+    /// Example: a producer-exported timeline semaphore fd.
     pub fn fd_to_handle(&self, fd: &OwnedFd) -> io::Result<SyncobjHandle> {
         let mut arg = DrmSyncobjHandle {
             handle: 0,
@@ -258,13 +226,7 @@ impl DrmDevice {
     }
 
     /// Block until every handle in `handles` is signaled.
-    /// `timeout_nsec` is an absolute `CLOCK_MONOTONIC` nanosecond
-    /// deadline; pass `i64::MAX` to wait forever. Returns `Ok(())` on
-    /// all-signaled, `Err(io::Error)` on timeout (errno `ETIME`) or
-    /// other ioctl failure.
-    ///
-    /// Blocks the calling thread — call from `tokio::task::spawn_blocking`
-    /// in async contexts.
+    /// `timeout_nsec` is an absolute `CLOCK_MONOTONIC` deadline.
     pub fn wait_handles_signaled(
         &self,
         handles: &[&SyncobjHandle],
@@ -274,12 +236,8 @@ impl DrmDevice {
             return Ok(());
         }
         let mut raw: Vec<u32> = handles.iter().map(|h| h.handle).collect();
-        // WAIT_FOR_SUBMIT is mandatory here: the reaper waits on freshly
-        // created consumer binary syncobjs whose kernel fence is NULL until
-        // the consumer's GPU work runs and IMPORT_SYNC_FILEs a fence in.
-        // Without this flag the kernel rejects a NULL-fence wait with
-        // EINVAL immediately instead of blocking until the fence appears
-        // (or until our absolute CLOCK_MONOTONIC `timeout_nsec` lapses).
+        // WAIT_FOR_SUBMIT is mandatory here because consumer syncobjs
+        // may hold NULL fences until display clients import them.
         let mut arg = DrmSyncobjWait {
             handles: raw.as_mut_ptr() as u64,
             timeout_nsec,
@@ -301,13 +259,6 @@ impl DrmDevice {
 
     /// Export the dma_fence currently held by `handle` (binary syncobj
     /// must be signaled or have a pending fence) as a sync_file fd.
-    /// The fd can be `SYNC_IOC_MERGE`d with other sync_file fds and
-    /// then re-imported into a syncobj via [`Self::import_sync_file`].
-    ///
-    /// Implementation note: the kernel does NOT have a separate
-    /// `EXPORT_SYNC_FILE` ioctl — it overloads `HANDLE_TO_FD` with the
-    /// `EXPORT_SYNC_FILE` flag, returning a sync_file fd instead of a
-    /// drm_syncobj fd.
     pub fn export_sync_file(&self, handle: &SyncobjHandle) -> io::Result<OwnedFd> {
         let mut arg = DrmSyncobjHandle {
             handle: handle.handle,
@@ -329,13 +280,6 @@ impl DrmDevice {
 
     /// Import a sync_file fd into `handle`, replacing whatever fence
     /// the syncobj was holding. Inverse of [`Self::export_sync_file`].
-    /// `sync_file` ownership stays with the caller (the kernel dup's
-    /// internally).
-    ///
-    /// Implementation note: piggybacks on `FD_TO_HANDLE` with the
-    /// `IMPORT_SYNC_FILE` flag (see [`Self::export_sync_file`]). The
-    /// `handle` field is *input* in this mode (which existing handle
-    /// to write into) rather than the usual output.
     pub fn import_sync_file(&self, handle: &SyncobjHandle, sync_file: &OwnedFd) -> io::Result<()> {
         let mut arg = DrmSyncobjHandle {
             handle: handle.handle,
@@ -351,8 +295,6 @@ impl DrmDevice {
 
     /// Mark `handle` as signaled (CPU-side, non-blocking). For binary
     /// syncobjs only — calling on a TIMELINE handle errors with EINVAL.
-    /// Used by consumers that don't own a real GPU release fence to
-    /// unblock the daemon's reaper TRANSFER.
     pub fn signal(&self, handle: &SyncobjHandle) -> io::Result<()> {
         let mut handles = [handle.handle];
         let mut arg = DrmSyncobjArray {
@@ -366,9 +308,8 @@ impl DrmDevice {
         Ok(())
     }
 
-    /// Transfer the signaled state at `src_point` on `src` to `dst_point`
-    /// on `dst`. For a binary syncobj `src_point` is always 0; for a
-    /// timeline `dst` write the post-merge fence at the desired point.
+    /// Transfer signaled state from `src_point` to `dst_point`.
+    /// Binary syncobjs always use `src_point = 0`.
     pub fn transfer(
         &self,
         src: &SyncobjHandle,
@@ -391,14 +332,8 @@ impl DrmDevice {
     }
 }
 
-/// Merge two sync_file fds into a fresh sync_file whose fence is the
-/// AND of the two inputs (signaled iff both are signaled). Used by
-/// the reaper to combine multiple consumers' release fences into the
-/// single fence it `IMPORT_SYNC_FILE`s back into a binary syncobj for
-/// `TRANSFER`-onto-timeline.
-///
-/// Caller keeps ownership of `a` and `b`; the kernel dup's their
-/// fences internally. Returns the new sync_file fd.
+/// Merge two sync_file fds into a fresh sync_file.
+/// The merged fence signals only after both inputs signal.
 pub fn merge_sync_files(a: &OwnedFd, b: &OwnedFd) -> io::Result<OwnedFd> {
     let mut arg = SyncMergeData {
         name: *b"waywallen-reaper-merge          ",
@@ -422,7 +357,6 @@ pub fn merge_sync_files(a: &OwnedFd, b: &OwnedFd) -> io::Result<OwnedFd> {
 
 /// RAII wrapper around a drm_syncobj kernel handle. Drop calls
 /// `DRM_IOCTL_SYNCOBJ_DESTROY` on the device the handle was allocated
-/// from.
 pub struct SyncobjHandle {
     device_fd: RawFd,
     handle: u32,
@@ -490,8 +424,6 @@ mod tests {
     fn merge_sync_files_signaled_pair() {
         // End-to-end exercise of the reaper's fan-out merge path:
         //   create + signal two binary syncobjs → EXPORT_SYNC_FILE each
-        //   → SYNC_IOC_MERGE → IMPORT_SYNC_FILE into a third syncobj
-        //   → wait_signaled returns immediately.
         if !drm_available() {
             eprintln!("skip: no /dev/dri/renderD* available");
             return;
@@ -511,7 +443,6 @@ mod tests {
         dev.import_sync_file(&h3, &merged).expect("import merged");
         // Already-signaled inputs → merged is signaled → wait returns
         // immediately. timeout_nsec=0 (= "now" in absolute monotonic)
-        // is enough.
         dev.wait_signaled(&h3, i64::MAX).expect("wait merged");
     }
 }

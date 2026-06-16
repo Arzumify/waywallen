@@ -1,5 +1,3 @@
-//! Session-bus presence + control surface for the daemon.
-
 use std::path::Path;
 use std::sync::Arc;
 
@@ -23,7 +21,6 @@ pub struct Daemon1 {
 impl Daemon1 {
     /// Crate version (Cargo.toml). UI compares this against its own
     /// build-time `APP_VERSION` to gate the connection — mismatched
-    /// builds stay disconnected and surface a dialog.
     #[zbus(property)]
     fn version(&self) -> &str {
         env!("CARGO_PKG_VERSION")
@@ -52,7 +49,6 @@ impl Daemon1 {
 
     /// Live queue playback mode: `"sequential"`, `"shuffle"`, or
     /// `"random"`. Setter persists to settings and emits
-    /// `PropertiesChanged`.
     #[zbus(property)]
     async fn queue_mode(&self) -> String {
         self.app.queue.lock().await.mode.as_str().to_owned()
@@ -123,10 +119,8 @@ impl Daemon1 {
             .map_err(zbus::fdo::Error::from)
     }
 
-    /// Apply an image wallpaper via `org.freedesktop.portal.Wallpaper`
-    /// instead of the renderer/router/display path. Returns the
-    /// `file://` URI that was forwarded to the portal. Non-image
-    /// wallpapers fail with `InvalidArgs`.
+    /// Apply an image wallpaper via `org.freedesktop.portal.Wallpaper`.
+    /// Returns the portal URI used for the request.
     async fn apply_via_portal(&self, id: String) -> zbus::fdo::Result<String> {
         control::apply_wallpaper_via_portal(&self.app, &id)
             .await
@@ -147,7 +141,6 @@ impl Daemon1 {
 
     /// Live status of the active queue. Tuple shape
     /// `(active_id, mode, interval_secs, current_id, position, count, is_smart)`.
-    /// `active_id = 0` and `current_id = ""` represent absence.
     async fn queue_status(&self) -> (i64, String, u32, String, u32, u32, bool) {
         let s = control::queue_status(&self.app).await;
         (
@@ -167,16 +160,6 @@ impl Daemon1 {
 
     /// Snapshot of background tasks tracked by the daemon. Returns one
     /// row per task; rows are not sorted (the registry is a HashMap).
-    /// Schema: `a(tssxs)` — (id, kind, name, started_at_ms, state).
-    /// `state` is one of `running` / `completed` / `failed` /
-    /// `cancelled`. For `failed`, the error message is appended after a
-    /// colon (e.g. `failed: nope`) so callers can read it without an
-    /// extra round-trip.
-    /// Cancel a Running task by id. Returns `true` if a cancel token
-    /// existed (the task was Running at call time); `false` if the id
-    /// is unknown or the task already finished. The task may take a
-    /// few ms to observe the cancellation depending on what it's
-    /// awaiting.
     fn cancel_task(&self, id: u64) -> bool {
         self.app.tasks.cancel(id)
     }
@@ -209,17 +192,8 @@ impl Daemon1 {
     async fn shutting_down(emitter: &SignalContext<'_>) -> zbus::Result<()>;
 }
 
-/// Single-instance gate. Connects to the session bus and tries to claim
-/// `BUS_NAME` with `DO_NOT_QUEUE`. Three outcomes:
-///
-/// * primary owner ⇒ returns the live `Connection` (caller serves the
-///   interface on it later via [`serve`]).
-/// * name already taken ⇒ `execv`s into `ui_path`. The current PID
-///   becomes the UI process so desktop integration (startup notification
-///   cookie, systemd transient unit, taskbar grouping) stays attached to
-///   the user's launch. `ui_path = None` ⇒ exits 0.
-/// * session bus unavailable / `RequestName` errored ⇒ exits 1. Without
-///   a session bus we can't enforce single-instance.
+/// Single-instance gate.
+/// Claims `BUS_NAME` with `DO_NOT_QUEUE`, or hands off UI launch.
 pub async fn acquire_or_handoff(ui_path: Option<&Path>) -> Connection {
     let conn = match Connection::session().await {
         Ok(c) => c,
@@ -230,9 +204,8 @@ pub async fn acquire_or_handoff(ui_path: Option<&Path>) -> Connection {
     };
 
     let name: WellKnownName<'_> = WellKnownName::try_from(BUS_NAME).expect("valid bus name");
-    // zbus 4 maps the `Exists` / `InQueue` reply codes to
-    // `Error::NameTaken` / `Error::NameInQueue`; only `PrimaryOwner`
-    // and `AlreadyOwner` come back as `Ok`.
+    // zbus 4 maps `Exists` / `InQueue` to error variants; only the
+    // primary-owner reply means this process owns the name.
     match conn
         .request_name_with_flags(name, RequestNameFlags::DoNotQueue.into())
         .await

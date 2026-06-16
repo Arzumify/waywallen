@@ -1,26 +1,3 @@
-//! Framed wire codec for `waywallen-display-v1` over a blocking
-//! `std::os::unix::net::UnixStream`.
-//!
-//! Wire frame:
-//!
-//! ```text
-//! [u16 LE opcode][u16 LE total_length][body...]
-//! ```
-//!
-//! where `total_length` includes the 4-byte header. Ancillary file
-//! descriptors ride along as SCM_RIGHTS on the same `sendmsg(2)` /
-//! `recvmsg(2)` call; their count must match the message's
-//! `expected_fds()`.
-//!
-//! Tokio / async integration is deferred: today the only in-tree user
-//! that needs this codec is `display::endpoint`, which already wraps
-//! its I/O in `tokio::task::spawn_blocking` (same model as
-//! `ipc::uds`). When a first-class async client appears we'll add a
-//! tokio adapter on top.
-//!
-//! All errors are surfaced via [`CodecError`]; this module never
-//! panics and never aborts.
-
 use super::generated::{DecodeError, Event, Request};
 use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags};
 use std::io::{IoSlice, IoSliceMut, Read};
@@ -33,8 +10,6 @@ pub const MAX_BODY_BYTES: usize = u16::MAX as usize - 4;
 
 /// Hard cap on SCM_RIGHTS fds per message. Matches the control-message
 /// scratch buffer size. Generous for current needs (max observed: one
-/// bind_buffers with ~8 planes) and bounded to keep the kernel cmsg
-/// buffer stack-allocatable.
 pub const MAX_FDS_PER_MSG: usize = 64;
 
 #[derive(Debug)]
@@ -92,7 +67,6 @@ pub type CodecResult<T> = Result<T, CodecError>;
 
 // ---------------------------------------------------------------------------
 // Send path
-// ---------------------------------------------------------------------------
 
 pub fn send_request(sock: &UnixStream, req: &Request, fds: &[RawFd]) -> CodecResult<()> {
     let expected = req.expected_fds();
@@ -162,7 +136,6 @@ fn write_framed(sock: &UnixStream, opcode: u16, body: &[u8], fds: &[RawFd]) -> C
 
 // ---------------------------------------------------------------------------
 // Receive path
-// ---------------------------------------------------------------------------
 
 pub fn recv_request(sock: &UnixStream) -> CodecResult<(Request, Vec<OwnedFd>)> {
     let (opcode, body, fds) = read_framed(sock)?;
@@ -192,9 +165,6 @@ pub fn recv_event(sock: &UnixStream) -> CodecResult<(Event, Vec<OwnedFd>)> {
 
 /// Read the 4-byte header (harvesting any ancillary fds that ride with
 /// it) then read exactly `total_length - 4` body bytes via `read_exact`.
-/// Back-to-back frames cannot leak fds because SCM_RIGHTS only ever
-/// attaches to the first byte of a frame and we always call recvmsg
-/// with a buffer ≤ the outstanding header bytes.
 fn read_framed(sock: &UnixStream) -> CodecResult<(u16, Vec<u8>, Vec<OwnedFd>)> {
     let mut hdr = [0u8; 4];
     let mut fds: Vec<OwnedFd> = Vec::new();
@@ -242,7 +212,6 @@ fn read_framed(sock: &UnixStream) -> CodecResult<(u16, Vec<u8>, Vec<OwnedFd>)> {
 
 // ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

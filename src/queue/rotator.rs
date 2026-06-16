@@ -1,11 +1,3 @@
-//! Rotation handle + watch wiring for the auto-rotation task.
-//!
-//! The handle stores the live [`RotationConfig`] in a
-//! `tokio::sync::watch` channel. The rotator task itself lives in
-//! `control.rs` because it needs `AppState` + `control::step`, which
-//! are private to the binary; this module is only the value types
-//! and the cheap-to-clone handle so other lib code can issue updates.
-
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -13,7 +5,6 @@ use tokio::sync::watch;
 
 /// Live rotation parameters. `kick` is a monotonic counter the
 /// rotator watches purely to reset its deadline; its value has no
-/// meaning beyond "something changed since the last tick".
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct RotationConfig {
     pub interval_secs: u32,

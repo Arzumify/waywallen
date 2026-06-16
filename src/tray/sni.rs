@@ -1,5 +1,3 @@
-//! `org.kde.StatusNotifierItem` served on `/StatusNotifierItem`.
-
 use std::sync::Arc;
 
 use zbus::{interface, zvariant::OwnedObjectPath, SignalContext};
@@ -21,9 +19,8 @@ impl StatusNotifierItem {
     }
 }
 
-/// Tooltip tuple: `(icon_name, icon_data, title, body)` where `icon_data`
-/// is `Vec<(width, height, ARGB32 bytes)>`. Empty slot keeps the host from
-/// drawing anything exotic.
+/// Tooltip tuple: `(icon_name, icon_data, title, body)`.
+/// Empty icon data keeps hosts from trying to render a custom pixmap.
 type ToolTip = (String, Vec<(i32, i32, Vec<u8>)>, String, String);
 
 #[interface(name = "org.kde.StatusNotifierItem")]

@@ -1,14 +1,3 @@
-//! Per-display autopause: decode the consumer's `window_state` bitmask
-//! into an "autopause requested?" boolean and apply the resume debounce
-//! that smooths bursty fullscreen toggles.
-//!
-//! The router owns the per-display [`State`] machine; this module is
-//! pure logic + bit constants. `decide` mirrors the modes of the old
-//! KDE wallpaper plugin's `Common.PauseMode` (now `AutopauseMode`),
-//! and the resume debounce mirrors the old `playTimer` — pause is
-//! immediate, but resuming is delayed by `resume_ms` so a brief flag
-//! drop doesn't flap the renderer.
-
 use crate::settings::AutopauseMode;
 
 /// Some mapped (non-minimized) window covers this display.
@@ -45,14 +34,11 @@ pub struct State {
     pub last_flags: u32,
     /// `decide(mode, last_flags)` — instantaneous raw signal.
     pub raw_want_pause: bool,
-    /// Effective signal consumed by `reconcile_lifecycle`. Equals
-    /// `raw_want_pause` immediately on pause transitions; on
-    /// pause→play it stays `true` until the resume timer fires.
+    /// Effective signal consumed by `reconcile_lifecycle`.
+    /// Pause applies immediately; resume may be debounced.
     pub requested: bool,
-    /// Bumped on every transition. A pending resume task carries the
-    /// generation snapshot taken when it was spawned, and is a no-op
-    /// on fire if the counter has advanced (i.e. a newer transition
-    /// invalidated it).
+    /// Bumped on every transition.
+    /// Pending resume tasks no-op when their snapshot is stale.
     pub gen: u64,
 }
 

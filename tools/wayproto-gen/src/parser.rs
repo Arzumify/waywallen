@@ -1,18 +1,3 @@
-//! Minimal XML parser for the waywallen-display protocol description.
-//!
-//! This is NOT a general-purpose XML parser. It handles exactly the
-//! subset used by `protocol/waywallen_display_v1.xml`:
-//!
-//!   - Optional `<?xml ...?>` declaration
-//!   - `<!-- ... -->` comments
-//!   - Element tags with attributes (`name="value"`, `name='value'`)
-//!   - Self-closing tags (`<tag ... />`)
-//!   - Nested elements
-//!   - No entities, no CDATA, no text content between siblings
-//!
-//! If the XML grows fancier features (namespaces, entities, etc.)
-//! replace this with a real parser.
-
 use std::fmt;
 
 #[derive(Debug)]
@@ -90,12 +75,8 @@ pub struct Message {
     pub fds: FdSpec,
 }
 
-/// Naming style for the daemon→peer (inbound-to-peer) direction.
-/// `<request>` keeps Wayland-style naming (`Request` enum, `WW_REQ_*`,
-/// `ww_req_*_t`). `<event_in>` switches to the inbound-event taxonomy
-/// (`EventIn` enum, `WW_EVT_IN_*`, `ww_evt_in_*_t`) used by the
-/// waywallen-ipc protocol where the daemon notifies renderer
-/// subprocesses.
+/// Naming style for the daemon-to-peer direction.
+/// `<request>` keeps Wayland-style enum and opcode names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InboundKind {
     Request,

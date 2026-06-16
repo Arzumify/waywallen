@@ -1,6 +1,3 @@
-//! `waywallen_display_demo` — minimal headless client that exercises
-//! the `waywallen-display-v1` wire protocol end-to-end.
-
 use anyhow::{anyhow, Context, Result};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -100,7 +97,6 @@ fn main() {
 
     // Reconnect loop: any session-level failure (connect refused,
     // daemon died, protocol mismatch, etc.) is logged and retried
-    // after 2 seconds.
     loop {
         match run_session(&sock_path, &args) {
             Ok(()) => {
@@ -272,11 +268,8 @@ fn run_session(sock_path: &Path, args: &Args) -> Result<()> {
                         fds.len()
                     ));
                 }
-                // Drop both fds — Phase 1 demo does not import the acquire
-                // fence and does not signal the release_syncobj. The
-                // OwnedFd destructors close them. The daemon's reaper
-                // (when wired up) will time out / observe the close and
-                // surface a warning.
+                // Drop both fds; this demo does not import acquire fences
+                // or signal release syncobjs.
                 drop(fds);
 
                 frames_seen += 1;

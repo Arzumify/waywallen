@@ -1,9 +1,3 @@
-//! WebSocket + protobuf control plane.
-//!
-//! Single `/` endpoint. Each connection carries length-prefixed-by-WS-frame
-//! `waywallen.control.v1.Request` / `Response` envelopes. All RPCs are
-//! multiplexed via `request_id` and the `payload` oneof.
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -30,16 +24,15 @@ use crate::routing::{
 };
 use crate::settings::{SettingsStore, WallpaperFilterState, WallpaperSortRuleState};
 use crate::tasks;
-use crate::wallpaper_properties::{
+use crate::wallpaper::properties::{
     dedupe_predefined_schema, is_daemon_display_property_key, user_property_default_wire_value,
     WallpaperLayoutOverride,
 };
-use crate::wallpaper_sort::apply_wallpaper_sorts;
+use crate::wallpaper::sort::apply_wallpaper_sorts;
 use crate::AppState;
 
-/// Bind the WebSocket control plane and return the actual local address
-/// (useful when binding to port 0 for OS-assigned ports).  The returned
-/// future runs the accept loop and never returns under normal operation.
+/// Bind the WebSocket control plane and return the actual local address.
+/// The returned future runs the accept loop.
 pub async fn bind(
     state: Arc<AppState>,
     addr: &str,
@@ -60,8 +53,7 @@ pub async fn serve(state: Arc<AppState>, addr: &str) -> Result<()> {
 }
 
 // Filter state ↔ pb conversion lives on `WallpaperFilterState` itself
-// (`to_pb` / `from_pb`) so both ws_server and control share the same
-// roundtrip. See `crate::settings`.
+// so ws_server and control share one round-trip implementation.
 
 async fn accept_loop(state: Arc<AppState>, listener: TcpListener) -> Result<()> {
     loop {
@@ -162,9 +154,8 @@ async fn handle_conn(
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                         log::warn!("ws {peer}: global event lag {n}");
-                        // Resync after lag — the snapshot is the
-                        // authority, transient events were the lossy
-                        // notifications.
+                        // Resync after lag; snapshots are authoritative,
+                        // while transient events are allowed to drop.
                         sink.send(Message::Binary(wrap_event(status_sync_event(&state)).encode_to_vec())).await?;
                         sink.send(Message::Binary(wrap_event(playlist_changed_event(&state).await).encode_to_vec())).await?;
                     }
@@ -239,7 +230,6 @@ async fn handle_conn(
 
 // ---------------------------------------------------------------------------
 // RouterEvent → pb::Event translation
-// ---------------------------------------------------------------------------
 
 fn renderer_def_to_pb(
     def: &crate::plugin::renderer_registry::RendererDef,
@@ -293,10 +283,8 @@ fn gpu_info_to_pb(g: &crate::gpu::GpuInfo) -> pb::GpuInfo {
 }
 
 fn display_snapshot_to_pb(s: DisplaySnapshot, settings: &SettingsStore) -> pb::DisplayInfo {
-    // The router snapshot already carries the display's effective
-    // layout, including any active wallpaper-local override. Settings
-    // are still consulted here for the persisted display override and
-    // alias fields.
+    // Router snapshots carry effective layout; settings are consulted only
+    // for persisted display override and alias fields.
     let layout_key: &str = s
         .instance_id
         .as_deref()
@@ -625,9 +613,7 @@ fn router_event_to_pb(e: RouterEvent, settings: &SettingsStore) -> pb::Event {
 }
 
 /// Snapshot daemon-side runtime state into a `StatusSync` server event.
-/// Pushed on WS connect, on every `GlobalEvent::StatusChanged`, and on
-/// any `TaskEvent`. Authoritative — the UI binds to its fields rather
-/// than counting transient start/end events.
+/// Pushed on WS connect, status changes, and task lifecycle events.
 fn status_sync_event(state: &Arc<AppState>) -> pb::Event {
     use std::sync::atomic::Ordering;
     let scan_in_progress = state.scan_in_progress.load(Ordering::SeqCst);
@@ -684,8 +670,7 @@ async fn playlist_changed_event(state: &Arc<AppState>) -> pb::Event {
 }
 
 /// Translate the subset of `GlobalEvent` variants the UI cares about
-/// into wire `pb::Event`s. Returns `None` for events that are
-/// daemon-internal (boot phase markers, restore lifecycle).
+/// into wire events. Returns `None` for daemon-internal events.
 fn global_event_to_pb(e: &GlobalEvent, state: &Arc<AppState>) -> Option<pb::Event> {
     match e {
         GlobalEvent::SyncFinished { count } => Some(pb::Event {
@@ -764,7 +749,6 @@ fn global_event_to_pb(e: &GlobalEvent, state: &Arc<AppState>) -> Option<pb::Even
 
 // ---------------------------------------------------------------------------
 // Dispatch
-// ---------------------------------------------------------------------------
 
 fn sanitize_path_segment(input: &str) -> String {
     let s: String = input
@@ -984,14 +968,7 @@ async fn dispatch_inner(
 
         Req::RendererSpawn(r) => {
             // Low-level RPC: caller hands in a single `metadata` map.
-            // Treat it as both the CLI argv extras (path / assets / …)
-            // and the Init.settings kv. This is loose by design — the
-            // RPC is for advanced/manual use; `WallpaperApply` is the
-            // intended end-user path and sources settings cleanly from
-            // the settings store.
-            //
-            // `r.fps` rides on `settings["fps"]` so the renderer sees
-            // it via `Init.settings` — the typed scalar is gone.
+            // Treat it as both CLI extras and Init.settings for manual use.
             let mut settings = r.metadata.clone();
             if r.fps != 0 {
                 settings.insert("fps".to_string(), r.fps.to_string());
@@ -1008,9 +985,7 @@ async fn dispatch_inner(
                 renderer_name: None,
                 user_properties_json: None,
             };
-            // renderer_manager returns the typed Error directly (spawn
-            // produces RendererSpawnFailed/NoRendererForType/RendererNotFound
-            // depending on the failure); just propagate.
+            // renderer_manager returns typed spawn errors directly.
             let id = state.renderer_manager.spawn(spawn_req).await?;
             if let Some(handle) = state.renderer_manager.get(&id).await {
                 state.router.register_renderer(handle).await;
@@ -1037,9 +1012,7 @@ async fn dispatch_inner(
                         }
                         None => (String::new(), 0, 0, 0, 0, 0),
                     };
-                // fps lives in the plugin section of the settings store
-                // now (`Settings::reconcile` already enforces the
-                // schema). 0 = unknown / unset.
+                // fps now lives in the reconciled plugin settings store.
                 let fps: u32 = state
                     .settings
                     .plugin(&name)
@@ -1194,7 +1167,7 @@ async fn dispatch_inner(
             // truth), fully populated — no in-memory snapshot.
             let all_entries = repo::load_entries(&state.db).await?;
 
-            let mut raw_entries: Vec<&crate::wallpaper_type::WallpaperEntry> = all_entries
+            let mut raw_entries: Vec<&crate::wallpaper::types::WallpaperEntry> = all_entries
                 .iter()
                 .filter(|e| r.wp_type.is_empty() || e.wp_type == r.wp_type)
                 .collect();
@@ -1202,12 +1175,8 @@ async fn dispatch_inner(
                 raw_entries.retain(|e| !r.skip_types.iter().any(|t| t == &e.wp_type));
             }
 
-            // Inject the free-text search as an extra filter rule
-            // placed in its own group. `build_grouped_condition` AND-s
-            // any group not referenced by a `FilterLogic` into the
-            // outer condition, so a fresh group id with no matching
-            // logic edges combines via AND with whatever the user-built
-            // rules already say.
+            // Inject free-text search as its own filter group so it ANDs
+            // with any user-authored rule graph.
             let mut filters_with_search = r.filters.clone();
             let search_text = r.search_text.trim();
             if !search_text.is_empty() {
@@ -1286,7 +1255,7 @@ async fn dispatch_inner(
                 )
             };
 
-            let mut filtered_entries: Vec<&crate::wallpaper_type::WallpaperEntry> =
+            let mut filtered_entries: Vec<&crate::wallpaper::types::WallpaperEntry> =
                 if let Some(matched_keys) = matched_keys.as_ref() {
                     raw_entries
                         .into_iter()
@@ -1311,7 +1280,7 @@ async fn dispatch_inner(
             };
             log::info!("WallpaperList: total={total} returning offset={offset} take={take}");
 
-            let page_entries: Vec<&crate::wallpaper_type::WallpaperEntry> = filtered_entries
+            let page_entries: Vec<&crate::wallpaper::types::WallpaperEntry> = filtered_entries
                 .into_iter()
                 .skip(offset)
                 .take(take)
@@ -1322,11 +1291,8 @@ async fn dispatch_inner(
             let page_item_ids: Vec<i64> = page_entries.iter().map(|e| e.item_id).collect();
             let tag_map = repo::list_tags_for_items(&state.db, &page_item_ids).await?;
 
-            // WallpaperList intentionally does NOT fill user-property
-            // schema/overrides — the schema is renderer-published (only
-            // available for an actively-running wallpaper) and the
-            // overrides need a per-item DB read. Detail panel grabs
-            // both via WallpaperGet.
+            // WallpaperList skips property schema/overrides; WallpaperGet
+            // loads those on demand per item.
             let entries: Vec<pb::WallpaperEntry> = page_entries
                 .into_iter()
                 .map(|e| {
@@ -1348,9 +1314,8 @@ async fn dispatch_inner(
             };
             let entry = entry.ok_or_else(|| Error::WallpaperNotFound(r.wallpaper_id.clone()))?;
             let tags = entry.tags.clone();
-            // Source plugin owns the property schema — read project.json
-            // (or equivalent) on demand. Empty string when the plugin
-            // doesn't expose properties or this entry has none.
+            // Source plugin owns the property schema; empty string means
+            // the plugin exposes no properties for this item.
             let schema = state
                 .source_manager
                 .lock()
@@ -1410,9 +1375,8 @@ async fn dispatch_inner(
                     String::from("offline")
                 }
             } else {
-                // Push live: unknown keys on the renderer side go
-                // through setPropertyString -> MainSetProperty ->
-                // shader cbuffer.
+                // Push live; unknown keys are left for renderer-side property
+                // dispatch to accept or ignore.
                 if let Some(h) = live_renderer {
                     let value = if r.value.is_empty() {
                         let schema = state
@@ -1511,11 +1475,7 @@ async fn dispatch_inner(
 
         Req::WallpaperScan(_) => {
             // Fire-and-forget: kick the rescan onto the TaskManager and
-            // return immediately. Completion (or failure) reaches the
-            // UI via the `WallpaperSyncFinished` server event, so the
-            // request is just an ack. `spawn_async_unique` collapses
-            // overlapping triggers (rapid clicks, library churn) under
-            // one in-flight scan.
+            // return immediately; completion arrives via server events.
             let scan_state = state.clone();
             state.tasks.spawn_async_unique(
                 tasks::TaskKind::Generic,
@@ -1881,9 +1841,8 @@ async fn dispatch_inner(
             if state.router.display_count().await == 0 {
                 return Err(Error::NoDisplayRegistered);
             }
-            // Renderer pick: empty renderer_name uses priority resolve
-            // (current behaviour); explicit name must match a registered
-            // renderer that supports this wallpaper's type.
+            // Empty renderer_name uses priority resolve; explicit names must
+            // resolve to a renderer that supports this wallpaper type.
             let registry = state.renderer_manager.registry();
             let plugin_name: String = if r.renderer_name.is_empty() {
                 registry
@@ -1902,27 +1861,17 @@ async fn dispatch_inner(
                 }
                 def.name.clone()
             };
-            // Render-target size is the renderer's own decision
-            // (content native + `resolution` plugin setting); the
-            // daemon no longer forwards an extent hint. Per-plugin
-            // settings flow into spawn metadata as baseline kv;
-            // per-wallpaper metadata wins on collisions.
+            // Render-target size is the renderer's decision from content
+            // native size and plugin settings.
             let plugin_kv = state.settings.plugin(&plugin_name).unwrap_or_default();
 
             // Renderer-owned per-item user-property overrides ride as
             // a separate JSON payload in `Init.user_properties`.
-            // Daemon-owned predefined display keys become
-            // wallpaper-local layout overrides on the router instead.
             let (user_properties_json, wallpaper_layout_override) =
                 repo::get_wallpaper_render_properties(&state.db, entry.item_id).await?;
 
-            // SPAWN_VERSION 3: extras (canonical `path` + manifest
-            // whitelist like `assets`/`workshop_id`) ride as CLI
-            // argv. Ask the source plugin for the dict via its
-            // `extras(entry)` Lua callback. Lua failures used to fall
-            // back to `entry.metadata` silently with a warn; now they
-            // surface as `SourceExtrasFailed` so the UI shows the real
-            // problem instead of a confusing "wrong settings" follow-up.
+            // Source plugin extras supply canonical path and allowlisted CLI
+            // argv for the renderer subprocess.
             let extras = state
                 .source_manager
                 .lock()
@@ -1935,9 +1884,8 @@ async fn dispatch_inner(
                 extras,
                 settings: plugin_kv,
                 test_pattern: false,
-                // Pin reuse + spawn to the explicit pick when the
-                // request named one; otherwise let the manager fall
-                // back to priority resolve (legacy behaviour).
+                // Pin reuse and spawn to the explicit pick when requested;
+                // otherwise let the manager resolve by priority.
                 renderer_name: if r.renderer_name.is_empty() {
                     None
                 } else {
@@ -1946,12 +1894,8 @@ async fn dispatch_inner(
                 user_properties_json,
             };
 
-            // Reuse an existing renderer when wp_type / extent / plugin
-            // / extras (path) all match and the handle hasn't been
-            // marked stale by an identity-tagged SettingsSet. Plugin
-            // settings live in the settings store and are pushed by
-            // SettingsSet's own broadcast, so the reuse path doesn't
-            // need to dispatch ApplySettings here.
+            // Reuse a live renderer whose spawn identity matches.
+            // Settings changes are pushed by SettingsSet, not by apply.
             let renderer_id = match state.renderer_manager.find_reusable(&spawn_req).await {
                 Some(existing_id) => {
                     log::info!(
@@ -1962,11 +1906,7 @@ async fn dispatch_inner(
                 }
                 None => {
                     // No reuse — a fresh renderer is about to spawn.
-                    // Stop any pre-existing renderer whose every
-                    // enabled display link is in the relink target
-                    // set BEFORE the new one is spawned, so peak GPU
-                    // memory stays at one working set's worth instead
-                    // of overlapping two.
+                    // Stop fully replaced renderers first to cap peak GPU use.
                     let target: Option<&[u64]> = if r.display_ids.is_empty() {
                         None
                     } else {
@@ -1979,9 +1919,8 @@ async fn dispatch_inner(
                             to_stop.len(),
                             to_stop,
                         );
-                        // Orderly shutdown: tells displays to unbind,
-                        // waits for ack, then graceful Shutdown of the
-                        // producer. See stop_renderers_orderly doc.
+                        // Orderly shutdown unbinds displays before graceful
+                        // producer shutdown.
                         state
                             .router
                             .stop_renderers_orderly(&to_stop, std::time::Duration::from_secs(1))
@@ -2019,9 +1958,8 @@ async fn dispatch_inner(
                 return Err(e);
             }
 
-            // Mirror the persistence side-effects of
-            // `control::apply_wallpaper_by_id`: pin the playlist cursor
-            // so the next sequential/random step has an anchor.
+            // Mirror control::apply_wallpaper_by_id by pinning the playlist
+            // cursor to the applied wallpaper.
             {
                 let mut q = state.queue.lock().await;
                 q.current = Some(entry.item_id.to_string());
@@ -2043,10 +1981,6 @@ async fn dispatch_inner(
             }
             // Per-display: empty display_ids means "all currently
             // registered displays" (matches the relink branch above).
-            // Specific list means only those. The global write below
-            // stays as the fallback for displays that have no record
-            // yet (e.g. a brand-new monitor connected for the first
-            // time after restart).
             let target_ids: Vec<crate::scheduler::DisplayId> = if r.display_ids.is_empty() {
                 state
                     .router
@@ -2102,17 +2036,14 @@ async fn dispatch_inner(
 
         Req::SettingsSet(r) => {
             // Full replace. Missing `global` falls back to current
-            // values so callers can update plugins alone by sending
-            // None for global.
+            // values so callers can update only plugin settings.
             let mut new_plugins: std::collections::HashMap<
                 String,
                 std::collections::HashMap<String, String>,
             > = r.plugins.into_iter().map(|(k, v)| (k, v.values)).collect();
 
             // Schema validation up-front. Reject the entire RPC if any
-            // declared key fails type / bounds / choices — partial
-            // commits would leave the toml in a state that doesn't
-            // match what the caller asked for.
+            // declared key fails type, bounds, or choices.
             {
                 let registry = state.renderer_manager.registry();
                 for (plugin_name, kv) in new_plugins.iter_mut() {
@@ -2140,9 +2071,7 @@ async fn dispatch_inner(
                 }
             }
 
-            // Snapshot the previous per-plugin settings so we can diff
-            // against the new ones and dispatch ApplySettings to any
-            // live renderer whose plugin name matches.
+            // Snapshot prior plugin settings to compute live-renderer deltas.
             let previous_plugins = state.settings.snapshot().plugins;
             let previous_filter = state.settings.snapshot().global.wallpaper_filter;
             // Snapshot pre-mutation layout defaults so we know whether
@@ -2197,8 +2126,8 @@ async fn dispatch_inner(
                     previous_filter,
                     new_filter
                 );
-                // Filter change invalidates the queue's shuffle round
-                // (candidate set changed); next step rematerializes.
+                // Filter change invalidates the queue's shuffle round;
+                // the next pick materializes the new candidate set.
                 state.queue.lock().await.reset_shuffle_round();
             }
             let new_layout = state.settings.snapshot().global.layout.clone();
@@ -2209,8 +2138,7 @@ async fn dispatch_inner(
                 let snap = state.router.snapshot_displays().await;
                 state.router.emit_displays_replace_for_settings_change(snap);
             }
-            // Hot-apply queue mode + rotation interval. Autopause has no
-            // hot-apply step — `router::resolved_autopause` re-reads
+            // Hot-apply queue mode and rotation interval; autopause re-reads
             // settings on every window-state event.
             let new_queue_mode = state.settings.snapshot().global.queue_mode.clone();
             if new_queue_mode != prev_queue_mode {
@@ -2222,11 +2150,7 @@ async fn dispatch_inner(
             if new_rotation_secs != prev_rotation_secs {
                 state.rotation.set_interval(new_rotation_secs);
             }
-            // Step 4: live renderer hot-reload.
-            // For each plugin that actually changed, walk live
-            // renderers for that plugin name and push the delta.
-            // Identity-tagged keys produce a warn log (would require
-            // a respawn, which is too invasive for a settings RPC).
+            // Hot-reload live renderers for plugins whose settings changed.
             let mut plugin_names_changed: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
             for (name, values) in &new_plugins {
@@ -2239,12 +2163,8 @@ async fn dispatch_inner(
                     plugin_names_changed.insert(name.clone());
                 }
             }
-            // Hot-reload failures used to be `log::warn`-and-continue.
-            // Now we collect every per-renderer failure during the
-            // walk; if any happened, propagate one aggregate
-            // `SettingsApplyFailed` after publishing the change event
-            // (settings are persisted regardless — the caller still
-            // needs to know hot-reload was incomplete).
+            // Collect hot-reload failures and report them after publishing
+            // the persisted settings change.
             let mut apply_failures: Vec<String> = Vec::new();
             for plugin_name in plugin_names_changed {
                 let def = state
@@ -2261,12 +2181,8 @@ async fn dispatch_inner(
                     .cloned()
                     .unwrap_or_default();
 
-                // Forward every key the user actually changed (within
-                // the manifest schema) to all live renderers of this
-                // plugin. The renderer applies what it can hot-reload
-                // and ignores the rest; whatever it didn't accept will
-                // take effect on its next spawn via `Init.settings`,
-                // which sources the same settings store.
+                // Forward changed schema keys to live renderers of this
+                // plugin; other keys apply on next spawn.
                 let kv: Vec<(String, String)> = new_kv
                     .iter()
                     .filter(|(k, v)| def.settings.contains_key(*k) && old_kv.get(*k) != Some(v))
@@ -2327,11 +2243,8 @@ async fn dispatch_inner(
             state.events.publish(GlobalEvent::LibrariesAdded {
                 paths: vec![added_path],
             });
-            // Rescan so the new library's items flow into the
-            // in-memory snapshot + DB without waiting for the
-            // next daemon restart. Shares `"scan/refresh"`
-            // dedup key with manual scans — rapid LibraryAdd
-            // bursts collapse into a single in-flight scan.
+            // Rescan immediately so the new library reaches the DB and UI
+            // without waiting for restart.
             let rescan_state = state.clone();
             state.tasks.spawn_async_unique(
                 tasks::TaskKind::Generic,
@@ -2520,8 +2433,7 @@ fn queue_mode_to_pb_playlist(m: crate::queue::Mode) -> i32 {
 }
 
 /// Decode the proto enum integer into the internal `queue::Mode`.
-/// `Unspecified` (0) and any unrecognized variant default to
-/// Sequential — that's what a client that forgot the field meant.
+/// `Unspecified` and unknown values default to Sequential.
 fn pb_mode_to_enum(v: i32) -> queue::Mode {
     match pb::PlaylistMode::try_from(v).unwrap_or(pb::PlaylistMode::Unspecified) {
         pb::PlaylistMode::Shuffle => queue::Mode::Shuffle,
@@ -2541,11 +2453,9 @@ fn mode_str_to_pb(s: &str) -> pb::PlaylistMode {
 
 // ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 /// Encode a dispatch result onto the wire. Thin wrapper around
-/// `Error::to_response` / `ok_response` from `crate::error`; the dispatch
-/// boundary is the only place the daemon-side `Error` becomes wire bytes.
+/// `Error::to_response` / `ok_response` from `crate::error`.
 fn build_response(request_id: u64, result: Result<pb::response::Payload, Error>) -> pb::Response {
     match result {
         Ok(payload) => ok_response(request_id, payload),
@@ -2567,7 +2477,7 @@ pub fn wrap_event(evt: pb::Event) -> pb::ServerFrame {
 }
 
 fn entry_to_pb(
-    e: &crate::wallpaper_type::WallpaperEntry,
+    e: &crate::wallpaper::types::WallpaperEntry,
     tags: Vec<String>,
     user_properties_schema: String,
     user_property_overrides: String,

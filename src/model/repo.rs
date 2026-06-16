@@ -1,5 +1,3 @@
-//! Typed CRUD helpers on top of the SeaORM entities.
-
 use std::collections::{HashMap, HashSet};
 
 use anyhow::anyhow;
@@ -20,11 +18,9 @@ use sea_orm::ActiveValue::NotSet;
 
 // ---------------------------------------------------------------------------
 // source_plugin
-// ---------------------------------------------------------------------------
 
 /// Insert or refresh a `source_plugin` row keyed by `name`. `version`
-/// is updated on every call so a plugin bumping its version is
-/// reflected without operator action.
+/// is updated on every call so plugin upgrades are reflected in DB state.
 pub async fn upsert_plugin(
     db: &DatabaseConnection,
     name: &str,
@@ -95,7 +91,6 @@ pub async fn remove_plugin(db: &DatabaseConnection, id: i64) -> Result<u64> {
 
 // ---------------------------------------------------------------------------
 // library
-// ---------------------------------------------------------------------------
 
 pub async fn add_library(
     db: &DatabaseConnection,
@@ -155,7 +150,6 @@ pub async fn remove_library(db: &DatabaseConnection, id: i64) -> Result<u64> {
 
 /// Decode the JSON blob in `library.metadata` into a flat string map.
 /// Invalid or empty JSON falls back to an empty map so callers never
-/// have to deal with corruption — we always present a usable view.
 pub async fn get_library_metadata(
     db: &DatabaseConnection,
     library_id: i64,
@@ -252,7 +246,6 @@ pub async fn delete_libraries_missing(
 
 // ---------------------------------------------------------------------------
 // item
-// ---------------------------------------------------------------------------
 
 /// Payload for [`upsert_item`]. `path` / `preview_path` are both
 /// relative to `library.path` — callers own the stripping.
@@ -275,14 +268,6 @@ pub struct ItemUpsertArgs<'a> {
 
 /// Upsert an item keyed by `(library_id, path)`. Every non-key column
 /// (except `create_at`) is refreshed on conflict — new scan is truth.
-///
-/// Timestamp semantics:
-/// - `create_at`: set on first INSERT, preserved on every conflict.
-/// - `update_at`: refreshed on every upsert.
-/// - `sync_at`: refreshed on every upsert (counts as "we saw it").
-///
-/// Returns the stored [`item::Model`] — the caller can use `model.id`
-/// for tag linkage.
 pub async fn upsert_item(db: &DatabaseConnection, args: ItemUpsertArgs<'_>) -> Result<item::Model> {
     let ty_norm = args.ty.to_lowercase();
     let now = now_ms();
@@ -308,12 +293,6 @@ pub async fn upsert_item(db: &DatabaseConnection, args: ItemUpsertArgs<'_>) -> R
         .on_conflict(
             // CreateAt deliberately omitted from update_columns so the
             // first-insert value survives every subsequent upsert. The
-            // probe-filled media-meta columns (size/width/height/
-            // content_rating) use COALESCE so a sync pass that didn't
-            // pre-fill them (plugin returned None) does not wipe a
-            // value the probe task already wrote — the original
-            // unconditional overwrite caused first-query-after-restart
-            // to return size=0 until the probe re-ran asynchronously.
             OnConflict::columns([item::Column::LibraryId, item::Column::Path])
                 .update_columns([
                     item::Column::Ty,
@@ -378,13 +357,11 @@ pub async fn list_items_all(db: &DatabaseConnection) -> Result<Vec<item::Model>>
 
 /// Reconstruct a `WallpaperEntry` from a DB `item` row + its owning
 /// library path and plugin name. `item.path`/`preview_path` are stored
-/// relative to the library; `resource`/`preview` are rebuilt absolute.
-/// Tags are NOT loaded here — callers batch them via `item.id`.
 fn entry_from_item(
     it: item::Model,
     library_path: &str,
     plugin_name: &str,
-) -> crate::wallpaper_type::WallpaperEntry {
+) -> crate::wallpaper::types::WallpaperEntry {
     use std::path::Path;
     let resource = Path::new(library_path)
         .join(&it.path)
@@ -396,7 +373,7 @@ fn entry_from_item(
             .to_string_lossy()
             .into_owned()
     });
-    crate::wallpaper_type::WallpaperEntry {
+    crate::wallpaper::types::WallpaperEntry {
         item_id: it.id,
         name: it.display_name,
         wp_type: it.ty,
@@ -417,10 +394,9 @@ fn entry_from_item(
 
 /// All items as fully-populated `WallpaperEntry` values, rebuilt from
 /// the DB (the read source of truth). Stable `(library_id, path)` order.
-/// Tags are left empty — callers batch-load them per page via `item.id`.
 pub async fn load_entries(
     db: &DatabaseConnection,
-) -> Result<Vec<crate::wallpaper_type::WallpaperEntry>> {
+) -> Result<Vec<crate::wallpaper::types::WallpaperEntry>> {
     let lib_path: HashMap<i64, String> = list_libraries(db)
         .await?
         .into_iter()
@@ -446,7 +422,7 @@ pub async fn load_entries(
 pub async fn get_entry(
     db: &DatabaseConnection,
     item_id: i64,
-) -> Result<Option<crate::wallpaper_type::WallpaperEntry>> {
+) -> Result<Option<crate::wallpaper::types::WallpaperEntry>> {
     let row = item::Entity::find_by_id(item_id)
         .find_also_related(library::Entity)
         .one(db)
@@ -493,7 +469,6 @@ pub async fn list_item_keys_by_wallpaper_filters(
 
 /// Queue iteration row: enough for the caller to bridge to a
 /// `WallpaperEntry` via library_root + relative path, and to anchor
-/// the cursor on a stable DB id.
 #[derive(Debug, Clone)]
 pub struct QueueRow {
     pub item_id: i64,
@@ -578,7 +553,6 @@ pub async fn random_item_by_filter(
 
 /// Resolve an item by `(library.path, item.path)`. Used to bridge
 /// snapshot entries to DB rows after `WallpaperApply` (so the queue's
-/// `last_db_id` cursor tracks manual applies).
 pub async fn find_item_by_library_path(
     db: &DatabaseConnection,
     library_path: &str,
@@ -668,13 +642,8 @@ pub async fn has_item_by_plugin_external_id(
     )
 }
 
-/// Sweep stale items: delete every item in `library_ids` whose
-/// `sync_at` is older than `before` (the timestamp captured at the
-/// start of the sync round). Items the round re-saw were stamped
-/// `>= before` and survive; items not seen this round are pruned.
-/// Scoping to `library_ids` (only the libraries actually visited and
-/// present this round) protects items of momentarily-unreachable
-/// libraries from being wiped.
+/// Sweep stale items in `library_ids`.
+/// Deletes rows with `sync_at` older than the pre-sync timestamp.
 pub async fn delete_items_synced_before(
     db: &DatabaseConnection,
     library_ids: &[i64],
@@ -694,10 +663,6 @@ pub async fn delete_items_synced_before(
 
 /// Items needing either a stat-tier refresh OR a media-tier probe.
 ///
-/// Items where the stat tier still has work to do: never stat'd or
-/// missing a size value (e.g. plugin-inserted entries that didn't
-/// pre-fill size). Stat has no cooldown — once `stat_at` and `size` are
-/// set, the row drops out until a refresh re-imports it.
 pub async fn list_items_needing_stat(
     db: &DatabaseConnection,
 ) -> Result<Vec<(item::Model, String)>> {
@@ -722,19 +687,6 @@ pub async fn list_items_needing_stat(
 
 /// Items where the media tier still has work. The candidate set is
 /// scoped at the SQL layer so non-media items (scene, web, etc.) never
-/// reach the caller:
-///
-/// ```text
-/// (ty IN ('image', 'video'))
-///   AND (path LIKE '%.<ext>' for ext IN probable_exts)
-///   AND (width IS NULL
-///        OR height IS NULL
-///        OR probed_at IS NULL
-///        OR modified_at IS NULL
-///        OR probed_at < modified_at)
-/// ```
-///
-/// `probable_exts` items must be lowercase, no leading dot.
 pub async fn list_items_needing_probe(
     db: &DatabaseConnection,
     probable_exts: &[&str],
@@ -783,9 +735,7 @@ pub struct ItemWriteOutcome {
 }
 
 /// Tier-1 stat result: writes `size`, `modified_at`, `stat_at`. Bumps
-/// `update_at` only when size or modified_at actually changed; a no-op
-/// stat (file unchanged) still stamps `stat_at` so the cooldown filter
-/// knows we tried.
+/// `update_at` only when size or modified_at actually changed.
 pub async fn update_item_stat<C: ConnectionTrait>(
     db: &C,
     id: i64,
@@ -820,14 +770,7 @@ pub async fn update_item_stat<C: ConnectionTrait>(
 }
 
 /// Tier-2 media probe result: writes `width`, `height`, and `probed_at`.
-/// Probe fallback policy:
-///   1. Use `meta.{width,height}` if libavformat returned one.
-///   2. Else fall back to whatever was already in the row (don't drop a
-///      successful earlier value because this run came back empty).
-///   3. Else write `0` — distinguishes "probed but failed" from
-///      "never probed", so `list_items_needing_probe`'s `width IS NULL`
-///      arm doesn't keep retrying the same broken file.
-/// `update_at` is bumped only when at least one column actually changed.
+/// Missing probe fields preserve existing dimensions.
 pub async fn update_item_media<C: ConnectionTrait>(
     db: &C,
     id: i64,
@@ -872,12 +815,9 @@ pub async fn update_item_media<C: ConnectionTrait>(
 
 // ---------------------------------------------------------------------------
 // tag / item_tag
-// ---------------------------------------------------------------------------
 
 /// Upsert tags by name. SQLite `COLLATE NOCASE` makes the unique
-/// index case-insensitive so "Anime" / "anime" collapse to one row
-/// (first-seen casing wins). Returns models for every input name in
-/// arbitrary order, deduped.
+/// index case-insensitive, so differently cased duplicates collapse.
 pub async fn upsert_tags(db: &DatabaseConnection, names: &[String]) -> Result<Vec<tag::Model>> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut unique_inputs: Vec<&str> = Vec::new();
@@ -1004,7 +944,7 @@ pub async fn get_user_property_overrides(
         return Ok(HashMap::new());
     };
     match serde_json::from_str::<HashMap<String, String>>(&raw) {
-        Ok(m) => Ok(crate::wallpaper_properties::normalize_user_property_overrides(m)),
+        Ok(m) => Ok(crate::wallpaper::properties::normalize_user_property_overrides(m)),
         Err(e) => {
             log::warn!(
                 "item {item_id}: user_property_overrides JSON unparseable ({e}); treating as empty"
@@ -1015,8 +955,7 @@ pub async fn get_user_property_overrides(
 }
 
 /// Read the raw `user_property_overrides` column as JSON text after
-/// canonicalising known predefined keys. Values stay untouched so the
-/// renderer can do its own typed decoding.
+/// canonicalising known predefined keys without rewriting values.
 pub async fn get_user_property_overrides_raw(
     db: &DatabaseConnection,
     item_id: i64,
@@ -1027,18 +966,18 @@ pub async fn get_user_property_overrides_raw(
         .with_context(|| format!("select item by id={item_id} for raw overrides"))?;
     Ok(row
         .and_then(|it| it.user_property_overrides)
-        .map(|raw| crate::wallpaper_properties::normalize_user_property_overrides_json(&raw)))
+        .map(|raw| crate::wallpaper::properties::normalize_user_property_overrides_json(&raw)))
 }
 
 fn parse_wallpaper_layout_override_raw(
     item_id: i64,
     raw: Option<&str>,
-) -> Option<crate::wallpaper_properties::WallpaperLayoutOverride> {
+) -> Option<crate::wallpaper::properties::WallpaperLayoutOverride> {
     let raw = raw?.trim();
     if raw.is_empty() {
         return None;
     }
-    let parsed = crate::wallpaper_properties::wallpaper_layout_override_from_json(raw);
+    let parsed = crate::wallpaper::properties::wallpaper_layout_override_from_json(raw);
     if parsed.is_none() {
         log::warn!("item {item_id}: wallpaper_layout_override JSON unparseable; ignoring");
     }
@@ -1046,15 +985,13 @@ fn parse_wallpaper_layout_override_raw(
 }
 
 /// Read renderer-owned user properties and daemon-owned layout data for
-/// renderer spawn/apply paths. The new `wallpaper_layout_override`
-/// column wins; old daemon layout keys inside `user_property_overrides`
-/// remain readable for compatibility.
+/// renderer spawn/apply paths.
 pub async fn get_wallpaper_render_properties(
     db: &DatabaseConnection,
     item_id: i64,
 ) -> Result<(
     Option<String>,
-    crate::wallpaper_properties::WallpaperLayoutOverride,
+    crate::wallpaper::properties::WallpaperLayoutOverride,
 )> {
     let row = item::Entity::find_by_id(item_id)
         .one(db)
@@ -1066,9 +1003,9 @@ pub async fn get_wallpaper_render_properties(
     let raw_user_properties = item
         .user_property_overrides
         .as_deref()
-        .map(crate::wallpaper_properties::normalize_user_property_overrides_json);
+        .map(crate::wallpaper::properties::normalize_user_property_overrides_json);
     let (renderer_json, legacy_layout) =
-        crate::wallpaper_properties::split_renderer_properties(raw_user_properties.as_deref());
+        crate::wallpaper::properties::split_renderer_properties(raw_user_properties.as_deref());
     let layout =
         parse_wallpaper_layout_override_raw(item_id, item.wallpaper_layout_override.as_deref())
             .unwrap_or(legacy_layout);
@@ -1080,7 +1017,7 @@ pub async fn get_wallpaper_render_properties(
 pub async fn get_wallpaper_layout_override_with_legacy(
     db: &DatabaseConnection,
     item_id: i64,
-) -> Result<Option<crate::wallpaper_properties::WallpaperLayoutOverride>> {
+) -> Result<Option<crate::wallpaper::properties::WallpaperLayoutOverride>> {
     let (_, layout) = get_wallpaper_render_properties(db, item_id).await?;
     Ok((!layout.is_empty()).then_some(layout))
 }
@@ -1092,12 +1029,12 @@ pub async fn set_wallpaper_layout_override(
 ) -> Result<()> {
     let clearing = layout.is_none();
     let serialized = layout
-        .map(crate::wallpaper_properties::wallpaper_layout_override_to_json)
+        .map(crate::wallpaper::properties::wallpaper_layout_override_to_json)
         .transpose()
         .context("serialize wallpaper_layout_override")?;
     let user_property_overrides = if clearing {
         let mut current = get_user_property_overrides(db, item_id).await?;
-        current.retain(|k, _| !crate::wallpaper_properties::is_daemon_display_property_key(k));
+        current.retain(|k, _| !crate::wallpaper::properties::is_daemon_display_property_key(k));
         let serialized = if current.is_empty() {
             None
         } else {
@@ -1121,9 +1058,7 @@ pub async fn set_wallpaper_layout_override(
 }
 
 /// Merge `kv` into the item's override map and rewrite the column.
-/// Keys not in `kv` are preserved; keys in `kv` with an empty value
-/// are removed (a clear). The whole row is rewritten with a single
-/// UPDATE.
+/// Empty values remove keys; other existing keys are preserved.
 pub async fn merge_user_property_overrides(
     db: &DatabaseConnection,
     item_id: i64,
@@ -1131,7 +1066,7 @@ pub async fn merge_user_property_overrides(
 ) -> Result<()> {
     let mut current = get_user_property_overrides(db, item_id).await?;
     for (k, v) in kv {
-        let key = crate::wallpaper_properties::canonical_user_property_key(k);
+        let key = crate::wallpaper::properties::canonical_user_property_key(k);
         if v.is_empty() {
             current.remove(key);
         } else {
@@ -1156,8 +1091,7 @@ pub async fn merge_user_property_overrides(
 }
 
 /// Batch variant of `list_tags_of_item`: one round-trip resolving the
-/// tag set for every requested item, grouped by item id. Items without
-/// any tag simply do not appear in the map.
+/// tag set for every requested item, grouped by item id.
 pub async fn list_tags_for_items(
     db: &DatabaseConnection,
     item_ids: &[i64],
@@ -1312,7 +1246,6 @@ mod tests {
 
         // Re-upserting with None must preserve the prior probe-filled
         // values — otherwise plugin re-scans clobber size/width/height
-        // until the probe scheduler runs again.
         let second = upsert_item(
             &db,
             ItemUpsertArgs {
@@ -1524,7 +1457,6 @@ mod tests {
         let _ = only_first; // unused; checking via direct count above
                             // Singleton via DB-level filter would need column-equality
                             // helpers we don't have here; the count assertion is enough
-                            // to lock in the precondition `random_item_by_filter` relies on.
         let _ = ids;
     }
 

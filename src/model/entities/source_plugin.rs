@@ -1,6 +1,3 @@
-//! `source_plugin` table — one row per loaded source plugin. `name` is
-//! the canonical key (matches `info().name` from Lua plugins).
-
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]

@@ -1,8 +1,3 @@
-//! `com.canonical.dbusmenu` served on `/MenuBar`.
-//!
-//! Hand-rolled against the canonical XML (GetLayout returns
-//! `u(ia{sv}av)` where each `av` element is a `v<(ia{sv}av)>`).
-
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -15,8 +10,6 @@ use crate::AppState;
 
 /// Monotonically-increasing revision used in `GetLayout` replies and
 /// `LayoutUpdated` signals. KDE Plasma dedupes signal-driven re-fetches
-/// against the last-seen revision; sending the same value twice makes
-/// the menu look frozen after the user toggles a radio / checkmark.
 static LAYOUT_REVISION: AtomicU32 = AtomicU32::new(1);
 
 fn bump_revision() -> u32 {
@@ -99,8 +92,6 @@ impl DBusMenu {
 
     /// Return the whole tree; `parent_id` and `recursion_depth` are
     /// honoured loosely — the menu is tiny so we always serve the root.
-    /// Async so we can read live shuffle/rotation state under the
-    /// `tokio::Mutex` for checkmark/radio rendering.
     async fn get_layout(
         &self,
         parent_id: i32,
@@ -205,9 +196,8 @@ impl DBusMenu {
         &self,
         events: Vec<(i32, String, OwnedValue, u32)>,
     ) -> zbus::fdo::Result<Vec<i32>> {
-        // Acknowledge every event synchronously; actual dispatch happens
-        // via `event` for hosts that send them individually. Hosts that
-        // only use EventGroup are rare but we still accept the call.
+        // Acknowledge every event synchronously.
+        // Actual dispatch still happens for clicked events.
         let app = self.app.clone();
         for (id, kind, _, _) in events.iter() {
             if kind != "clicked" {
@@ -254,21 +244,17 @@ impl DBusMenu {
 
 // ---------------------------------------------------------------------------
 // Live menu state
-// ---------------------------------------------------------------------------
 
-/// Snapshot of mutable state we need at menu-render time. Captured
-/// synchronously per request so we don't hold any locks across the
-/// `OwnedValue` construction below (which can otherwise blow up the
-/// future size).
+/// Snapshot of mutable state needed at menu-render time.
+/// Captured synchronously so menu building holds no locks.
 struct MenuState {
     is_shuffle: bool,
     rotation_secs: u32,
 }
 
 async fn snapshot_menu_state(app: &Arc<AppState>) -> MenuState {
-    // Read from settings — the canonical source. Queue's in-memory
-    // mode matches (Phase 5 keeps them in sync), but settings stays
-    // truthful even if the queue was just reset / not yet restored.
+    // Read from settings, the canonical source for persisted menu state.
+    // Queue memory is kept in sync by control-plane updates.
     let g = app.settings.global();
     MenuState {
         is_shuffle: g.queue_mode == "shuffle",
@@ -278,10 +264,6 @@ async fn snapshot_menu_state(app: &Arc<AppState>) -> MenuState {
 
 /// Best-effort `LayoutUpdated` emission. Called from `control::*`
 /// helpers when state that affects checkmark / radio rendering changes
-/// (mode toggle, rotation interval). Without this the radios in the
-/// Rotate submenu visually stack — KDE only re-fetches on menu
-/// re-open, so a single click while the menu is open looks
-/// multi-select.
 pub async fn notify_menu_changed(app: &Arc<AppState>) {
     let conn = match app.dbus_conn.lock().unwrap().clone() {
         Some(c) => c,
@@ -298,9 +280,6 @@ pub async fn notify_menu_changed(app: &Arc<AppState>) {
 
     // Push the new toggle-state for every radio / checkmark that this
     // event might have flipped. Sending only LayoutUpdated isn't
-    // enough: KDE Plasma updates the radio dot from
-    // `ItemsPropertiesUpdated`, not from a layout re-fetch, so without
-    // this the previously-selected leaf keeps its dot.
     let menu = snapshot_menu_state(app).await;
     let mut updates: Vec<(i32, HashMap<String, OwnedValue>)> = Vec::new();
     {
@@ -328,15 +307,12 @@ pub async fn notify_menu_changed(app: &Arc<AppState>) {
 
     // Bump the revision + emit LayoutUpdated as a fallback for hosts
     // that don't honor ItemsPropertiesUpdated. The revision must
-    // monotonically increase — otherwise KDE dedupes the GetLayout
-    // re-fetch and the previous radio dot lingers.
     let rev = bump_revision();
     let _ = DBusMenu::layout_updated(iface.signal_context(), rev, ID_ROOT).await;
 }
 
 // ---------------------------------------------------------------------------
 // Static menu tree
-// ---------------------------------------------------------------------------
 
 fn build_root(menu: &MenuState) -> ItemStruct {
     let children: Vec<OwnedValue> = vec![

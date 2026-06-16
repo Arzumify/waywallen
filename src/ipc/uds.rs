@@ -1,20 +1,3 @@
-//! Blocking Unix-domain-socket framing helpers for the waywallen IPC.
-//!
-//! Wire frame (same as `waywallen-display-v1`):
-//!
-//! ```text
-//! [u16 LE opcode][u16 LE total_length][body...]
-//! ```
-//!
-//! where `total_length` includes the 4-byte header. Ancillary file
-//! descriptors ride along as SCM_RIGHTS on the same `sendmsg(2)` /
-//! `recvmsg(2)` call; their count must match the message's
-//! `expected_fds()`.
-//!
-//! This module intentionally uses `std::os::unix::net::UnixStream`
-//! (not Tokio). Async callers are expected to wrap calls in
-//! `spawn_blocking`, the same model `display::endpoint` uses.
-
 use crate::ipc::generated::{DecodeError, Event, EventIn};
 use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags};
 use std::io::{IoSlice, IoSliceMut, Read};
@@ -31,7 +14,6 @@ pub const MAX_FDS_PER_MSG: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Errors
-// ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub enum CodecError {
@@ -88,7 +70,6 @@ pub type CodecResult<T> = Result<T, CodecError>;
 
 // ---------------------------------------------------------------------------
 // Send path
-// ---------------------------------------------------------------------------
 
 /// Send a control message (daemon → subprocess).
 pub fn send_control(sock: &UnixStream, req: &EventIn, fds: &[RawFd]) -> CodecResult<()> {
@@ -124,9 +105,8 @@ pub fn send_event(sock: &UnixStream, evt: &Event, fds: &[RawFd]) -> CodecResult<
     write_framed(sock, evt.opcode(), &body, fds)
 }
 
-/// Historical alias for `send_control`. Kept so renderer_manager and
-/// other call sites that previously used the generic `send_msg` with a
-/// `ControlMsg` don't need rewriting.
+/// Historical alias for `send_control`.
+/// Kept for call sites that previously used the generic send helper.
 #[inline]
 pub fn send_msg_control(sock: &UnixStream, msg: &EventIn, fds: &[RawFd]) -> CodecResult<()> {
     send_control(sock, msg, fds)
@@ -174,7 +154,6 @@ fn write_framed(sock: &UnixStream, opcode: u16, body: &[u8], fds: &[RawFd]) -> C
 
 // ---------------------------------------------------------------------------
 // Receive path
-// ---------------------------------------------------------------------------
 
 /// Receive a control message (daemon → subprocess). Used by renderer
 /// subprocesses.
@@ -207,8 +186,6 @@ pub fn recv_event(sock: &UnixStream) -> CodecResult<(Event, Vec<OwnedFd>)> {
 
 /// Read the 4-byte header (harvesting any ancillary fds that ride
 /// with it) then `read_exact` the body bytes. SCM_RIGHTS only ever
-/// attaches to the first byte of a frame, so reading a body via plain
-/// `read_exact` never discards fds from subsequent frames.
 fn read_framed(sock: &UnixStream) -> CodecResult<(u16, Vec<u8>, Vec<OwnedFd>)> {
     let mut hdr = [0u8; 4];
     let mut fds: Vec<OwnedFd> = Vec::new();
@@ -256,7 +233,6 @@ fn read_framed(sock: &UnixStream) -> CodecResult<(u16, Vec<u8>, Vec<OwnedFd>)> {
 
 // ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -337,7 +313,6 @@ mod tests {
 
     /// Core iteration-0 test: send a BindBuffers event carrying a real
     /// memfd FD, verify the receiver can read the memfd contents through
-    /// the fd it got back.
     #[test]
     fn roundtrip_bindbuffers_with_memfd() {
         let (a, b) = pair();

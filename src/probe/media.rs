@@ -1,17 +1,3 @@
-//! Fail-soft media metadata probe.
-//!
-//! Lazy-loads `libavformat` via `libloading` (no link-time dep on FFmpeg) and
-//! exposes a tiny [`MediaProbe`] trait whose `probe_media` method is total: it
-//! never returns `Err` and never panics. When libavformat cannot be loaded —
-//! or its ABI doesn't match what we coded against — the probe returns an empty
-//! [`MediaMeta`] with all fields `None`.
-//!
-//! Supported `libavformat` SONAMEs: 60 (FFmpeg 6.x), 61 (FFmpeg 7.x),
-//! 62 (FFmpeg 8.x devel). Other majors fall back to no-op because the
-//! `AVCodecParameters` layout shifted in FFmpeg 7.0 (added `coded_side_data`
-//! between `extradata_size` and `format`). When that happens we still log a
-//! single warning per process and never retry.
-
 use std::ffi::{c_char, c_int, c_uint, c_void, CString};
 use std::ptr;
 use std::sync::Mutex;
@@ -20,8 +6,7 @@ use libloading::{Library, Symbol};
 use log::warn;
 
 /// Public, owner-controlled list of `SONAME`s we'll try to dlopen, in order.
-/// NEVER take this from caller-controlled input — see security rules in
-/// `.plans/media-meta/plan.md`.
+/// Never take this from caller-controlled input.
 const LIBAVFORMAT_CANDIDATES: &[&str] = &[
     "libavformat.so.62", // FFmpeg 8.x (devel) — observed on Fedora 44+
     "libavformat.so.61", // FFmpeg 7.x
@@ -67,7 +52,6 @@ enum LibState {
 
 /// Holds an open libavformat handle plus the function-pointer table we
 /// resolved out of it. The `Library` field MUST outlive any derived
-/// function pointer — keeping it owned in the same struct guarantees that.
 struct LoadedLib {
     #[allow(dead_code)]
     library: Library,
@@ -98,7 +82,6 @@ struct Syms {
 
 /// Offsets within `AVCodecParameters` for the fields we read. The layout
 /// shifted in FFmpeg 7 because `coded_side_data` + `nb_coded_side_data`
-/// were inserted between `extradata_size` and `format`.
 #[derive(Clone, Copy)]
 struct CodecparLayout {
     /// Always 0 — `enum AVMediaType` is the first field.
@@ -121,12 +104,6 @@ const CODECPAR_FFMPEG_7_PLUS: CodecparLayout = CodecparLayout {
 
 // ---------------------------------------------------------------------------
 // Hand-rolled C struct layouts.
-//
-// We only access fields up to `streams**` on `AVFormatContext` and
-// `codecpar*` on `AVStream`. Both are at stable offsets across libavformat
-// 58→62 — they are public ABI fields that have never been reordered.
-// `AVInputFormat` only needs its first field (`name`).
-// ---------------------------------------------------------------------------
 
 #[repr(C)]
 struct AvFormatContext {
@@ -156,9 +133,8 @@ struct AvStream {
     // Tail intentionally omitted.
 }
 
-// SAFETY: we only ever read from `LibState` under a Mutex, and `Library`
-// itself is `Send + Sync` per libloading's docs (raw `void*` handle that
-// does not own thread-local state).
+// SAFETY: we only read `LoadedLib` under a Mutex, and libloading's
+// `Library` handle is safe to share under that access pattern.
 unsafe impl Send for LoadedLib {}
 unsafe impl Sync for LoadedLib {}
 
@@ -185,7 +161,6 @@ impl AvFormatProbe {
 
     /// Run the libavformat-driven probe. Caller has already verified the
     /// library loaded; we extract the first video stream's width/height.
-    /// Any failure leaves the corresponding field as `None`.
     fn probe_with_libav(&self, path: &str) -> (Option<u32>, Option<u32>) {
         let guard = match self.state.lock() {
             Ok(g) => g,
@@ -280,16 +255,12 @@ impl MediaProbe for AvFormatProbe {
     }
 }
 
-/// Try each candidate SONAME in order. On the first successful `dlopen`,
-/// silence libavformat's internal logging (best-effort), resolve the
-/// function table we use, and return the handle. Returns `None` if none
-/// of them load — or if the cached major version doesn't match a layout
-/// we know.
+/// Try each candidate SONAME in order.
+/// On success, silence logging and resolve required symbols.
 fn try_load_libavformat() -> Option<LoadedLib> {
     for soname in LIBAVFORMAT_CANDIDATES {
-        // SAFETY: `soname` is a hardcoded constant from a private list — never
-        // user-controlled. `Library::new` may execute initializers in the
-        // loaded shared object; we trust libavformat's initializers.
+        // SAFETY: `soname` is hardcoded, never user-controlled.
+        // `Library::new` may execute library initializers.
         let library = match unsafe { Library::new(soname) } {
             Ok(lib) => lib,
             Err(_) => continue,
@@ -297,8 +268,6 @@ fn try_load_libavformat() -> Option<LoadedLib> {
 
         // Best-effort: silence libavformat's stderr logging.
         // Signature: `void av_log_set_level(int level)`.
-        // SAFETY: symbol pointer's lifetime is tied to `library` which we
-        // own and return alongside it; no dereference happens after drop.
         unsafe {
             if let Ok(sym) = library.get::<unsafe extern "C" fn(c_int)>(b"av_log_set_level\0") {
                 sym(AV_LOG_QUIET);
@@ -382,10 +351,8 @@ fn try_load_libavformat() -> Option<LoadedLib> {
 mod tests {
     use super::*;
 
-    /// If libavformat is available, verify it actually parses a real
-    /// media file. We synthesize a tiny WAV file (uncompressed PCM) so
-    /// the test doesn't pull in any encoder. format should come back
-    /// as something containing "wav"; width/height stay None for audio.
+    /// If libavformat is available, verify it parses a real media file.
+    /// A tiny synthesized WAV keeps the test self-contained.
     #[test]
     fn probe_real_wav_yields_format() {
         use std::io::Write;

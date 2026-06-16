@@ -1,11 +1,3 @@
-//! waywallen-renderer — Rust-side producer subprocess (M1 milestone).
-//!
-//! Honours the daemon's `ConfigureBuffers` request: at startup the pool
-//! is allocated DEVICE_LOCAL (zero-copy on same-GPU paths). When the
-//! daemon detects a cross-GPU consumer it asks for `BUF_HOST_VISIBLE`,
-//! and we re-allocate the pool with HOST_VISIBLE && !DEVICE_LOCAL
-//! memory (GTT) so the dmabuf can be PRIME-imported by another GPU.
-
 use std::os::fd::RawFd;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -91,9 +83,7 @@ fn main() -> Result<()> {
     let entry = unsafe { Entry::load().context("load Vulkan")? };
     let app_info = vk::ApplicationInfo::default().api_version(vk::make_api_version(0, 1, 2, 0));
     // VK_KHR_get_physical_device_properties2 is required to query
-    // VkPhysicalDeviceDrmPropertiesEXT below; on Vulkan 1.1+ it is core,
-    // but we ask for the instance extension explicitly so 1.0-only
-    // drivers still load (we'd then just fall back to (0,0)).
+    // VkPhysicalDeviceDrmPropertiesEXT; Vulkan 1.1 includes it in core.
     let inst_exts = [vk::KHR_GET_PHYSICAL_DEVICE_PROPERTIES2_NAME.as_ptr()];
     let instance = unsafe {
         entry
@@ -122,8 +112,6 @@ fn main() -> Result<()> {
 
 /// Read the DRM render-node major/minor of the picked physical device.
 /// Requires `VK_EXT_physical_device_drm` (which the device extension
-/// list must enable) — otherwise returns `(0, 0)` so the daemon
-/// conservatively assumes cross-GPU.
 fn query_render_node(
     instance: &Instance,
     phys: vk::PhysicalDevice,
@@ -148,9 +136,6 @@ fn query_render_node(
 
 /// Pick a memory type that satisfies `req` and the placement implied by
 /// `flags`. For `flags == 0` we want DEVICE_LOCAL (VRAM, zero-copy). For
-/// `BUF_HOST_VISIBLE` we want HOST_VISIBLE && !DEVICE_LOCAL — true GTT,
-/// not the ReBAR/SAM HOST_VISIBLE+DEVICE_LOCAL alias which still lives
-/// in VRAM and can't be PRIME-imported by a foreign GPU.
 fn pick_memory_type(
     mem_props: &vk::PhysicalDeviceMemoryProperties,
     type_bits: u32,
@@ -179,8 +164,6 @@ fn pick_memory_type(
 
 /// Allocate `SLOT_COUNT` images, bind memory chosen per `flags`, export
 /// each as a dma-buf fd, and return both the live Vulkan handles (so
-/// the caller can free them later) and the export records (fd +
-/// modifier + stride).
 fn allocate_pool(
     instance: &Instance,
     device: &ash::Device,
@@ -281,7 +264,6 @@ fn destroy_pool(device: &ash::Device, slots: Vec<FrameSlot>, exports: Vec<PoolEx
     }
     // The kernel keeps the dma-buf alive for whoever holds a reference
     // (the daemon dup'd ours into its sendmsg). We close our local
-    // copies now to avoid leaking fds across rebinds.
     for e in exports {
         unsafe {
             libc::close(e.fd);
@@ -375,8 +357,6 @@ fn run(instance: &Instance, args: &Args) -> Result<()> {
 
     // Probe extensions on the chosen physical device. VK_EXT_physical_device_drm
     // is a device-level extension that's queryable via the property2 path
-    // even before vkCreateDevice; we must still enable it on the device
-    // for the property struct to be filled in.
     let avail_dev_exts = unsafe {
         instance
             .enumerate_device_extension_properties(phys)
@@ -446,9 +426,6 @@ fn run(instance: &Instance, args: &Args) -> Result<()> {
 
     // Reader thread: forwards Shutdown via `shutdown` flag and stages
     // ConfigureBuffers via `pending_reconfig` for the main loop to pick
-    // up between frames. We can't free Vulkan resources from this
-    // thread because the device has to be idle and only the main
-    // thread holds the queue.
     let shutdown = Arc::new(AtomicBool::new(false));
     let pending_reconfig: Arc<StdMutex<Option<u32>>> = Arc::new(StdMutex::new(None));
     let s2 = shutdown.clone();
@@ -463,9 +440,6 @@ fn run(instance: &Instance, args: &Args) -> Result<()> {
             Ok((ControlMsg::NegotiateBuffers { mem_hint, .. }, _)) => {
                 // Modifier-negotiation v2 — map mem_hint → BUF_HOST_VISIBLE
                 // (bit 0). The Rust test renderer doesn't yet honor
-                // fourcc/modifier overrides; it always allocates
-                // ABGR8888 + LINEAR. The picker collapses to that for
-                // prototype peer combos so the simplification is safe.
                 const BUF_HOST_VISIBLE: u32 = 1 << 0;
                 const MEM_HINT_HOST_VISIBLE: u32 = 1 << 1;
                 let flags = if mem_hint & MEM_HINT_HOST_VISIBLE != 0 {
@@ -505,13 +479,8 @@ fn run(instance: &Instance, args: &Args) -> Result<()> {
         transition_pool_to_general(&device, queue, cmd_buf, &p.slots)?;
     }
 
-    // Per-frame sync_fd export: one exportable semaphore, reused across
-    // frames. vkGetSemaphoreFdKHR with SYNC_FD handle type consumes the
-    // signaled state and leaves the semaphore unsignaled for the next
-    // submit (VK spec §7.4.3 "Importing Semaphore Payloads" note on
-    // permanence). The exported fd is a dma_fence sync_file that the
-    // display side can wait on via VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD
-    // or EGL_ANDROID_native_fence_sync.
+    // Per-frame sync_fd export uses one exportable semaphore.
+    // vkGetSemaphoreFdKHR with SYNC_FD consumes the payload.
     let ext_sem_fd = ash::khr::external_semaphore_fd::Device::new(instance, &device);
     let mut export_sem_info = vk::ExportSemaphoreCreateInfo::default()
         .handle_types(vk::ExternalSemaphoreHandleTypeFlags::SYNC_FD);
@@ -592,9 +561,6 @@ fn run(instance: &Instance, args: &Args) -> Result<()> {
         }
         // Export the signaled semaphore as a dma_fence sync_file fd.
         // This consumes the semaphore's signaled state; after this call
-        // the semaphore is unsignaled and can be signaled again by the
-        // next queue_submit. The returned fd is transferred to the
-        // sendmsg cmsg immediately below.
         let sync_fd = unsafe {
             ext_sem_fd.get_semaphore_fd(
                 &vk::SemaphoreGetFdInfoKHR::default()
@@ -612,16 +578,14 @@ fn run(instance: &Instance, args: &Args) -> Result<()> {
                 image_index: slot as u32,
                 seq,
                 ts_ns,
-                // TODO(release-syncobj): once this demo grows a real
-                // release timeline, advance a per-slot point here and
-                // emit the ReleaseSyncobj export event at startup.
+                // TODO(release-syncobj): when this demo gains a real
+                // release timeline, advance a per-slot point here.
                 release_point: 0,
             },
             &[sync_fd],
         );
-        // SCM_RIGHTS dup'd the fd into the kernel's message buffer on
-        // success. Close our local copy either way: on success the
-        // receiver has its own copy, on failure it's just a leak.
+        // SCM_RIGHTS duplicates the fd into the kernel message buffer
+        // on success. Close our local copy either way.
         unsafe {
             libc::close(sync_fd);
         }

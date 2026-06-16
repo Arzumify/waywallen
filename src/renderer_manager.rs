@@ -1,10 +1,3 @@
-//! RendererManager — spawns and supervises `waywallen-renderer` child
-//! processes, forwards control messages to them over Unix-domain sockets,
-//! and parks their event stream into per-renderer broadcast channels.
-//!
-//! This module is the Rust daemon's counterpart to the C++ host program
-//! in `open-wallpaper-engine/host/`.
-
 use crate::error::{Error, Result, ResultExt};
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
@@ -22,16 +15,14 @@ use crate::ipc::proto::{ControlMsg, EventMsg};
 use crate::ipc::uds::{recv_event, send_control, CodecError};
 
 /// Spawn-time `Init` payload version the daemon currently emits. Bump
-/// this when the wire shape of `ControlMsg::Init` changes; renderers
-/// reply with `EventMsg::InitNack` if they don't recognise the value.
+/// this when the wire shape of `ControlMsg::Init` changes.
 pub const SPAWN_VERSION: u32 = 5;
 use crate::plugin::renderer_registry::{RendererDef, RendererRegistry};
 use crate::routing::Router;
-use crate::wallpaper_type::WallpaperType;
+use crate::wallpaper::types::WallpaperType;
 
 // ---------------------------------------------------------------------------
 // Public types
-// ---------------------------------------------------------------------------
 
 pub type RendererId = String;
 
@@ -40,50 +31,27 @@ pub struct SpawnRequest {
     /// The wallpaper type determines which renderer binary is spawned.
     pub wp_type: WallpaperType,
     /// CLI argv dictionary the daemon turns into `--<key> <value>`
-    /// pairs after `--ipc <socket>`. Source plugins fill this via
-    /// `extras(entry)`; `extras["path"]` is the canonical resource
-    /// (mandatory). Plugin-specific keys (`assets`, `workshop_id`, …)
-    /// must be ⊆ the renderer manifest's `extras` whitelist + `path`.
+    /// pairs after `--ipc <socket>`.
     pub extras: HashMap<String, String>,
     /// Plugin settings kv that flows directly into `Init.settings`.
-    /// The caller is responsible for sourcing this — typically the
-    /// reconciled per-plugin section of the daemon's settings store.
-    /// Identity-tagged keys (per the manifest schema) gate reuse;
-    /// non-identity keys can be hot-applied via `ApplySettings`.
+    /// Callers usually source this from the reconciled settings store.
     pub settings: HashMap<String, String>,
     /// When true, pass `--test-pattern` to the renderer host, which
-    /// bypasses `SceneWallpaper::loadScene` and drives the offscreen
-    /// ExSwapchain ring on a host-owned timer. Used to bring up the
-    /// full daemon/display pipeline before a real Wallpaper Engine
-    /// assets directory is available (see plan.md I4).
+    /// lets test renderers bypass normal content loading.
     pub test_pattern: bool,
     /// Optional explicit renderer plugin name. `None` (default) lets
-    /// `spawn` and `find_reusable` pick the highest-priority renderer
-    /// for `wp_type`; `Some(name)` pins both to that exact plugin so a
-    /// user-chosen non-default renderer isn't transparently swapped
-    /// for the priority winner on reuse or fresh spawn.
+    /// `spawn` and `find_reusable` pick by type priority.
     pub renderer_name: Option<String>,
     /// Renderer-owned subset of the DB row's `user_property_overrides`
-    /// column. Daemon-owned keys, such as per-wallpaper display layout
-    /// overrides, are consumed before spawn and are not forwarded.
+    /// column; daemon-owned layout keys are filtered out before spawn.
     pub user_properties_json: Option<String>,
 }
 
 /// Snapshot of the most recent `BindBuffers` event, plus the DMA-BUF FDs
-/// the host attached to it. Owned by the manager; display endpoints will
-/// `dup(2)` individual fds out of it when a new subscriber connects.
-///
-/// Multi-plane modifiers (e.g. AMD DCC where plane 0 = colour data and
-/// plane 1 = compression metadata) flatten the per-plane info into the
-/// `stride` / `plane_offset` / `size` / `fds` arrays. Each has length
-/// `count * planes_per_buffer`, indexed
-/// `[buffer_idx * planes_per_buffer + plane_idx]`. Single-plane modifiers
-/// (LINEAR, plain tile-only) keep `planes_per_buffer = 1` and the arrays
-/// have length `count`.
+/// attached to it. Owned here and copied out to display endpoints.
 pub struct BindSnapshot {
     /// Monotonically increasing per-renderer pool generation. Sourced
-    /// from the `bind_buffers.generation` field the renderer sets;
-    /// propagated as `buffer_generation` on the display wire.
+    /// from the renderer's `bind_buffers.generation` field.
     pub generation: u64,
     /// Placement flag set the renderer used when allocating this pool.
     /// Bit 0 = host_visible (GTT). See `BUF_HOST_VISIBLE`.
@@ -99,26 +67,19 @@ pub struct BindSnapshot {
     /// `count * planes_per_buffer` entries, flattened (buffer, plane).
     pub plane_offset: Vec<u32>,
     /// `count * planes_per_buffer` entries, flattened (buffer, plane).
-    /// Per-plane memory span (`stride * height` for plane 0; for
-    /// later planes the contribution between this and next plane's
-    /// offset, or 0 if the renderer didn't compute it).
+    /// Per-plane memory span in bytes.
     pub size: Vec<u64>,
     /// `count * planes_per_buffer` entries, flattened (buffer, plane).
-    /// For modifiers backed by a single dma-buf allocation, the
-    /// renderer typically dups the same fd into every plane slot.
+    /// Multi-plane modifiers may repeat the same underlying dma-buf fd.
     pub fds: Vec<OwnedFd>,
 }
 
 /// Bit 0 of `BindSnapshot::flags` / `ControlMsg::ConfigureBuffers.flags`:
-/// the renderer must back the dmabuf with HOST_VISIBLE memory (GTT/system
-/// RAM) so it can be PRIME-imported by another GPU. Cleared means the
-/// renderer is free to use DEVICE_LOCAL (VRAM) for zero-copy on same-GPU
-/// consumers.
+/// the renderer must back the dmabuf with HOST_VISIBLE memory.
 pub const BUF_HOST_VISIBLE: u32 = 1 << 0;
 
 /// DRM render-node identity reported by a renderer in its `Ready` event.
-/// `(0, 0)` is the sentinel for "renderer cannot resolve its render node",
-/// in which case the daemon must conservatively assume cross-GPU paths.
+/// `(0, 0)` is the sentinel for an unknown render node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct DrmNode {
     pub major: u32,
@@ -133,9 +94,7 @@ impl DrmNode {
 }
 
 /// Upper bound on the number of per-seq sync_fd entries the reader
-/// keeps around before evicting the oldest. Renderers produce ~60 fps,
-/// so 16 gives display clients ~250 ms to drain before fences start
-/// dropping — plenty for a healthy event loop.
+/// keeps around before evicting the oldest.
 const SYNC_FD_RETENTION: usize = 16;
 
 /// Per-renderer state. Cheap to clone via `Arc`; the inner fields are
@@ -144,111 +103,62 @@ pub struct RendererHandle {
     pub id: RendererId,
     pub wp_type: WallpaperType,
     /// The `SpawnRequest.extras` this renderer was started with —
-    /// canonical resource path + manifest-allowlisted keys
-    /// (`assets`, `workshop_id`, …) that ride on CLI argv. This is
-    /// the per-spawn identity differentiator: two SpawnRequests of
-    /// the same plugin / wp_type / extent that disagree on `extras`
-    /// MUST get different renderer processes (different `path` =
-    /// different wallpaper). Settings, by contrast, are plugin-wide
-    /// (`Settings::plugin(&name)`) and shared across all renderers
-    /// of a plugin, so they don't differentiate.
+    /// canonical resource path plus manifest-allowlisted keys.
     pub extras: HashMap<String, String>,
     /// Renderer plugin name from the resolved `RendererDef` (e.g.
-    /// `"wescene"`). Surfaced to the UI so users see a friendly
-    /// `<name>-<pid>` label instead of the opaque UUID.
+    /// `"wescene"`). Surfaced to the UI as the renderer name.
     pub name: String,
     /// OS pid of the renderer child captured right after `spawn()`.
-    /// `None` only if tokio could not return one (process already
-    /// exited before id() was queried).
+    /// `None` only if Tokio could not return a child pid.
     pub pid: Option<u32>,
     /// DRM render-node id of the GPU the renderer's Vulkan instance
-    /// picked. Reported in the renderer's `Ready` event. Used by the
-    /// router to decide whether each subscribed display is on the same
-    /// GPU (zero-copy) or a different GPU (must rebind via GTT). The
-    /// sentinel `DrmNode::UNKNOWN` (0, 0) means the driver lacks
-    /// `VK_EXT_physical_device_drm` and the daemon should assume
-    /// cross-GPU.
+    /// picked. Reported in Ready and used by DMA-BUF negotiation.
     pub gpu: DrmNode,
 
     /// Blocking std UnixStream. Guarded by a std Mutex so HTTP handlers
-    /// hold the lock only while a `sendmsg` is in flight; they spawn the
-    /// actual send onto the blocking pool so the runtime isn't parked.
+    /// hold the lock only while a `sendmsg` is in flight.
     sock: Arc<StdMutex<StdUnixStream>>,
 
     /// Broadcast of every event the host emits (besides the FDs on the
-    /// initial BindBuffers — those are stored in `bind_snapshot` so
-    /// late subscribers can dup them).
+    /// initial BindBuffers, whose fds are stored in `bind_snapshot`).
     events: broadcast::Sender<EventMsg>,
 
     /// Populated when the host sends its first `BindBuffers` event.
     bind_snapshot: Arc<StdMutex<Option<BindSnapshot>>>,
 
     /// In-flight `ConfigureBuffers` request. `Some(flags)` while the
-    /// router has asked for a re-export and the renderer has not yet
-    /// answered with a fresh `BindBuffers` whose `flags` matches; reset
-    /// to `None` once the answering snapshot arrives. Guards the router
-    /// from issuing a second reconfigure on top of an in-flight one.
+    /// router has asked for a re-export not yet answered by BindBuffers.
     pending_configure: Arc<StdMutex<Option<u32>>>,
 
     /// Per-frame acquire fence file descriptors, indexed by `seq`.
-    /// The reader thread stashes the `OwnedFd` that arrives with each
-    /// `FrameReady { has_sync_fd: true }` event; the display endpoint
-    /// consumes it (exactly once per seq) via `take_sync_fd`. Older
-    /// entries are evicted once the map exceeds `SYNC_FD_RETENTION`.
-    ///
-    /// Phase 3b limitation: only one consumer gets the real fd per
-    /// (seq). Multi-display real-sync fan-out will require a
-    /// dup-on-take API.
+    /// The reader thread stashes the fd attached to each FrameReady event.
     sync_fds: Arc<StdMutex<std::collections::VecDeque<(u64, OwnedFd)>>>,
 
     /// Producer-exported timeline drm_syncobj used as the release
-    /// fence target. Populated by exactly one `ReleaseSyncobj` event
-    /// the renderer subprocess emits between `Ready` and the first
-    /// `FrameReady`. The fd is the OPAQUE_FD export of a Vulkan
-    /// TIMELINE semaphore on the renderer's `VkDevice` (= a
-    /// drm_syncobj on Mesa drivers); the reaper imports it via
-    /// `DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE` and `TRANSFER`s consumer
-    /// release fences onto each frame's `release_point`.
+    /// fence target. Populated by a ReleaseSyncobj event.
     release_syncobj: Arc<StdMutex<Option<OwnedFd>>>,
 
     /// Modifier-negotiation capabilities the producer declared in
-    /// its `FormatCaps` event (sent once after `Ready`, before any
-    /// `BindBuffers`). The router pairs this with each consumer's
-    /// `consumer_caps` to compute a `NegotiatedScheme`. Stays `None`
-    /// until the event arrives — older renderers that don't
-    /// implement Iter 2 yet leave it empty, in which case the
-    /// daemon skips negotiation for them and Iter 1 behavior
-    /// (blind forward) prevails.
+    /// its FormatCaps event.
     format_caps: Arc<StdMutex<Option<crate::dma::negotiate::PeerCaps>>>,
 
     /// Last `NegotiatedScheme` the daemon dispatched via
-    /// `NegotiateBuffers` to this renderer. Used for idempotence in
-    /// `send_negotiate_buffers` — repeat calls with the same scheme
-    /// short-circuit. `None` until the first dispatch.
+    /// NegotiateBuffers to this renderer, used for idempotence.
     last_dispatched_scheme: Arc<StdMutex<Option<crate::dma::negotiate::NegotiatedScheme>>>,
 
     /// Sink for per-frame [`crate::sync::FrameRecord`]s. The display
-    /// endpoint pushes one record per consumer per frame; the reaper
-    /// task (spawned alongside this handle) drains them, waits for
-    /// the consumer signal, and transfers the resulting fence onto
-    /// the producer's release timeline. `Option` so test stubs can
-    /// skip wiring the channel.
+    /// endpoint pushes one record per consumer per frame.
     frame_record_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::sync::FrameRecord>>,
 
     /// The child process. Kept alive so dropping the manager reaps it.
     child: Arc<TokioMutex<Option<Child>>>,
 
     /// Inbound-event family subscriptions copied from the renderer's
-    /// manifest at spawn time. Pointer-event senders consult this to
-    /// decide whether to encode (subscribed) or silently drop. Strings
-    /// are validated against the recognised set in
-    /// `renderer_registry::scan_plugins`.
+    /// manifest at spawn time. Pointer senders consult this before dispatch.
     events_subscribed: Arc<Vec<String>>,
 
     /// Renderer-published clear color (RGBA, 0..=1, sRGB straight
-    /// alpha). Sole source of truth for the daemon's outbound display
-    /// `set_config.clear_*` field. Default `[0, 0, 0, 1]` until the
-    /// renderer emits a `ReportState { clear_color = "..." }`.
+    /// alpha). Sole source for outbound display clear color.
     clear_rgba: Arc<StdMutex<[f32; 4]>>,
 }
 
@@ -268,9 +178,7 @@ impl RendererHandle {
     }
 
     /// Actual texture dimensions reported by the renderer's most recent
-    /// `BindBuffers`. `(0, 0)` until the first BindBuffers arrives —
-    /// daemon no longer carries a spawn-time size hint, the renderer
-    /// picks its own extent from content + `resolution` setting.
+    /// `BindBuffers`. Returns `(0, 0)` before the first BindBuffers.
     pub fn texture_size(&self) -> (u32, u32) {
         if let Ok(g) = self.bind_snapshot.lock() {
             if let Some(snap) = g.as_ref() {
@@ -281,8 +189,7 @@ impl RendererHandle {
     }
 
     /// Current placement flags from the latest `BindBuffers`, or 0 if
-    /// no snapshot has arrived yet. Used by the router to compare
-    /// against the desired flag set.
+    /// no snapshot has arrived yet.
     pub fn current_flags(&self) -> u32 {
         self.bind_snapshot
             .lock()
@@ -292,25 +199,13 @@ impl RendererHandle {
     }
 
     /// Whether a `ConfigureBuffers` request is currently in flight (sent
-    /// to the renderer but not yet answered with a matching new
-    /// `BindBuffers`). The router uses this to coalesce reconfigures.
+    /// to the renderer but not yet answered by BindBuffers).
     pub fn pending_configure(&self) -> Option<u32> {
         self.pending_configure.lock().ok().and_then(|g| *g)
     }
 
     /// Obtain a dup'd copy of the acquire sync_fd that arrived with
-    /// `FrameReady` seq. Each caller gets an independent kernel
-    /// reference to the same underlying `dma_fence` sync_file, so
-    /// multiple display subscribers can each wait on (or import) the
-    /// fence without interfering with one another.
-    ///
-    /// The original fd stays in the deque and is evicted only when
-    /// the retention limit is hit (new frames push out old ones) or
-    /// on a rebind.
-    ///
-    /// Returns `None` if the fd was never recorded (producer didn't
-    /// export one) or has already been evicted (>SYNC_FD_RETENTION
-    /// newer frames have arrived).
+    /// `FrameReady` seq. Each caller gets an independent fd.
     pub fn clone_sync_fd(&self, seq: u64) -> Option<OwnedFd> {
         use std::os::fd::{AsRawFd, FromRawFd};
         let guard = self.sync_fds.lock().ok()?;
@@ -321,10 +216,7 @@ impl RendererHandle {
     }
 
     /// Borrow a dup'd handle to the producer's release timeline
-    /// syncobj fd. Returns `None` until the `ReleaseSyncobj` event has
-    /// arrived. The reaper uses this once per renderer (after import
-    /// to a drm_syncobj handle the result is cached on the daemon
-    /// side).
+    /// syncobj fd. Returns `None` until ReleaseSyncobj arrives.
     pub fn clone_release_syncobj_fd(&self) -> Option<OwnedFd> {
         use std::os::fd::{AsRawFd, FromRawFd};
         let guard = self.release_syncobj.lock().ok()?;
@@ -334,23 +226,13 @@ impl RendererHandle {
     }
 
     /// Borrow a clone of the producer's declared modifier-negotiation
-    /// capabilities. Returns `None` until the `FormatCaps` event has
-    /// arrived (or forever, for renderers that haven't been ported to
-    /// Iter 2). The router calls this on every reconcile pass; it's
-    /// cheap (cloning a HashMap of small structs).
+    /// capabilities. Returns `None` until FormatCaps arrives.
     pub fn format_caps(&self) -> Option<crate::dma::negotiate::PeerCaps> {
         self.format_caps.lock().ok().and_then(|g| g.clone())
     }
 
     /// Mutate the producer's blacklist with `(fourcc, modifier)`. The
-    /// blacklist lives inside the producer's [`PeerCaps`] and is
-    /// consulted on every `negotiate::pick`. No-op if FormatCaps
-    /// haven't arrived yet (legacy renderer).
-    ///
-    /// Returns `true` when the entry was newly inserted. The router
-    /// uses the boolean to decide whether to re-run the picker (a
-    /// duplicate insert means the renderer reported the same
-    /// (fourcc, modifier) twice — already handled).
+    /// blacklist lives inside the producer's cached PeerCaps.
     pub fn blacklist_format(&self, fourcc: u32, modifier: u64) -> bool {
         let Ok(mut guard) = self.format_caps.lock() else {
             return false;
@@ -362,21 +244,13 @@ impl RendererHandle {
     }
 
     /// Most recently dispatched [`crate::dma::negotiate::NegotiatedScheme`]
-    /// for this renderer. `None` until the daemon has run a successful
-    /// `pick` and called `send_negotiate_buffers`. Used by the router
-    /// to gate `Bind`/`Frame` dispatch — frames are silently held
-    /// until `bind_snapshot` matches the dispatched scheme.
+    /// for this renderer. `None` until a negotiation succeeds.
     pub fn current_scheme(&self) -> Option<crate::dma::negotiate::NegotiatedScheme> {
         self.last_dispatched_scheme.lock().ok().and_then(|g| *g)
     }
 
     /// True iff the renderer's most recent `BindBuffers` snapshot
     /// matches the most recently dispatched [`crate::dma::negotiate::NegotiatedScheme`]
-    /// on `(fourcc, modifier)`. Returns `false` if either side is
-    /// missing — the gate stays closed until both arrive. Caller is
-    /// responsible for ensuring v2 negotiation actually applies (i.e.
-    /// both peers shipped caps); for legacy peers this method has no
-    /// useful answer.
     pub fn scheme_satisfied(&self) -> bool {
         let Some(scheme) = self.current_scheme() else {
             return false;
@@ -392,12 +266,7 @@ impl RendererHandle {
     }
 
     /// Push a per-frame [`crate::sync::FrameRecord`] to the reaper.
-    /// The display endpoint calls this once per consumer per frame,
-    /// after creating the consumer's binary release_syncobj. Returns
-    /// `Err` if no reaper is wired (test_stub) or the channel was
-    /// already closed (renderer evicted) — in either case the caller
-    /// should drop the SyncobjHandle (which destroys the kernel
-    /// object) and skip the frame.
+    /// Called once per display consumer per frame.
     pub fn submit_frame_record(
         &self,
         record: crate::sync::FrameRecord,
@@ -409,8 +278,7 @@ impl RendererHandle {
     }
 
     /// Renderer-published clear color (RGBA, 0..=1). Defaults to
-    /// opaque black until the renderer emits its first `ReportState`
-    /// with a `clear_color` key.
+    /// opaque black until the renderer reports state.
     pub fn clear_rgba(&self) -> [f32; 4] {
         self.clear_rgba
             .lock()
@@ -421,7 +289,6 @@ impl RendererHandle {
 
 // ---------------------------------------------------------------------------
 // Manager
-// ---------------------------------------------------------------------------
 
 pub struct RendererManager {
     inner: TokioMutex<Inner>,
@@ -429,21 +296,12 @@ pub struct RendererManager {
     registry: RendererRegistry,
     /// Back-reference to the router, installed after construction via
     /// `attach_router`. Held weak to avoid a cycle with `Router::mgr`.
-    /// Consulted on the crash path (`evict`) so a dead renderer gets
-    /// unlinked from the routing table in lockstep with being evicted
-    /// from our map.
     router: OnceLock<StdWeak<Router>>,
     /// Cached `/dev/dri` enumeration from startup. Used at spawn time to
-    /// translate per-plugin `gpu_drm_dev = "<major>:<minor>"` settings into
-    /// a `render_node` path injected into `Init.settings`. Empty vec if
-    /// `attach_gpus` was never called (test stub).
+    /// translate `gpu_drm_dev` settings into render-node paths.
     gpus: OnceLock<Arc<Vec<crate::gpu::GpuInfo>>>,
     /// Dead-renderer signals queue here (from reader-thread exit or
-    /// a send_control hitting EPIPE). A single background reaper task
-    /// drains the channel and runs the async `evict` — routing it
-    /// through a channel keeps `mark_dead` synchronous, which breaks
-    /// the async-Send inference cycle between `send_control` and
-    /// `router::unregister_renderer → reconcile_lifecycle → send_control`.
+    /// a send_control hitting EPIPE). One background task drains it.
     reap_tx: tokio::sync::mpsc::UnboundedSender<RendererId>,
     reap_rx: StdMutex<Option<tokio::sync::mpsc::UnboundedReceiver<RendererId>>>,
 }
@@ -469,22 +327,18 @@ impl RendererManager {
 
     /// Hand the manager the startup `/dev/dri` snapshot so spawn-time can
     /// resolve `gpu_drm_dev` selections into `render_node` paths.
-    /// Idempotent: further calls are no-ops.
     pub fn attach_gpus(&self, gpus: Arc<Vec<crate::gpu::GpuInfo>>) {
         let _ = self.gpus.set(gpus);
     }
 
     /// Wire the manager to the router. Must be called once after both
-    /// sides have been constructed. Idempotent: further calls are
-    /// no-ops.
+    /// sides have been constructed. Later calls are ignored.
     pub fn attach_router(&self, router: StdWeak<Router>) {
         let _ = self.router.set(router);
     }
 
     /// Start the background reaper task that drains `mark_dead`
-    /// signals and runs the async eviction. Must be called from
-    /// inside a tokio runtime context. No-op if already started or
-    /// if the channel receiver was already taken.
+    /// signals and runs async eviction.
     pub fn start_reaper(self: &Arc<Self>) {
         let rx = match self.reap_rx.lock() {
             Ok(mut g) => g.take(),
@@ -500,9 +354,7 @@ impl RendererManager {
     }
 
     /// Test-only convenience: construct a manager whose registry has a
-    /// single "scene" renderer pointed at `$WAYWALLEN_RENDERER_BIN`. If
-    /// that env var is unset the registry is empty and any spawn call
-    /// will fail with "no renderer registered for type 'scene'".
+    /// single scene renderer when `$WAYWALLEN_RENDERER_BIN` is set.
     pub fn new_default() -> Self {
         let mut registry = RendererRegistry::new();
         if let Some(bin) = std::env::var_os("WAYWALLEN_RENDERER_BIN") {
@@ -527,8 +379,7 @@ impl RendererManager {
     }
 
     /// Spawn a fresh renderer-host subprocess, wait for its `Ready`
-    /// event, and return its id. Fails (and cleans up the child) if the
-    /// host doesn't come online within `timeout`.
+    /// event, and return its id. Cleans up the child on failure.
     pub async fn spawn(&self, mut req: SpawnRequest) -> Result<RendererId> {
         let id: RendererId = Uuid::new_v4().to_string();
 
@@ -556,14 +407,8 @@ impl RendererManager {
                 .clone(),
         };
 
-        // Translate the user's GPU choice into a render_node path before
-        // it reaches the subprocess: plugin settings persist
-        // `gpu_drm_dev = "<major>:<minor>"` (mirroring drm_render_major/
-        // minor on the wire); the subprocess contract consumes
-        // `render_node` (a path). On a hit we inject render_node and
-        // strip gpu_drm_dev from the kv we ship. On a miss (defensive —
-        // startup reconcile should have already cleared it) we leave
-        // both out and let the subprocess pick a default device.
+        // Translate the user's GPU choice into a render-node path before
+        // settings reach the subprocess.
         if let Some(raw) = req.settings.remove(crate::gpu::GPU_DRM_DEV_KEY) {
             if let Some((major, minor)) = crate::gpu::parse_drm_dev(&raw) {
                 let resolved = self
@@ -587,15 +432,13 @@ impl RendererManager {
         }
 
         // Build the Init message *before* spawning the child (no
-        // orphan socket file lingering past TempUnlink if anything
-        // goes wrong later).
+        // orphan socket file lingers if validation fails here).
         let init_msg = build_init_msg(&req, &renderer_def);
 
         let mut cmd = Command::new(&renderer_def.bin);
         cmd.arg("--ipc").arg(&sock_path);
         // SPAWN_VERSION 3: extras (canonical `path` + plugin-specific
         // keys like `assets`/`workshop_id`) ride as `--<key> <value>`
-        // CLI argv. Sorted for spawn-command determinism.
         let mut extra_keys: Vec<&String> = req.extras.keys().collect();
         extra_keys.sort();
         for k in extra_keys {
@@ -626,21 +469,14 @@ impl RendererManager {
             .context("accept")?;
 
         // Convert to a blocking std UnixStream for the rest of the
-        // lifecycle: the ipc::uds helpers use nix sendmsg/recvmsg which
-        // need a real blocking fd.
+        // lifecycle because ipc::uds uses blocking sendmsg/recvmsg.
         let std_stream = tokio_stream.into_std().context("UnixStream::into_std")?;
         std_stream
             .set_nonblocking(false)
             .context("clear O_NONBLOCK on accepted stream")?;
 
-        // Step 1 of the renderer-Init refactor: emit the typed Init
-        // message right after accept(). The legacy CLI argv block above
-        // is still in place; renderers that have not yet been switched
-        // to consume Init simply ignore it. Send + Ready/InitNack recv
-        // is factored into `run_init_handshake` so the unit test can
-        // drive it over a socketpair without going through spawn().
-        // (`init_msg` was built above before spawn so a schema error
-        // fails before the child process is created.)
+        // Emit typed Init right after accept; CLI extras only identify
+        // launch resources now.
         let handshake_stream = std_stream
             .try_clone()
             .context("try_clone for Init handshake")?;
@@ -695,14 +531,8 @@ impl RendererManager {
             );
         });
 
-        // Per-renderer reaper: drains FrameRecords, waits on consumer
-        // signals, transfers fences onto the producer's release
-        // timeline. Channel sender lives on the handle; receiver is
-        // moved into the spawned task. Dropping the handle (renderer
-        // evicted) closes the channel and the reaper exits cleanly.
-        // We don't fail spawn if the DRM device can't open — the
-        // renderer is still useful for acquire-only flows; the reaper
-        // just won't run.
+        // Per-renderer reaper drains FrameRecords and transfers consumer
+        // release fences onto the producer timeline.
         let (frame_tx, frame_rx) =
             tokio::sync::mpsc::unbounded_channel::<crate::sync::FrameRecord>();
         let frame_record_tx = match crate::sync::drm_device() {
@@ -737,15 +567,10 @@ impl RendererManager {
         });
 
         if handle.frame_record_tx.is_some() {
-            // SAFETY: drm_device() returned Ok above; it caches the
-            // device and is idempotent.
+            // SAFETY: drm_device() returned Ok above and is idempotent.
             let drm = crate::sync::drm_device().expect("checked above");
-            // Pass only the renderer id and a clone of the
-            // release_syncobj Arc — NOT Arc<RendererHandle>. The handle
-            // owns the channel's Sender; if the reaper held an Arc to
-            // it, the channel would never close (self-referential
-            // cycle), the reaper task would leak, and pending buckets
-            // would tie up DRM syncobjs forever.
+            // Pass only the renderer id and release_syncobj; the reaper
+            // must not keep the whole RendererHandle alive.
             crate::sync::spawn_reaper(
                 drm,
                 id.clone(),
@@ -763,23 +588,7 @@ impl RendererManager {
     }
 
     /// Find an already-running renderer whose **identity** matches
-    /// `req` and the resolved manifest schema, ignoring runtime-tunable
-    /// (`identity = false`) settings. Returns the id plus a delta of
-    /// runtime-only metadata that differs from the live renderer's
-    /// current `runtime_settings` cache, plus an optional new fps when
-    /// the manifest declares fps as a runtime setting (or for reusable
-    /// mismatches against the typed `req.fps`, see below).
-    ///
-    /// Reuse a live renderer when:
-    ///   - structural: `wp_type` / resolved renderer plugin name match.
-    ///   - per-spawn: `extras` matches (different `path` ⇒ different
-    ///     wallpaper ⇒ different renderer process).
-    ///
-    /// Plugin settings live in `Settings::plugin(&name)` and are
-    /// pushed live to all renderers by `SettingsSet`. The renderer
-    /// applies what it can; whatever it can't apply live takes effect
-    /// on the next spawn (via the fresh `Init.settings`). Returns
-    /// `None` when no live renderer matches.
+    /// `req`, ignoring runtime-tunable plugin settings.
     pub async fn find_reusable(&self, req: &SpawnRequest) -> Option<RendererId> {
         let def = match req.renderer_name.as_deref() {
             Some(name) => self.registry.resolve_by_name(name)?.clone(),
@@ -805,8 +614,7 @@ impl RendererManager {
     }
 
     /// Locate a live renderer whose `extras["path"]` matches the given
-    /// resource. Used by WallpaperPropertySet to route the kv to the
-    /// right child.
+    /// resource. Used to route property changes to the active renderer.
     pub async fn find_by_resource(&self, resource: &str) -> Option<Arc<RendererHandle>> {
         let inner = self.inner.lock().await;
         inner.renderers.values().find_map(|h| {
@@ -891,10 +699,7 @@ impl RendererManager {
     }
 
     /// Fire-and-forget control send. Returns an error if the renderer
-    /// is unknown or the underlying socket write fails. On EPIPE /
-    /// ECONNRESET / ENOTCONN the handle is enqueued for eviction via
-    /// `mark_dead` before the error is returned so follow-up calls
-    /// don't keep re-hitting a dead peer.
+    /// is unknown or the underlying socket write fails.
     pub async fn send_control(&self, id: &str, msg: ControlMsg) -> Result<()> {
         let handle = self
             .get(id)
@@ -924,8 +729,6 @@ impl RendererManager {
 
     /// Modifier-negotiation v2 dispatch — replaces the deleted
     /// `send_configure_buffers`.
-    /// Idempotent: returns Ok without sending if `scheme` matches the
-    /// last-dispatched scheme cached on the renderer handle.
     pub async fn send_negotiate_buffers(
         &self,
         id: &str,
@@ -974,15 +777,7 @@ impl RendererManager {
     }
 
     /// Push a `setting_changed` event to a live renderer. `settings` is
-    /// the delta the caller already filtered to runtime-only keys
-    /// (identity-tagged settings would force respawn, not hot-reload).
-    /// `fps == None` is the no-fps-change signal; `Some(0)` is treated
-    /// as "no change" too — the wire format uses 0 as the unset
-    /// sentinel and a fps of 0 makes no physical sense for a renderer.
-    ///
-    /// On success the renderer's `runtime_settings` cache is merged
-    /// with `settings` so the next reuse comparison sees the post-apply
-    /// state. No idempotence cache for now; each call sends.
+    /// the caller-filtered runtime delta.
     pub async fn send_setting_changed(
         &self,
         id: &str,
@@ -995,8 +790,6 @@ impl RendererManager {
             .ok_or_else(|| Error::RendererNotFound(id.to_string()))?;
         // setting_changed is a pure kv list. fps is just one of the kv
         // keys (when the manifest declares it), not a typed scalar.
-        // Fold the legacy `fps_change` arg into the kv list before
-        // dispatch.
         let mut settings = settings;
         if let Some(f) = fps {
             if f != 0 {
@@ -1017,9 +810,7 @@ impl RendererManager {
     }
 
     /// Forward a pointer-motion event to a live renderer. Silently
-    /// drops when the renderer's manifest didn't declare
-    /// `events = ["pointer"]` — this is the expected gating point for
-    /// any inbound pointer family event.
+    /// drops when the renderer did not subscribe to pointer events.
     pub async fn send_pointer_motion(
         &self,
         id: &str,
@@ -1105,8 +896,6 @@ impl RendererManager {
 
     /// Returns `true` when the renderer is alive and its manifest
     /// declared `events = [..., kind, ...]`. Unknown id ⇒ `false`
-    /// (caller treats that as "drop on floor"; it's the same handling
-    /// `send_*` use for unsubscribed renderers).
     async fn subscribed_to(&self, id: &str, kind: &str) -> bool {
         match self.get(id).await {
             Some(h) => h.events_subscribed.iter().any(|e| e == kind),
@@ -1115,10 +904,7 @@ impl RendererManager {
     }
 
     /// Enqueue a renderer for eviction. Synchronous (cheap channel
-    /// send); the actual cleanup happens on the reaper task started
-    /// by `start_reaper`. Safe to call from anywhere, including non-
-    /// async contexts (e.g. the reader thread's drop guard). Multiple
-    /// signals for the same id are fine — `evict` is idempotent.
+    /// send); cleanup happens on the reaper task.
     pub fn mark_dead(&self, id: &str) {
         if self.reap_tx.send(id.to_string()).is_err() {
             log::warn!("renderer {id}: mark_dead dropped (reaper channel closed)");
@@ -1126,8 +912,7 @@ impl RendererManager {
     }
 
     /// Actual eviction: remove from map, unregister from router, kill
-    /// child. Called only by the reaper task. Idempotent: a second
-    /// call with the same id is a no-op.
+    /// child. Called only by the reaper task and is idempotent.
     async fn evict(self: &Arc<Self>, id: &str) {
         let handle = {
             let mut inner = self.inner.lock().await;
@@ -1149,14 +934,6 @@ impl RendererManager {
 
     /// Send Shutdown, wait for the child to exit gracefully, escalate
     /// to SIGKILL only if it doesn't. Removes from the map.
-    ///
-    /// The graceful path is critical for cross-process Vulkan
-    /// correctness: the renderer's exit sequence drains its device
-    /// (`ww_bridge_pool_destroy` calls `ops->wait_idle` before tearing
-    /// slots down), which lets the acquire dma_fence it exported to
-    /// consumers signal cleanly. SIGKILL skips that drain — the kernel
-    /// then force-cancels the dma_fence, and on NVIDIA the consumer's
-    /// pending `vkWaitForFences` returns DEVICE_LOST.
     pub async fn kill(&self, id: &str) -> Result<()> {
         let handle = {
             let mut inner = self.inner.lock().await;
@@ -1176,8 +953,7 @@ impl RendererManager {
         let mut child_guard = handle.child.lock().await;
         if let Some(mut child) = child_guard.take() {
             // 5 s: comfortably above any plausible vkDeviceWaitIdle
-            // under load (image renderer is microseconds; mpv/wescene
-            // can spike to hundreds of ms during heavy frames).
+            // under load; image is usually microseconds, mpv/wescene slower.
             match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
                 Ok(_) => {
                     log::info!("renderer {id}: graceful shutdown");
@@ -1195,7 +971,6 @@ impl RendererManager {
 
 // ---------------------------------------------------------------------------
 // Reader thread
-// ---------------------------------------------------------------------------
 
 fn run_reader(
     id: RendererId,
@@ -1209,18 +984,15 @@ fn run_reader(
     clear_rgba: Arc<StdMutex<[f32; 4]>>,
     reap_tx: tokio::sync::mpsc::UnboundedSender<RendererId>,
 ) {
-    // Any exit path from this thread — clean EOF, recvmsg error, or
-    // panic — enqueues the renderer for eviction so stale ids don't
-    // leak out through find_reusable or bind_snapshot.
+    // Any reader exit enqueues renderer eviction so stale ids do not remain
+    // registered after EOF, recvmsg error, or panic.
     let _reap = ReaperOnDrop {
         id: id.clone(),
         tx: reap_tx,
     };
 
     // Hold the stream by dup'ing the raw fd so the blocking recv is not
-    // contending with sends on the same mutex. recvmsg on an AF_UNIX
-    // stream socket is safe to call from a different fd referencing the
-    // same open file description.
+    // contending with sends on the same mutex.
     let read_stream = {
         let guard = match sock.lock() {
             Ok(g) => g,
@@ -1248,10 +1020,8 @@ fn run_reader(
         };
         let (msg, fds) = received;
 
-        // Cache every BindBuffers with its fds. The renderer assigns the
-        // generation; subsequent bind_buffers (post-ConfigureBuffers
-        // re-export) replace the snapshot and retire prior acquire
-        // fences. Validates monotonicity defensively.
+        // Cache each BindBuffers snapshot with its fds; later generations
+        // replace earlier ones.
         if let EventMsg::BindBuffers {
             generation,
             flags,
@@ -1266,9 +1036,8 @@ fn run_reader(
             ref size,
         } = msg
         {
-            // Validate the parallel-array invariant up-front. The wire
-            // event is symmetric in every per-plane field, so any
-            // length mismatch means the renderer mis-encoded.
+            // Validate parallel arrays up front so all per-plane fields
+            // stay index-aligned.
             let expected = (count as usize) * (planes_per_buffer as usize);
             if stride.len() != expected
                 || plane_offset.len() != expected
@@ -1319,21 +1088,13 @@ fn run_reader(
                         "renderer {id}: BindBuffers cached (gen={generation}, flags=0x{flags:x})"
                     );
                 }
-                // A rebind retires any pending acquire fences — they
-                // belong to the previous buffer_generation and cannot
-                // be waited on against the new textures.
+                // A rebind retires acquire fences from the previous
+                // buffer_generation.
                 if let Ok(mut guard) = sync_fds.lock() {
                     guard.clear();
                 }
-                // Clear any in-flight ConfigureBuffers. We always clear,
-                // even if the renderer's `flags` differ from what we
-                // asked for — some renderers (mpv-via-GBM, wescene's
-                // ExSwapchain) only support the HOST_VISIBLE/LINEAR
-                // path and physically can't downgrade to DEVICE_LOCAL.
-                // Leaving pending_configure set after such a "best
-                // effort" answer would just keep `reconcile_buffer_flags`
-                // skipping the renderer forever. A warn log makes the
-                // mismatch visible.
+                // Clear any in-flight ConfigureBuffers, warning if the
+                // renderer answered with different flags.
                 if let Ok(mut guard) = pending_configure.lock() {
                     if let Some(want) = guard.take() {
                         if want != flags {
@@ -1438,8 +1199,8 @@ fn run_reader(
             ref message,
         } = msg
         {
-            // Iter 5 wires the daemon-side blacklist + retry. For now
-            // surface the failure for debugging.
+            // Renderer-side bind failure is surfaced for debugging; router
+            // retry paths handle consumer-side failures.
             log::warn!(
                 "renderer {id}: BindFailed fourcc=0x{fourcc:08x} \
                  modifier=0x{modifier:x} reason={reason} msg={message:?}"
@@ -1472,11 +1233,9 @@ fn run_reader(
 
 // ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 /// True when a `send_control` / `recv_event` error indicates the peer
-/// is gone (renderer crashed, closed its UDS, etc.). Callers use this
-/// to trigger `mark_dead` instead of just surfacing the error.
+/// is gone, so callers can evict the renderer.
 fn is_peer_gone(err: &CodecError) -> bool {
     use nix::errno::Errno;
     matches!(
@@ -1487,9 +1246,7 @@ fn is_peer_gone(err: &CodecError) -> bool {
 }
 
 /// RAII guard that enqueues the renderer for eviction when the reader
-/// thread drops it — any exit path (EOF, recvmsg error, panic) ends
-/// up here so the manager's map and the router's routing table stay
-/// in sync with the actual set of live renderer children.
+/// thread drops on any exit path.
 struct ReaperOnDrop {
     id: RendererId,
     tx: tokio::sync::mpsc::UnboundedSender<RendererId>,
@@ -1520,23 +1277,6 @@ impl Drop for TempUnlink {
 
 /// Build the typed `Init` control message the daemon emits right
 /// after a renderer subprocess connects back.
-///
-/// SPAWN_VERSION 3: Init carries only what's needed before
-/// `advertise_caps` (extent triple) plus the resolved settings kv.
-/// Resource path + extras (assets, workshop_id, …) ride on the
-/// renderer's CLI argv instead — see `spawn`'s argv builder.
-///
-/// `req.settings` is taken as authoritative — bound-checking and
-/// default-filling happen at the settings-store boundary
-/// (`Settings::reconcile` on startup, `coerce_and_validate` in the
-/// `SettingsSet` RPC), so spawn-time re-validation would be
-/// redundant defense. The typed `test_pattern` flag is injected
-/// last and overrides whatever was in `settings`, matching the
-/// apply-path contract where it is the canonical source for that
-/// key. `fps` is plain settings — callers put it in `req.settings`.
-///
-/// `spawn_version` is read from the manifest if set, otherwise the
-/// daemon's compile-time `SPAWN_VERSION` constant.
 pub(crate) fn build_init_msg(req: &SpawnRequest, def: &RendererDef) -> ControlMsg {
     let spawn_version = def.spawn_version.unwrap_or(SPAWN_VERSION);
 
@@ -1557,14 +1297,7 @@ pub(crate) fn build_init_msg(req: &SpawnRequest, def: &RendererDef) -> ControlMs
 }
 
 /// Run the post-accept handshake on a blocking std `UnixStream`:
-/// send the typed `Init` request, then read exactly one event. On
-/// `Ready` return the renderer's `DrmNode`; on `InitNack` surface a
-/// readable error; any other event is treated as a protocol violation
-/// (caller is expected to kill the child).
-///
-/// Factored out of `RendererManager::spawn` so unit tests can drive
-/// it directly over a `UnixStream::pair()` without booting a child
-/// process.
+/// send typed Init, then read exactly one event.
 pub(crate) fn run_init_handshake(sock: &StdUnixStream, init: &ControlMsg) -> Result<DrmNode> {
     send_control(sock, init, &[])
         .map_err(|e| Error::RendererSpawnFailed(format!("send Init: {e}")))?;
@@ -1601,9 +1334,7 @@ pub(crate) fn run_init_handshake(sock: &StdUnixStream, init: &ControlMsg) -> Res
 fn _assert_path_ok<P: AsRef<std::path::Path>>(_p: P) {} // compile-time shim
 
 /// Parse a `"r,g,b,a"` clear-color value. Components clamped to
-/// `[0, 1]`. Returns `None` when the string is malformed (wrong
-/// component count, non-numeric, NaN). Whitespace around components
-/// is permitted.
+/// `[0, 1]`; malformed strings return `None`.
 fn parse_clear_color(s: &str) -> Option<[f32; 4]> {
     let parts: Vec<&str> = s.split(',').map(str::trim).collect();
     if parts.len() != 4 {
@@ -1622,13 +1353,11 @@ fn parse_clear_color(s: &str) -> Option<[f32; 4]> {
 
 // ---------------------------------------------------------------------------
 // Test stubs
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 impl RendererHandle {
     /// Test-only: inject a `PeerCaps` so router-level negotiation
     /// tests can pretend the renderer shipped a `FormatCaps` event.
-    /// Replaces whatever was there.
     pub fn test_set_format_caps(&self, caps: crate::dma::negotiate::PeerCaps) {
         if let Ok(mut g) = self.format_caps.lock() {
             *g = Some(caps);
@@ -1636,8 +1365,7 @@ impl RendererHandle {
     }
 
     /// Test-only: read the producer's blacklist length. Lets a
-    /// router-side test assert that `on_renderer_bind_failed`
-    /// actually inserted into the producer caps.
+    /// router-side test assert bind-failure blacklist mutation.
     pub fn test_blacklist_len(&self) -> usize {
         self.format_caps
             .lock()
@@ -1649,9 +1377,7 @@ impl RendererHandle {
 
 impl RendererHandle {
     /// Construct a `RendererHandle` with no running child process.
-    /// Used by routing-table unit tests AND by the runtime self_test
-    /// (`waywallen --test`) which drives a stub renderer through the
-    /// production endpoint via [`Self::push_self_test_event`] etc.
+    /// Used by routing-table unit tests and runtime self-test.
     pub fn test_stub(id: &str, wp_type: &str) -> Arc<Self> {
         let (a, _b) = StdUnixStream::pair().expect("UnixStream pair");
         let (events_tx, _) = broadcast::channel::<EventMsg>(8);
@@ -1678,18 +1404,13 @@ impl RendererHandle {
     }
 
     /// self_test (runtime `--test`): broadcast an event as if the
-    /// renderer subprocess had emitted it. The router task subscribed
-    /// in `register_renderer` picks it up and runs the same hooks
-    /// (`on_renderer_bind` / `on_renderer_frame`) it would for a real
-    /// renderer.
+    /// renderer subprocess had emitted it.
     pub fn push_self_test_event(&self, ev: EventMsg) {
         let _ = self.events.send(ev);
     }
 
     /// self_test (runtime `--test`): stash a per-frame acquire sync_fd
-    /// the way the manager's reader thread does for production
-    /// renderers. The display endpoint dups one out of the deque on
-    /// each `forward_frame_ready` via [`clone_sync_fd`].
+    /// the way the manager's reader thread does for production.
     pub fn push_self_test_sync_fd(&self, seq: u64, fd: OwnedFd) {
         if let Ok(mut g) = self.sync_fds.lock() {
             g.push_back((seq, fd));
@@ -1702,8 +1423,7 @@ impl RendererHandle {
 
 impl RendererManager {
     /// Insert a pre-built handle into the manager's map without
-    /// spawning a child process. Used by routing-table unit tests
-    /// AND the runtime self_test (`waywallen --test`).
+    /// spawning a child process. Used by routing-table unit tests.
     pub async fn register_test_handle(&self, handle: Arc<RendererHandle>) {
         let mut inner = self.inner.lock().await;
         inner.renderers.insert(handle.id.clone(), handle);
@@ -1771,19 +1491,13 @@ mod init_handshake_tests {
         }
     }
 
-    // Legacy build_init_msg tests (resource_primary / resource_extras /
-    // typed fps) were removed when the wire shape was slimmed down for
-    // SPAWN_VERSION 3. Phase 6 will add a fresh test pass for the new
-    // shape (extent + settings kv only) once `resolve_active_settings`
-    // lands.
+    // Legacy Init-shape tests were removed after Init became plain settings
+    // plus user_properties.
 
     #[test]
     fn slim_init_carries_extent_and_settings_kv() {
-        // SPAWN_VERSION 3 sanity: extent triple + settings kv come
-        // through verbatim. The caller is responsible for sourcing a
-        // reconciled settings map (the daemon pulls it from
-        // `Settings::plugin(&name)`); build_init_msg does not refill
-        // defaults or filter unknown keys.
+        // Init carries settings kv verbatim; callers own sourcing them from
+        // the settings store.
         let mut settings_in = HashMap::new();
         settings_in.insert("loop_file".to_string(), "inf".to_string());
         let req = SpawnRequest {
@@ -1811,9 +1525,8 @@ mod init_handshake_tests {
 
     #[test]
     fn spawn_handshake_init_nack_aborts() {
-        // Daemon side ↔ renderer side over a socketpair: we drive
-        // `run_init_handshake` from the daemon side and have a tiny
-        // peer thread reply with an InitNack on the renderer side.
+        // Drive the daemon side over a socketpair while the peer replies
+        // with InitNack.
         let (daemon, renderer) = StdUnixStream::pair().expect("UnixStream::pair");
         daemon
             .set_nonblocking(false)
@@ -1905,8 +1618,7 @@ mod reuse_tests {
     }
 
     /// Construct a live mpv handle stub with the given extras dict.
-    /// Mirrors `RendererHandle::test_stub` but lets the test pin
-    /// `extras` (the per-spawn identity differentiator).
+    /// Mirrors `RendererHandle::test_stub` but lets tests pin extras.
     fn live_mpv_handle(id: &str, extras: HashMap<String, String>) -> Arc<RendererHandle> {
         let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
         let (events_tx, _) = tokio::sync::broadcast::channel::<EventMsg>(8);
@@ -1981,9 +1693,8 @@ mod reuse_tests {
 
     #[tokio::test]
     async fn send_setting_changed_writes_wire_and_updates_cache() {
-        // Direct end-to-end: spawn a socketpair, plug one side into a
-        // RendererHandle's sock, call send_setting_changed, drain the
-        // wire on the other side, assert the kv arrived.
+        // Direct end-to-end: wire a socketpair into a RendererHandle and
+        // drain the setting_changed control message from the peer side.
         let mut registry = RendererRegistry::new();
         registry.register(def_mpv());
         let mgr = RendererManager::new(registry);

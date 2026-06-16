@@ -1,24 +1,8 @@
-//! C codegen for a parsed `Protocol`.
-//!
-//! Phase 2 output: a single header + a single implementation file that
-//! any C consumer can compile against. Both files depend only on
-//! `<stdint.h>`, `<stdlib.h>`, and `<string.h>` — no libc extensions,
-//! no pthread, no OS syscalls. Wire I/O and SCM_RIGHTS are the
-//! libwaywallen_display `codec` layer's job, not the generated code's.
-//!
-//! Naming:
-//!   - Structs, functions, and constants are snake_case with the
-//!     `ww_` prefix.
-//!   - Request messages become `ww_req_<name>_t`.
-//!   - Event messages become `ww_evt_<name>_t`.
-//!   - Opcode enum values: `WW_REQ_<NAME>` / `WW_EVT_<NAME>`.
-
 use crate::parser::{ArgType, FdSpec, InboundKind, Message, Protocol};
 use std::fmt::Write;
 
 // ---------------------------------------------------------------------------
 // Public entry points
-// ---------------------------------------------------------------------------
 
 pub fn emit_header(p: &Protocol) -> String {
     let inbound = MsgKind::inbound_for(p.inbound_kind);
@@ -39,7 +23,6 @@ pub fn emit_header(p: &Protocol) -> String {
 
 // ---------------------------------------------------------------------------
 // Header
-// ---------------------------------------------------------------------------
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum MsgKind {
@@ -317,21 +300,13 @@ fn emit_message_decls(out: &mut String, m: &Message, kind: MsgKind) {
 
 // ---------------------------------------------------------------------------
 // Source (.c)
-// ---------------------------------------------------------------------------
 
 pub fn emit_source(p: &Protocol) -> String {
     emit_source_with_include(p, default_c_include(&p.name))
 }
 
-/// Default `#include "..."` path emitted at the top of the generated
-/// C source. Branches by protocol name because the two consumers in
-/// this workspace land the generated header at different install
-/// locations:
-///   - `waywallen-ipc`     → bridge consumers install the header as
-///                            `<waywallen-bridge/ipc_v1.h>`.
-///   - `waywallen-display` → libwaywallen_display keeps it next to
-///                            the .c at `src/generated/ww_proto.h`.
-/// Unknown protocols default to `"ww_proto.h"` (local).
+/// Default `#include "..."` path for generated C source.
+/// Different protocol consumers install headers at different paths.
 pub fn default_c_include(protocol_name: &str) -> &'static str {
     match protocol_name {
         "waywallen-ipc" | "waywallen_ipc" => "waywallen-bridge/ipc_v1.h",
@@ -942,7 +917,6 @@ fn free_stmt_for(ty: &ArgType, field: &str) -> String {
 
 // ---------------------------------------------------------------------------
 // Type & name mapping
-// ---------------------------------------------------------------------------
 
 fn message_type_name(m: &Message, kind: MsgKind) -> String {
     format!("{}{}_t", kind.prefix(), m.name)
@@ -984,7 +958,6 @@ fn c_field_name(raw: &str) -> String {
 
 // ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

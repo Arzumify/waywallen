@@ -1,15 +1,3 @@
-//! Two-tier background probe scheduler.
-//!
-//! Each tick walks pending work in two narrowly-scoped queries:
-//!
-//! * **stat tier** (cheap): `fs::metadata` for size + mtime, for items
-//!   whose `size` or `stat_at` is NULL. No cooldown — once stat'd, a
-//!   row drops out until a refresh re-imports it.
-//! * **media tier** (expensive): libavformat for width/height, for
-//!   `image`/`video` items whose extension is in [`PROBABLE_EXTS`] and
-//!   whose stored dims/timestamps suggest a probe never landed (see
-//!   [`repo::list_items_needing_probe`] for the exact SQL).
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,8 +19,7 @@ pub const PROBE_TICK: Duration = Duration::from_secs(300);
 pub const COMMIT_BATCH: usize = 32;
 
 /// Extensions libavformat can probe. Lowercased, no leading dot.
-/// Used at the SQL layer ([`repo::list_items_needing_probe`]) so
-/// non-matching items don't even appear in the candidate set.
+/// Used by [`repo::list_items_needing_probe`] to prefilter DB rows.
 pub const PROBABLE_EXTS: &[&str] = &[
     "mp4", "mkv", "webm", "mov", "avi", "png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "tif",
     "avif",
@@ -66,9 +53,6 @@ struct PendingWrite {
 
 /// Drain everything that currently needs work in a single pass. Two
 /// unbounded SQL queries (stat-pending and probe-pending) are merged
-/// on item id; we run stat / libavformat, committing every
-/// [`COMMIT_BATCH`] writes. Single SQLite connection means no
-/// concurrent writers can insert new candidates mid-pass.
 pub async fn run_pending(
     db: &DatabaseConnection,
     probe: Arc<dyn MediaProbe>,
@@ -188,11 +172,8 @@ pub async fn scheduler_loop(
     }
 }
 
-/// Commit a buffered batch of stat/media writes in one transaction. On
-/// any per-item or commit error the whole tx is rolled back and the
-/// items remain candidates for the next pass; partial-batch stat
-/// counters are only credited to `stats` on commit success so the log
-/// line never claims writes that didn't land.
+/// Commit a buffered batch of stat/media writes in one transaction.
+/// Any per-item or commit error rolls back the whole transaction.
 async fn flush_pending(
     db: &DatabaseConnection,
     pending: &mut Vec<PendingWrite>,

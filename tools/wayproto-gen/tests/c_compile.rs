@@ -1,12 +1,3 @@
-//! Integration test: generate the C header + source from the real
-//! `waywallen-display-v1.xml` protocol description, hand them to gcc
-//! under the same strict flags the rest of the C side uses, and also
-//! compile-and-run a small round-trip program that exercises encode →
-//! decode → free on a representative subset of the messages.
-//!
-//! The test is skipped (not failed) if `gcc` is not on PATH — some
-//! minimal CI images lack a C toolchain.
-
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -50,7 +41,6 @@ fn generated_c_compiles_cleanly() {
     std::fs::create_dir_all(&tmp).unwrap();
     // Generated source includes "waywallen-bridge/ipc_v1.h" — mirror
     // that include path layout under the temp dir so gcc resolves it
-    // with `-I tmp`.
     let h_dir = tmp.join("waywallen-bridge");
     std::fs::create_dir_all(&h_dir).unwrap();
     let h_path = h_dir.join("ipc_v1.h");

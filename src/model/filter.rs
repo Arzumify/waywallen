@@ -163,7 +163,6 @@ pub fn wallpaper_filter_to_condition(filter: &pb::WallpaperFilterRule) -> Option
 
 /// Tag membership predicate. SQLite COLLATE NOCASE handles case
 /// insensitivity for tag names. CONTAINS / CONTAINS_NOT are nonsensical
-/// for tag membership so we collapse them onto IS / IS_NOT.
 fn tag_condition_to_condition(tag: &str, cond: pb::StringCondition) -> Option<Condition> {
     let tag_quoted = sqlite_quote(tag);
     let exists = format!(

@@ -1,21 +1,3 @@
-//! Rust codegen for a parsed `Protocol`.
-//!
-//! Output is a single self-contained Rust source file that depends on
-//! nothing but `std`. It declares:
-//!
-//!   - `PROTOCOL_NAME`, `PROTOCOL_VERSION`
-//!   - `mod opcode::{request, event}` with `pub const` per message
-//!   - `struct Rect` (reused across messages)
-//!   - `enum DecodeError`
-//!   - `enum Request` + `impl Request` with `opcode`, `expected_fds`,
-//!     `encode`, `decode`
-//!   - `enum Event` + mirror impl
-//!
-//! The caller is expected to frame the encoded body with the 4-byte
-//! `[u16 opcode][u16 total_length]` header. Generated `encode` only
-//! writes the body; `decode` only consumes the body. Ancillary fds are
-//! passed out-of-band by the codec layer.
-
 use crate::parser::{ArgType, FdSpec, InboundKind, Message, Protocol};
 use std::fmt::Write;
 

@@ -1,11 +1,3 @@
-//! Pure-function layout module: turn a `(texture_size, display_size,
-//! fillmode, location)` tuple into the `source_rect` / `dest_rect` /
-//! `clear_color` triple the wire-level `set_config` event carries.
-//!
-//! Also hosts `display_point_to_texture` — the inverse mapping used
-//! by pointer-event forwarding to translate display-local pixel
-//! coordinates back into renderer-texture pixel coordinates.
-
 use serde::{Deserialize, Serialize};
 
 use crate::scheduler::ProjectedConfig;
@@ -21,9 +13,7 @@ pub enum FillMode {
 }
 
 /// Buffer-side rotation, expressed as a clockwise turn of the displayed
-/// image. Wire-mapped onto `wl_output.transform` 0..3 (no flipped
-/// variants); the compositor compensates for the declared pre-rotation
-/// so the user sees the wallpaper rotated CW by this much.
+/// image. Wire-mapped onto `wl_output.transform` 0..3.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum Rotation {
@@ -36,9 +26,7 @@ pub enum Rotation {
 
 impl Rotation {
     /// `wl_output.transform` value matching this rotation. The
-    /// compositor reads this from `set_buffer_transform` as "the buffer
-    /// is pre-rotated by N° CCW", which makes the on-screen image
-    /// appear rotated N° CW.
+    /// compositor reads this from `set_buffer_transform`.
     pub fn to_wl_transform(self) -> u32 {
         match self {
             Rotation::Normal => 0,
@@ -164,8 +152,7 @@ pub struct LayoutOutput {
 }
 
 /// Resolve one layout. Pure; never panics. Degenerate inputs
-/// (`tex_w/h <= 0` or `disp_w/h <= 0`) collapse to a Stretched output
-/// that the consumer will silently no-op.
+/// collapse to a Stretched output with clamped non-negative dimensions.
 pub fn compute(i: LayoutInput) -> LayoutOutput {
     if i.tex_w <= 0.0 || i.tex_h <= 0.0 || i.disp_w <= 0.0 || i.disp_h <= 0.0 {
         return LayoutOutput {
@@ -196,9 +183,8 @@ pub fn compute(i: LayoutInput) -> LayoutOutput {
         }
 
         FillMode::PreserveAspectCrop => {
-            // Pick the source-side rect that, when stretched to fill
-            // the display, preserves aspect. The cropped axis is
-            // positioned by `location`.
+            // Pick a source rect that preserves aspect when stretched
+            // to the full display.
             let scale = (i.disp_w / i.tex_w).max(i.disp_h / i.tex_h);
             let sw = i.disp_w / scale;
             let sh = i.disp_h / scale;
@@ -212,10 +198,8 @@ pub fn compute(i: LayoutInput) -> LayoutOutput {
         }
 
         FillMode::Centered => {
-            // 1:1 pixel display. If the texture is smaller than the
-            // display on a given axis, place it inside according to
-            // `location` and letterbox the rest. If larger, crop the
-            // texture according to `location`.
+            // Display texture pixels 1:1, centering or cropping per axis
+            // according to the requested location.
             let (sx, sw, dx, dw) = axis_centered(i.tex_w, i.disp_w, i.location.h_factor());
             let (sy, sh, dy, dh) = axis_centered(i.tex_h, i.disp_h, i.location.v_factor());
             LayoutOutput {
@@ -228,16 +212,7 @@ pub fn compute(i: LayoutInput) -> LayoutOutput {
 }
 
 /// Map a display-local point to renderer-texture-local pixel coordinates,
-/// using the active `ProjectedConfig` (`source_*` in tex space, `dest_*`
-/// in display space, `transform` in `wl_output.transform` semantics).
-///
-/// Returns `None` when the point falls outside `dest_rect` — the caller
-/// should drop the event so renderer state isn't poked from the
-/// letterbox/pillarbox region.
-///
-/// `transform` values:
-///   0 normal, 1 = 90° CCW, 2 = 180°, 3 = 270° CCW,
-///   4 flipped, 5 flipped+90°, 6 flipped+180°, 7 flipped+270°.
+/// using the active projected source and destination rectangles.
 pub fn display_point_to_texture(
     disp_x: f32,
     disp_y: f32,
@@ -287,7 +262,6 @@ fn axis_centered(tex: f32, disp: f32, factor: f32) -> (f32, f32, f32, f32) {
 
 // ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -353,7 +327,6 @@ mod tests {
         assert_eq!(out.source, (0.0, 0.0, 1920.0, 1080.0));
         // scale = min(800/1920, 600/1080) = min(0.4167, 0.5556) = 0.4167
         // dest_w = 1920 * 0.4167 = 800; dest_h = 1080 * 0.4167 = 450
-        // dy = (600 - 450) * 0.5 = 75
         assert!((out.dest.0 - 0.0).abs() < 1e-3);
         assert!((out.dest.1 - 75.0).abs() < 1e-3);
         assert!((out.dest.2 - 800.0).abs() < 1e-3);
@@ -376,7 +349,6 @@ mod tests {
     fn crop_wider_texture_crops_horizontally() {
         // 16:9 tex into 4:3 disp: scale = max(800/1920, 600/1080) = max(0.417, 0.556) = 0.556
         // sw = 800/0.556 = 1440, sh = 600/0.556 = 1080
-        // sx = (1920-1440)*0.5 = 240, sy = 0
         let out = compute(input(
             (1920.0, 1080.0),
             (800.0, 600.0),
@@ -506,7 +478,6 @@ mod tests {
 
     // -----------------------------------------------------------------
     // display_point_to_texture
-    // -----------------------------------------------------------------
 
     fn cfg(
         source: (f32, f32, f32, f32),
@@ -622,9 +593,6 @@ mod tests {
     fn point_transform_90_ccw_inverse_corner_mapping() {
         // Forward: 90° CCW rotation of buffer onto display.
         //   buffer A=top-left, B=top-right, C=bottom-left, D=bottom-right
-        //   end up on display as: B=top-left, D=top-right, A=bottom-left,
-        //   C=bottom-right. Inverse maps display corners back to buffer:
-        // Buffer 100x200 (tall) -> 200x100 (wide) display.
         let c = cfg((0.0, 0.0, 100.0, 200.0), (0.0, 0.0, 200.0, 100.0), 1);
         // display top-left (0, 0) -> buffer top-right (100, 0)
         approx(
@@ -667,9 +635,8 @@ mod tests {
 
     #[test]
     fn point_transform_270_ccw_corner_mapping() {
-        // 270° CCW = 90° CW: buffer C=bottom-left ends up at display
-        // top-left. Inverse:
-        // Buffer 100x200 (tall) -> 200x100 (wide) display.
+        // 270 degrees CCW maps the buffer bottom-left to display top-left.
+        // The inverse maps display top-left back to buffer bottom-left.
         let c270 = cfg((0.0, 0.0, 100.0, 200.0), (0.0, 0.0, 200.0, 100.0), 3);
         // display top-left -> buffer bottom-left (0, 200)
         approx(

@@ -1,16 +1,3 @@
-//! Plugin-scoped persistence of scan snapshots.
-//!
-//! Groups incoming `WallpaperEntry` by `(plugin_name, library_root)`;
-//! each distinct root becomes a `library` row whose `path` is the
-//! absolute scanned directory. Both `item.path` and `item.preview_path`
-//! are **relative to `library.path`** — the sync layer strips the
-//! prefix; Lua plugins continue emitting absolute paths.
-//!
-//! Every sync is a full snapshot: libraries the plugin stopped
-//! reporting are deleted; within each surviving library items absent
-//! from the snapshot are deleted. Tags live in a shared `tag` table
-//! and are linked via `item_tag` after each item upsert.
-
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -18,7 +5,7 @@ use crate::error::{Result, ResultExt};
 use sea_orm::DatabaseConnection;
 
 use super::repo::{self, ItemUpsertArgs};
-use crate::wallpaper_type::WallpaperEntry;
+use crate::wallpaper::types::WallpaperEntry;
 
 #[derive(Debug, Clone)]
 pub struct PluginRef<'a> {
@@ -38,33 +25,22 @@ pub struct SyncSummary {
 
 /// Persist the full state of one plugin. Idempotent; reports counts.
 ///
-/// Stale items are pruned by timestamp: a `seen_before` instant is
-/// captured up front, every upsert this round stamps `sync_at` at or
-/// after it, and afterwards items older than `seen_before` are swept —
-/// but only within `present_libraries`. `present_libraries` lists the
-/// library paths that were actually reachable this round (root exists
-/// on disk); items of a momentarily-unreachable library are left
-/// untouched. A present library that returned no entries gets all its
-/// items swept. Library rows themselves are never deleted here — that
-/// is an explicit user action.
 pub async fn sync_plugin_entries(
     db: &DatabaseConnection,
     plugin: PluginRef<'_>,
     entries: &[WallpaperEntry],
     present_libraries: &[String],
 ) -> Result<(SyncSummary, super::entities::source_plugin::Model)> {
-    // Captured before any upsert so this round's writes stamp a
-    // `sync_at >= seen_before`; the post-sync sweep deletes anything
-    // strictly older that we therefore did not re-see.
+    // Captured before upserts so this round writes `sync_at >= seen_before`.
+    // The post-sync sweep deletes older rows.
     let seen_before = crate::tasks::now_ms();
 
     let plugin_model = repo::upsert_plugin(db, plugin.name, plugin.version)
         .await
         .with_context(|| format!("upsert plugin={}", plugin.name))?;
 
-    // (library_root -> Vec<(item.path, &entry)>). Keeping a reference
-    // to the original entry lets us copy rich columns off without
-    // reconstructing them.
+    // Group by library_root while keeping the original entry reference.
+    // Rich columns are copied later without cloning every entry.
     let mut grouped: HashMap<String, Vec<(String, &WallpaperEntry)>> = HashMap::new();
     let mut dropped = 0usize;
     for entry in entries {
@@ -129,8 +105,6 @@ pub async fn sync_plugin_entries(
 
             // Sync only persists what the plugin emitted. Missing
             // media metadata stays NULL — the daemon's scheduled
-            // probe task is responsible for filling those columns
-            // out-of-band.
             let size = entry.size;
             let width = entry.width.and_then(|v| i32::try_from(v).ok());
             let height = entry.height.and_then(|v| i32::try_from(v).ok());
@@ -166,7 +140,6 @@ pub async fn sync_plugin_entries(
 
     // Timestamp sweep: drop items not re-seen this round, scoped to the
     // libraries that were actually present. Map the caller's present
-    // paths to this plugin's library ids.
     let present: HashSet<&str> = present_libraries.iter().map(String::as_str).collect();
     let present_ids: Vec<i64> = repo::list_libraries_by_plugin(db, plugin_model.id)
         .await?
@@ -494,7 +467,6 @@ mod tests {
 
         // Both /a and /b are present this round, but only /a/x.png is
         // re-seen. /a/y.png (stale) and /b/z.png (present-but-empty
-        // library) are both swept — the option-B behaviour.
         let second = [entry("p", "/a", "/a/x.png", "image")];
         let (summary, _) = sync_plugin_entries(
             &db,

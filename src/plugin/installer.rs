@@ -29,8 +29,6 @@ fn read_plugin_id(manifest: &Path) -> Result<String> {
 
 /// Extract a plugin `.zip` into the user plugin directory and return the
 /// installed plugin id. The archive must contain a top-level directory
-/// holding `plugin.toml`. Renderer components only load on the next daemon
-/// start, so callers should surface a "restart required" hint.
 pub fn install_zip(zip_path: &str) -> Result<String> {
     let file = std::fs::File::open(zip_path).map_err(|e| fail(format!("open {zip_path}: {e}")))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| fail(format!("read zip: {e}")))?;

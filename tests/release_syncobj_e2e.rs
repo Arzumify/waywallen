@@ -1,14 +1,3 @@
-//! End-to-end probe for the release_syncobj path.
-//!
-//! Spawns `waywallen-image-renderer` against a UDS the test owns,
-//! drains events, and verifies:
-//!   - `ReleaseSyncobj` arrives once with exactly 1 fd (and the fd
-//!     imports cleanly as a drm_syncobj on this host's render node).
-//!   - `FrameReady` carries a non-zero `release_point` and 1 fd.
-//!
-//! Skipped if the renderer binary or the requested image asset isn't
-//! present (CI sandbox), or if no usable `/dev/dri/renderD*` exists.
-
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
@@ -62,10 +51,8 @@ fn release_syncobj_round_trip() {
     let listener = UnixListener::bind(&sock_path).expect("bind");
     let _cleanup = common::SockCleanup(sock_path.clone());
 
-    // SPAWN_VERSION 3: image path arrives via `--path`; extent +
-    // settings ride on the typed Init message we send right after
-    // accept. The image renderer's manifest declares `fps`, but we
-    // pass an empty kv list — defaults are fine for this smoke.
+    // SPAWN_VERSION 3 passes the image path via `--path`.
+    // Extent and settings ride on the typed Init message below.
     let child = Command::new(&bin)
         .arg("--ipc")
         .arg(&sock_path)
@@ -177,9 +164,8 @@ fn release_syncobj_round_trip() {
                 );
                 saw_format_caps = true;
 
-                // Iter 3c: renderer waits for NegotiateBuffers before
-                // binding. Drive that here — the test plays the
-                // daemon's role.
+                // Renderer waits for NegotiateBuffers before binding.
+                // Drive that handshake here so the test controls format.
                 send_control(
                     &stream,
                     &ControlMsg::NegotiateBuffers {

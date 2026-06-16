@@ -1,10 +1,3 @@
-//! wayproto-gen — library entry point.
-//!
-//! The same code powers both the `wayproto-gen` CLI binary (for
-//! shell invocation) and in-process use from a `build.rs` that wants
-//! to call the parser and codegen directly without spawning a
-//! subprocess.
-
 pub mod codegen_c;
 pub mod codegen_rust;
 pub mod parser;

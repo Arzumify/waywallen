@@ -1,15 +1,3 @@
-//! Initial schema for `waywallen-v2.db`.
-//!
-//! Collapsed from the previous v1 chain (init_v1 + create_item_fts +
-//! expand_item_fts_description + add_item_stat_columns +
-//! drop_playlist_tables + swap_format_for_content_rating) now that the
-//! database filename has been bumped to `-v2`. Pre-v2 files are ignored;
-//! there is no upgrade path.
-//!
-//! `tag.name` needs case-insensitive uniqueness, which SeaORM's
-//! portable builder doesn't surface, so that table is emitted as raw
-//! SQLite DDL.
-
 use sea_orm_migration::prelude::*;
 
 use crate::model::fts::{

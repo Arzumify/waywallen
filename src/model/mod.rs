@@ -1,15 +1,3 @@
-//! SQLite persistence layer.
-//!
-//! Two tables seed the schema:
-//!
-//! - `library` — user-added wallpaper root folders.
-//! - `item`    — individual wallpapers discovered inside a library,
-//!               addressed by `(library_id, relative_path)`.
-//!
-//! The daemon opens a single pooled connection at startup via
-//! [`connect`] and stashes it on `AppState.db`. Migrations run
-//! transactionally on every boot and are idempotent.
-
 use std::path::Path;
 use std::time::Duration;
 
@@ -27,7 +15,6 @@ pub mod sync;
 
 /// Open (or create) the SQLite DB at `db_path`, run pending migrations,
 /// and hand back a pooled [`DatabaseConnection`]. The parent directory
-/// is created on demand so a fresh `$XDG_DATA_HOME` works on first run.
 pub async fn connect(db_path: &Path) -> Result<DatabaseConnection> {
     if let Some(parent) = db_path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -42,27 +29,6 @@ pub async fn connect(db_path: &Path) -> Result<DatabaseConnection> {
 
 /// Open a connection to an arbitrary SQLite URL. Exists so tests can
 /// target `sqlite::memory:` without touching the filesystem.
-///
-/// Tuning notes:
-/// - PRAGMAs run per-connection through `map_sqlx_sqlite_opts`; the
-///   sea-orm pool reapplies them on every newly-acquired connection,
-///   so `foreign_keys` actually enforces consistently.
-/// - WAL + `synchronous=NORMAL` is safe on power loss to the last
-///   committed transaction.
-/// - `max_connections=1` serializes everything against a single SQLite
-///   connection. SQLite is "multi-reader, single-writer" so multiple
-///   pooled connections only paid off for concurrent reads; the price
-///   was `SQLITE_BUSY` / `SQLITE_BUSY_SNAPSHOT` whenever two writers
-///   raced (the latter slips past `busy_timeout`). One connection
-///   removes that whole class of failure — at the cost of read latency
-///   under heavy write contention, which we don't have.
-/// - `mmap_size=128MiB` / `cache_size=2000 pages (~8 MiB)` /
-///   `journal_size_limit=64MiB` keep memory bounded for the daemon.
-/// - `auto_vacuum=INCREMENTAL` only takes effect when applied to an
-///   *empty* DB; existing prod DBs stay on whatever they were created
-///   with (a no-op here, not a regression).
-/// - For `:memory:` URLs SQLite silently ignores WAL/auto_vacuum, so
-///   the same code path serves tests.
 pub async fn connect_url(url: &str) -> Result<DatabaseConnection> {
     let mut opt = ConnectOptions::new(url.to_owned());
 

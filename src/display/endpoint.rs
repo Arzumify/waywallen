@@ -1,6 +1,3 @@
-//! Display endpoint — accepts external display client connections on a
-//! Unix socket and speaks the `waywallen-display-v1` protocol with them.
-
 use anyhow::anyhow;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream as StdUnixStream;
@@ -12,12 +9,8 @@ use crate::display::proto::{
     codec, error_code, opcode, Event, Request, PROTOCOL_NAME, PROTOCOL_VERSION,
 };
 use crate::events::GlobalEvent;
-// Display-protocol failures are all daemon-internal (this layer talks
-// to consumer processes over a UDS, not to the WS/dbus surface). Every
-// anyhow! site in this file is wrapped as `Error::Internal(anyhow!(...))`
-// — the explicit constructor over a `.into()` shorthand because the
-// closure-result inference inside `.map_err(|e| ...)` can't pin the
-// target Error type (multiple `From<anyhow::Error>` impls are visible).
+// Display-protocol failures are daemon-internal; this layer talks to
+// display consumers over a UDS, not public WS or D-Bus surfaces.
 use crate::display::layout::display_point_to_texture;
 use crate::error::{Error, Result, ResultExt};
 use crate::renderer_manager::{BindSnapshot, RendererHandle};
@@ -30,21 +23,12 @@ use crate::sync::{drm_device, FrameRecord};
 pub const SERVER_VERSION: &str = concat!("waywallen ", env!("CARGO_PKG_VERSION"));
 
 /// Inclusive range of `client_protocol_version` values this daemon
-/// accepts. Bump these when extending the wire protocol; everything
-/// outside the range is rejected at handshake with
-/// `error{code = VERSION_UNSUPPORTED}`.
-///
-/// v7 added the `window_state` request (opcode 12). A v6 client that
-/// never emits it is still fully compatible with a v7 daemon (the
-/// daemon defaults the display to "no autopause condition met"); we
-/// therefore keep MIN at 6 so existing libwaywallen_display
-/// deployments don't break on upgrade.
+/// accepts. Unsupported versions are rejected during handshake.
 pub const MIN_SUPPORTED_CLIENT_VERSION: u32 = 6;
 pub const MAX_SUPPORTED_CLIENT_VERSION: u32 = PROTOCOL_VERSION;
 
 /// Advertised in `welcome.features`. Advisory in v3+ — clients MUST
-/// NOT gate on these; the negotiated `client_protocol_version` is
-/// authoritative for what the daemon supports.
+/// NOT gate on these; negotiated protocol version is authoritative.
 const ADVERTISED_FEATURES: &[&str] = &[
     "explicit_sync_fd",
     "drm_syncobj_release",
@@ -53,7 +37,6 @@ const ADVERTISED_FEATURES: &[&str] = &[
 
 // ---------------------------------------------------------------------------
 // Public entry point
-// ---------------------------------------------------------------------------
 
 pub fn default_socket_path() -> PathBuf {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
@@ -65,18 +48,14 @@ pub fn default_socket_path() -> PathBuf {
 }
 
 /// Back-compat 2-arg entry point used by integration tests that
-/// don't care about daemon-level shutdown. Internally forwards to
-/// [`serve_with_shutdown`] with a never-firing channel so the fast
-/// path in production (D-Bus `Quit` → kick every blocking `recvmsg`)
-/// goes through the same code.
+/// don't care about daemon-level shutdown.
 pub async fn serve(
     sock_path: &Path,
     router: Arc<Router>,
     events_tx: tokio::sync::broadcast::Sender<GlobalEvent>,
 ) -> Result<()> {
     // Holding `_never_tx` in scope keeps `wait_for` parked on `Pending`
-    // — if we dropped it, every subscriber would see `RecvError::Closed`
-    // and the shutdown branch would fire immediately.
+    // instead of making subscribers observe `RecvError::Closed`.
     let (_never_tx, rx) = tokio::sync::watch::channel(false);
     let res = serve_with_shutdown(sock_path, router, events_tx, rx).await;
     drop(_never_tx);
@@ -138,7 +117,6 @@ pub async fn serve_with_shutdown(
 
 // ---------------------------------------------------------------------------
 // Per-client state machine
-// ---------------------------------------------------------------------------
 
 async fn handle_client(
     stream: StdUnixStream,
@@ -170,7 +148,6 @@ async fn handle_client(
 
 // ---------------------------------------------------------------------------
 // Handshake
-// ---------------------------------------------------------------------------
 
 async fn do_handshake(
     stream: &StdUnixStream,
@@ -300,18 +277,13 @@ async fn do_handshake(
         },
         properties,
         // consumer_caps arrives ASYNCHRONOUSLY in the frame loop's
-        // request handler (see run_frame_loop) — we don't block the
-        // handshake on it. Iter 2 design: the consumer SHOULD send
-        // consumer_caps right after register_display, but tests +
-        // legacy paths might not, and forcing it here couples
-        // handshake completion to a non-essential message.
+        // request handler; registration does not block on it.
         consumer_caps: None,
     })
 }
 
 // ---------------------------------------------------------------------------
 // Frame loop — translate DisplayOutEvent → wire Event
-// ---------------------------------------------------------------------------
 
 async fn run_frame_loop(
     stream: StdUnixStream,
@@ -334,14 +306,10 @@ async fn run_frame_loop(
     });
 
     // Most-recently-bound renderer, kept so inbound pointer events can
-    // be forwarded without a routing-table walk. `None` until the first
-    // Bind arrives; reset on Unbind so a stale handle doesn't outlive
-    // the link.
+    // be forwarded without a routing-table walk.
     let mut bound_renderer: Option<Arc<RendererHandle>> = None;
     // Latest SetConfig pushed to this display. Used to inverse-map
-    // pointer coords from display-local pixels into renderer-texture
-    // pixels before forwarding. `None` between Unbind and the next
-    // SetConfig — pointer events that race that gap are dropped.
+    // pointer coords from display pixels into renderer texture pixels.
     let mut latest_config: Option<ProjectedConfig> = None;
 
     let result = loop {
@@ -449,8 +417,7 @@ async fn run_frame_loop(
                     if let (Some(r), Some(cfg)) = (bound_renderer.as_ref(), latest_config.as_ref()) {
                         if let Some((tx, ty)) = display_point_to_texture(x, y, cfg) {
                             // RendererManager.send_pointer_motion gates on the
-                            // renderer's manifest events list, so unsubscribed
-                            // renderers see nothing.
+                            // renderer's manifest events list.
                             if let Err(e) = router.renderer_manager()
                                 .send_pointer_motion(&r.id, tx, ty, timestamp_us, modifiers).await
                             {
@@ -501,22 +468,14 @@ async fn run_frame_loop(
         }
     };
     // Force the blocking reader out of its parked `recvmsg`. `shutdown`
-    // operates on the underlying socket object, so it propagates to
-    // every `try_clone`d fd — including the one the reader holds. The
-    // reader's next `recvmsg` returns 0 bytes → `CodecError::PeerClosed`
-    // → reader thread returns, and the blocking pool worker is
-    // reclaimable instead of hanging `BlockingPool::shutdown` during
-    // runtime teardown.
+    // operates on the socket itself, so all dup'd handles observe it.
     let _ = stream.shutdown(std::net::Shutdown::Both);
     let _ = reader_handle.await;
     result
 }
 
 /// Run `codec::recv_request` on the blocking pool but tear down the
-/// wait if `shutdown_rx` flips to `true`. On shutdown we force
-/// `recvmsg` to return by calling `shutdown(SHUT_RDWR)` on a cloned
-/// fd referring to the same socket object, so the blocking task is
-/// always joined — never leaked.
+/// wait if `shutdown_rx` flips to `true`.
 async fn recv_request_cancellable(
     stream: &StdUnixStream,
     shutdown_rx: &mut tokio::sync::watch::Receiver<bool>,
@@ -538,20 +497,13 @@ async fn recv_request_cancellable(
     }
 }
 
-/// Resolve to `()` once the daemon flips the shutdown flag.
-///
-/// Wrapped in a helper because `watch::Receiver::wait_for` yields a
-/// `Ref<'_, T>` holding an internal `RwLockReadGuard`, which is `!Send`.
-/// Hiding the `Ref` inside a plain `async fn -> ()` keeps the
-/// surrounding `tokio::select!` futures `Send` so they can run on the
-/// multi-thread runtime.
+/// Resolve once the daemon flips the shutdown flag.
 async fn wait_shutdown(rx: &mut tokio::sync::watch::Receiver<bool>) {
     let _ = rx.wait_for(|v| *v).await;
 }
 
 // ---------------------------------------------------------------------------
 // Wire-event senders
-// ---------------------------------------------------------------------------
 
 async fn send_unbind(stream: &StdUnixStream, buffer_generation: u64) -> Result<()> {
     let evt = Event::Unbind { buffer_generation };
@@ -623,11 +575,7 @@ async fn send_bind_from_renderer(
 }
 
 /// Translate `BindSnapshot` into the display-protocol `BindBuffers`
-/// event. Both schemas are now parallel-array multi-plane (with
-/// `planes_per_buffer * count` entries per array), so this is a pure
-/// pass-through plus a fresh `dup(2)` of every dma-buf fd. The returned
-/// raw fds are owned by the caller, which must `close(2)` them after
-/// `sendmsg` completes.
+/// event. Both schemas use flattened parallel arrays per plane.
 fn build_bind_event(snap: &BindSnapshot) -> Result<(Event, Vec<RawFd>)> {
     let buffer_generation = snap.generation;
     let count = snap.count;
@@ -700,7 +648,6 @@ fn build_bind_event(snap: &BindSnapshot) -> Result<(Event, Vec<RawFd>)> {
 
 // ---------------------------------------------------------------------------
 // Frame forwarding (with sync fence)
-// ---------------------------------------------------------------------------
 
 fn acquire_sync_fd(renderer: &Arc<RendererHandle>, seq: u64) -> Result<OwnedFd> {
     renderer.clone_sync_fd(seq).ok_or_else(|| {
@@ -721,12 +668,7 @@ async fn forward_frame_ready(
 ) -> Result<()> {
     let fence = acquire_sync_fd(renderer, seq)?;
     // Allocate a fresh BINARY drm_syncobj for this consumer and frame.
-    // The HANDLE stays in the daemon (handed off to the reaper) so it
-    // can WAIT on the consumer's eventual signal and TRANSFER the
-    // resulting fence onto the producer's release timeline at
-    // `release_point`. The exported FD goes to the consumer; the
-    // kernel refcounts the syncobj so the daemon-side handle and
-    // consumer-side fd are independent.
+    // The handle stays in the daemon and is handed off to the reaper.
     let dev = drm_device().context("open DRM render node for release_syncobj")?;
     let consumer_handle = dev
         .create_binary_syncobj()
@@ -753,10 +695,7 @@ async fn forward_frame_ready(
     send_result.map_err(|e| Error::Internal(anyhow!("send frame_ready: {e}")))?;
 
     // Hand off to the renderer's reaper. If the channel is closed
-    // (renderer evicted) the syncobj is destroyed by the dropped
-    // handle and the producer's release_syncobj timeline simply
-    // never advances at this point — which is fine, the renderer is
-    // gone anyway.
+    // because the renderer was evicted, dropping the handle cleans up.
     if let Err(e) = renderer.submit_frame_record(FrameRecord {
         release_point,
         consumer_handle: Some(consumer_handle),
@@ -772,7 +711,6 @@ async fn forward_frame_ready(
 
 // ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

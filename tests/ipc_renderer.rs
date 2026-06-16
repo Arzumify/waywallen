@@ -1,7 +1,3 @@
-// Merged renderer IPC integration tests.
-// Originally split across ipc_renderer_handshake_cpp.rs /
-// ipc_renderer_handshake_rust.rs / ipc_renderer_lifecycle.rs.
-
 #[path = "common/mod.rs"]
 mod common;
 
@@ -10,20 +6,6 @@ mod handshake_cpp {
     use super::common;
     // C++ host handshake: spawn the `waywallen-renderer` host binary
     // against a listening Unix-domain socket and verify the handshake.
-    //
-    // This is an *integration* test from the Rust daemon's perspective:
-    //   1. Create a UDS listener at a tempfile path.
-    //   2. Spawn `$WAYWALLEN_RENDERER_BIN --ipc <path> ...`.
-    //   3. Accept the host's connection.
-    //   4. Read one framed message and assert it parses as `EventMsg::Ready`,
-    //      which the host emits after `SceneWallpaper::initVulkan` succeeds.
-    //
-    // Anything past Ready (BindBuffers, FrameReady) depends on a working
-    // GPU/Vulkan driver *and* a valid Wallpaper Engine `.pkg`. The
-    // `--test-pattern` smoke test below covers the BindBuffers/FrameReady
-    // wire without needing a real scene.
-    //
-    // Skipped (not failed) when `WAYWALLEN_RENDERER_BIN` is unset.
 
     use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixListener;
@@ -90,12 +72,6 @@ mod handshake_cpp {
 
     /// Extended smoke against the C++ host's `--test-pattern` mode.
     ///
-    /// `SceneWallpaper::loadScene` early-returns when no assets directory is
-    /// configured, so without a full Wallpaper Engine install there's nothing
-    /// to drive `redraw_callback`. The host's `--test-pattern` CLI flag pumps
-    /// the offscreen ExSwapchain ring directly from a host timer thread and
-    /// emits BindBuffers + FrameReady without any actual pixel drawing, which
-    /// is enough to prove the wire end-to-end.
     #[test]
     fn binding_and_frames_smoke() {
         let Some(bin) = common::cpp_renderer_bin_from_env() else {
@@ -218,18 +194,6 @@ mod handshake_rust {
     use super::common;
     // Rust waywallen_renderer handshake: spawn the Rust `waywallen_renderer`
     // binary against a listening Unix-domain socket, expect
-    //
-    //   1. `EventMsg::Ready`,
-    //   2. `EventMsg::BindBuffers` carrying 3 DMA-BUF FDs with the
-    //      fourcc/stride/modifier the renderer advertised,
-    //   3. clean shutdown in response to `ControlMsg::Shutdown`.
-    //
-    // Uses the binary cargo builds into `CARGO_BIN_EXE_waywallen_renderer`
-    // so no env var wiring is required; the test is self-contained.
-    //
-    // This asserts the M1.3b architectural contract: the Rust renderer
-    // stands in for the C++ host over the same IPC wire format. Actual
-    // per-frame rendering (M1.4) is out of scope here.
 
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
@@ -275,7 +239,6 @@ mod handshake_rust {
 
         // 1. Ready, no fds. Render node fields are best-effort (driver may
         //    or may not advertise VK_EXT_physical_device_drm); we just
-        //    assert the event arrived.
         let (msg, fds) = recv_event(&stream).expect("recv Ready");
         assert!(fds.is_empty(), "Ready must not carry fds");
         assert!(
@@ -331,7 +294,6 @@ mod handshake_rust {
 
         // 3. Drain 6 FrameReady events (2 full cycles) and assert that the
         //    slot index cycles 0,1,2,0,1,2 — i.e. the renderer's frame loop
-        //    really is picking slots deterministically.
         let mut observed_slots = Vec::<u32>::new();
         let mut last_seq: i64 = -1;
         for _ in 0..6 {
@@ -356,9 +318,6 @@ mod handshake_rust {
 
         // Pixel-level verification via mmap is deliberately skipped: AMD
         // RADV allocates the DMA-BUFs in DEVICE_LOCAL VRAM, which isn't
-        // host-visible and therefore fails mmap(MAP_SHARED). The proper
-        // readback path is importing into a local Vulkan instance and
-        // issuing a copy — that happens in the M2 display milestone.
 
         // 4. Send Shutdown and poll-wait up to 3s for the child to exit.
         send_control(&stream, &ControlMsg::Shutdown, &[]).expect("send Shutdown");
@@ -386,8 +345,6 @@ mod lifecycle {
     use super::common;
     // RendererManager lifecycle: spawn → control → kill.
     //
-    // Skipped (not failed) when `WAYWALLEN_RENDERER_BIN` is unset, mirroring
-    // the other `ipc_renderer_*` tests' contract.
 
     use std::sync::Arc;
     use std::time::Duration;
@@ -406,9 +363,8 @@ mod lifecycle {
 
         let mgr = Arc::new(RendererManager::new_default());
 
-        // Spawn a renderer with bogus scene/assets — the host will start its
-        // looper threads and emit Ready before noticing the scene is missing,
-        // which is fine for this test (we only care about IPC liveness).
+        // Spawn with bogus scene/assets. The host emits Ready before it
+        // notices the missing scene.
         let req = SpawnRequest {
             wp_type: "scene".into(),
             extras: std::collections::HashMap::new(),
@@ -429,7 +385,6 @@ mod lifecycle {
 
         // Push a few control messages. Each one is a fire-and-forget round
         // trip on the unix socket; success means the host's reader thread
-        // accepted the JSON without disconnecting.
         mgr.send_control(&id, ControlMsg::Play).await.expect("Play");
         mgr.send_control(&id, ControlMsg::Pause)
             .await
@@ -451,7 +406,6 @@ mod lifecycle {
 
         // Tiny delay to let the host process the messages before we tear it
         // down — without this we sometimes race the kill ahead of the host's
-        // reader thread observing the messages.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Kill cleans up. After kill the id should no longer list.

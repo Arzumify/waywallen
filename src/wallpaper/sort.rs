@@ -1,13 +1,3 @@
-//! Shared "filter + sort" pipeline for wallpaper entries.
-//!
-//! Both `ws_server::WallpaperList` (UI browse) and `control::step`
-//! (D-Bus / rotator advance) must agree on what "the wallpaper after
-//! this one" means, otherwise D-Bus Next jumps to a row the user
-//! doesn't see next on screen.
-//!
-//! Entries are read from the DB (`repo::load_entries`) — the source of
-//! truth — so sorting reads the same fields the wire response carries.
-
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -15,7 +5,7 @@ use anyhow::Result;
 
 use crate::control_proto as pb;
 use crate::model::repo;
-use crate::wallpaper_type::WallpaperEntry;
+use crate::wallpaper::types::WallpaperEntry;
 use crate::AppState;
 
 /// Apply composite sort rules in-place. Rules are applied in reverse
@@ -51,7 +41,6 @@ pub fn apply_wallpaper_sorts(entries: &mut [&WallpaperEntry], sorts: &[pb::Wallp
 
 /// Resolve the user-visible ordered list of entry ids: DB entries →
 /// filter → sort. Mirrors the WallpaperList pipeline so D-Bus
-/// next/previous step in the same order the UI shows.
 pub async fn ordered_entry_ids(
     app: &Arc<AppState>,
     filters: &[pb::WallpaperFilterRule],

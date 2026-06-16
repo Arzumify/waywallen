@@ -1,10 +1,3 @@
-//! `item` table.
-//!
-//! `plugin_id` is denormalized from `library.plugin_id` to keep
-//! per-plugin filter queries cheap; the repo layer enforces they
-//! stay consistent. `path` / `preview_path` are stored **relative to
-//! `library.path`** so the physical root can move without a rewrite.
-
 use sea_orm::entity::prelude::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
@@ -39,19 +32,11 @@ pub struct Model {
     pub probed_at: Option<i64>,
     /// File mtime in milliseconds since UNIX epoch, captured by the
     /// stat tier of the probe scheduler. Distinct from `update_at`
-    /// (which tracks the DB row), and from `sync_at` (which tracks
-    /// the daemon "seeing" the item). Drives media-probe invalidation:
-    /// when this advances past `probed_at`, the file is re-probed.
     pub modified_at: Option<i64>,
     /// Cooldown anchor for the stat tier. `None` means never stat'd.
     pub stat_at: Option<i64>,
     /// JSON map of per-item user-property overrides. Each key is the
     /// shader's `u_*` uniform name (matches keys in the renderer's
-    /// `ReportProperties` schema); each value is the wire-serialized
-    /// scalar (color → "r g b" or "r g b a"; slider → numeric string;
-    /// bool → "true"/"false"; string → raw). Merged into Init.settings
-    /// on apply so the renderer's unknown-key path routes them to
-    /// `setPropertyString`. `None` when the user hasn't edited anything.
     pub user_property_overrides: Option<String>,
     /// JSON map of daemon-owned per-wallpaper display layout override.
     /// This is intentionally separate from renderer user properties.

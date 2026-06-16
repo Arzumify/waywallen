@@ -62,7 +62,6 @@ fn pick_modifier(
 ) -> Result<u64> {
     // LINEAR is the only modifier guaranteed importable across vendors —
     // tiled layouts encode a vendor-specific tile shape the consumer
-    // GPU cannot decode. Skip the picker entirely on the cross-GPU path.
     if cross_gpu {
         return Ok(0);
     }
@@ -127,9 +126,6 @@ pub fn run_orchestrator(
     };
     // Cross-GPU per-frame SYNC_FD: amdgpu won't schedule a foreign
     // dma-buf without an explicit dma_fence wait on the consumer's
-    // submit. Producer signals into this each frame, exports SYNC_FD,
-    // ships it with Frame, and the SYNC_FD is consumed on temporary
-    // import for the consumer's wait.
     let sync_sem = if cross_gpu {
         Some(create_binary_sync_fd_exportable(vkd).context("create sync_fd sem")?)
     } else {
@@ -398,11 +394,6 @@ pub fn run_peer(vkd: &VkDevice, sock: &UnixStream) -> Result<()> {
     } else {
         // Cross-GPU: skip the upfront transition (an upfront submit
         // referencing the foreign BO fails on amdgpu before producer
-        // pages exist) and treat the image as GENERAL on first read,
-        // matching display_consumer.rs's working fanout pattern. The
-        // per-frame SYNC_FD wait carries the producer's last-write
-        // dependency through dma_fence — amdgpu won't schedule the
-        // foreign BO without it.
         let sem = create_binary_importable(vkd).context("create peer sync_fd sem")?;
         (vk::ImageLayout::GENERAL, sem)
     };

@@ -1,12 +1,3 @@
-//! Shared wallpaper control logic.
-//!
-//! The same operations (apply, next, previous, pause, resume, rescan) are
-//! driven from two surfaces — the WebSocket control plane (`ws_server`)
-//! and the session-bus `Daemon1` interface (`dbus_iface`) plus the tray.
-//! This module owns the canonical implementation so both paths converge
-//! on identical semantics (spawn-before-kill, router relink, playlist
-//! cursor tracking).
-
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,7 +11,7 @@ use crate::queue::rotator::RotationConfig;
 use crate::queue::Mode;
 use crate::renderer_manager;
 use crate::scheduler::DisplayId;
-use crate::wallpaper_type::WallpaperEntry;
+use crate::wallpaper::types::WallpaperEntry;
 use crate::AppState;
 
 /// Re-export so callers that already wrote `control::QueueState`
@@ -32,14 +23,8 @@ pub struct ApplyResult {
     pub entry: WallpaperEntry,
 }
 
-/// Apply a wallpaper by id to every registered display, with global
-/// single-flight semantics: only one global apply is in flight at a
-/// time. A subsequent call supersedes any in-flight prior call (the
-/// prior caller observes `apply task superseded or cancelled` and the
-/// prior renderer-spawn in progress is dropped, which kills its child
-/// via `kill_on_drop`). The key is `apply/global`; per-display recall
-/// goes through [`apply_wallpaper_to_displays`] which bypasses this
-/// gate so concurrent per-display restores don't cancel each other.
+/// Apply a wallpaper by id to every registered display.
+/// Supersedes any in-flight global apply task.
 pub async fn apply_wallpaper_by_id(app: &Arc<AppState>, id: &str) -> Result<ApplyResult> {
     let app_clone = app.clone();
     let id_owned = id.to_string();
@@ -60,11 +45,8 @@ pub async fn apply_wallpaper_by_id(app: &Arc<AppState>, id: &str) -> Result<Appl
         .map_err(|_| Error::Internal(anyhow!("apply task superseded or cancelled")))?
 }
 
-/// Apply a wallpaper to a specific subset of displays. Used by the
-/// hot-plug recall watcher: a freshly-connected display gets its own
-/// persisted assignment restored independently of any other display.
-/// Bypasses the global single-flight key (`apply_wallpaper_by_id`)
-/// so concurrent per-display restores don't cancel each other.
+/// Apply a wallpaper to a specific display subset.
+/// Hot-plug recall uses this without cancelling global apply work.
 pub async fn apply_wallpaper_to_displays(
     app: &Arc<AppState>,
     id: &str,
@@ -89,11 +71,8 @@ pub struct PortalApplyResult {
     pub uri: String,
 }
 
-/// Apply an image wallpaper via `org.freedesktop.portal.Wallpaper`.
-/// Independent of the renderer/router/display path: hands the URI to
-/// the DE's portal backend and lets it own the actual rendering.
-/// Image-only by design; non-image `wp_type` returns
-/// `WallpaperTypeNotSupported`. Single-flight under `apply/portal`.
+/// Apply an image wallpaper through `org.freedesktop.portal.Wallpaper`.
+/// The portal owns preview, prompting, and final rendering.
 pub async fn apply_wallpaper_via_portal(
     app: &Arc<AppState>,
     id: &str,
@@ -142,10 +121,8 @@ async fn apply_via_portal_inner(app: &Arc<AppState>, id: &str) -> Result<PortalA
     options.insert("set-on", zbus::zvariant::Value::from("background"));
     options.insert("show-preview", zbus::zvariant::Value::from(false));
 
-    // Fire-and-ack: the portal returns an ObjectPath for the Request
-    // object as the synchronous reply. The actual user-visible result
-    // arrives asynchronously via a Response signal on that path; we
-    // don't wait for it — the DE owns the user prompt and final apply.
+    // The portal returns a Request object immediately; its async result
+    // belongs to the desktop environment.
     let parent_window: &str = "";
     let _request_path: zbus::zvariant::OwnedObjectPath = conn
         .call_method(
@@ -167,10 +144,8 @@ async fn apply_via_portal_inner(app: &Arc<AppState>, id: &str) -> Result<PortalA
     })
 }
 
-/// Build `file://<percent-encoded path>` from a local absolute path.
-/// RFC 3986 unreserved + the path-safe sub-delims/`:`/`@`/`/` are left
-/// literal; everything else (including non-ASCII bytes and `%`) gets
-/// `%HH`-encoded.
+/// Build a `file://` URI from an absolute path.
+/// Leaves path-safe ASCII literal and percent-encodes every other byte.
 fn file_uri_from_abs_path(path: &str) -> String {
     let mut out = String::with_capacity(path.len() + 7);
     out.push_str("file://");
@@ -206,12 +181,8 @@ fn file_uri_from_abs_path(path: &str) -> String {
     out
 }
 
-/// Shared core for both the global apply path (target=None → all
-/// currently-registered displays get re-pointed) and the per-display
-/// path (target=Some(ids) → only those displays). Spawns / reuses the
-/// renderer, performs the relink, and persists `last_wallpaper` both
-/// per-display and globally (the global value is a fallback for
-/// brand-new displays that have no saved record yet).
+/// Shared global/per-display apply core.
+/// Spawns or reuses a renderer, relinks displays, and persists recall state.
 async fn apply_wallpaper_core(
     app: &Arc<AppState>,
     id: &str,
@@ -230,60 +201,33 @@ async fn apply_wallpaper_core(
         .map(|def| def.name.clone())
         .ok_or_else(|| Error::NoRendererForType(entry.wp_type.clone()))?;
 
-    // Global apply re-points every display; per-display apply only
-    // re-points its targets. Stop any pre-existing renderer whose
-    // every enabled link is in our target set BEFORE spawning so peak
-    // VRAM stays at one working set's worth instead of overlapping.
-    //
-    // Ordering matters for cross-process Vulkan correctness:
-    //   1. Arm unbind-ack tracking on the doomed renderers.
-    //   2. unregister_renderer → emits `Unbind` to bound displays
-    //      (recorded as pending acks under the renderer).
-    //   3. Wait for the displays to send `unbind_done` (with timeout).
-    //      This gives the consumer time to start its render-thread
-    //      drain before the producer's GPU device goes away.
-    //   4. kill the renderer (now-fixed graceful Shutdown path:
-    //      sends Shutdown, waits 5s, escalates to SIGKILL only on
-    //      timeout). The producer's clean exit drains its device
-    //      (via the bridge's wait_idle vfunc), so its acquire
-    //      dma_fence signals normally instead of being kernel-cancelled.
+    // Stop renderers fully replaced by this apply before spawning, so GPU
+    // memory does not hold two complete working sets at once.
     let to_stop = app.router.renderers_fully_replaced_by(target).await;
     if !to_stop.is_empty() {
-        // 1 s ack timeout: the consumer's unbind_done is sent
-        // synchronously from handle_unbind after the textures_releasing
-        // callback fires; that callback queues handles to a pending
-        // list and posts an update(). Real-world latency is socket
-        // RTT plus one event-loop tick — well under 1 s.
+        // The consumer sends unbind_done synchronously from handle_unbind;
+        // 1s covers socket round-trip plus one event-loop tick.
         app.router
             .stop_renderers_orderly(&to_stop, Duration::from_secs(1))
             .await;
     }
 
-    // Source plugin's `extras(entry)` Lua callback returns the CLI
-    // argv dict. Lua failures surface as `SourceExtrasFailed` so the
-    // dbus / rotator caller learns the real problem instead of
-    // getting a confusing "wrong settings" follow-up — same policy
-    // as the WS apply path.
+    // Source plugin extras own renderer CLI argv.
+    // Lua failures surface directly instead of falling back to stale metadata.
     let extras = app
         .source_manager
         .lock()
         .await
         .call_extras(&entry.plugin_name, &entry)
         .await?;
-    // Init.settings is the reconciled per-plugin section of the
-    // settings store; defaults and bound-checks are already enforced
-    // there (`Settings::reconcile` on startup, `coerce_and_validate`
-    // on `SettingsSet`). The D-Bus / scheduler / rotator entry points
-    // don't take per-call setting overrides, so this is the canonical
-    // source.
+    // Init.settings comes from the reconciled plugin settings store;
+    // defaults and validation have already run.
     let spawn_settings = app
         .settings
         .plugin(&renderer_plugin_name)
         .unwrap_or_default();
-    // Per-item renderer-owned user-property overrides ship as a
-    // separate JSON blob in `Init.user_properties`; daemon-owned
-    // display layout keys are consumed below as wallpaper-local layout
-    // overrides.
+    // Renderer-owned user properties ride separately in Init.user_properties;
+    // daemon-owned layout keys are consumed below.
     let (user_properties_json, wallpaper_layout_override) =
         repo::get_wallpaper_render_properties(&app.db, entry.item_id).await?;
     let spawn_req = renderer_manager::SpawnRequest {
@@ -294,15 +238,8 @@ async fn apply_wallpaper_core(
         renderer_name: None,
         user_properties_json,
     };
-    // renderer_manager still returns anyhow today (Phase 3 will give
-    // it typed Error). The blanket `From<anyhow::Error>` lands this in
-    // `Error::Internal`; once Phase 3 ships, the typed
-    // `RendererSpawnFailed` will flow through automatically.
-    // Renderer reuse: if a live renderer already matches the spawn
-    // request (same wp_type / extent / extras), reuse it instead of
-    // re-spawning. Matches the WS apply path so the hot-plug recall
-    // of multiple displays onto the same wallpaper doesn't spawn one
-    // renderer per display.
+    // Reuse a live renderer with the same spawn identity; otherwise spawn
+    // and map spawn failure to the public renderer-spawn error.
     let renderer_id = match app.renderer_manager.find_reusable(&spawn_req).await {
         Some(existing) => existing,
         None => {
@@ -328,13 +265,12 @@ async fn apply_wallpaper_core(
     {
         let mut q = app.queue.lock().await;
         q.current = Some(entry.item_id.to_string());
-        // Stash the DB id so sequential / random stepping has an anchor.
+        // Stash the DB id so sequential / random traversal has an anchor.
         q.last_db_id = Some(entry.item_id);
     }
 
-    // Persist per-display (the actual targets) plus the global
-    // fallback (used by displays that have no saved record yet — e.g.
-    // a monitor connected for the first time).
+    // Persist target display assignments plus the global fallback used
+    // by displays without their own saved record.
     let target_ids: Vec<DisplayId> = match target {
         None => app
             .router
@@ -354,11 +290,8 @@ async fn apply_wallpaper_core(
         }
         s.global.last_wallpaper = Some(wp_id);
     });
-    // Push the just-applied wallpaper to disk synchronously instead of
-    // waiting on the 2s debounce. A kill / SIGTERM inside the debounce
-    // window would otherwise lose the per-display assignment, which is
-    // exactly the value the next start needs to reproduce playback.
-    // flush_now is a cheap no-op when nothing actually changed.
+    // Flush recall state now so a crash inside the debounce window does
+    // not lose the wallpaper needed by the next startup.
     app.settings.flush_now().await;
     crate::dbus_iface::notify_current_wallpaper_id_changed(app).await;
 
@@ -398,10 +331,8 @@ pub async fn step(app: &Arc<AppState>, delta: i32) -> Result<String> {
     Ok(entry_id)
 }
 
-/// Walk the sorted+filtered entry list by `delta`. Wraps with
-/// `rem_euclid`. If the current entry isn't in the list (filtered out,
-/// or first-ever call), starts at index 0 for delta>=0 and len-1 for
-/// delta<0.
+/// Walk the sorted+filtered entry list by `delta`, wrapping with `rem_euclid`.
+/// If the current entry is absent, start at the first or last item.
 async fn step_sequential(
     app: &Arc<AppState>,
     delta: i32,
@@ -409,7 +340,7 @@ async fn step_sequential(
     logics: &[crate::control_proto::FilterLogic],
     sorts: &[crate::control_proto::WallpaperSortRule],
 ) -> Result<String> {
-    let ordered = crate::wallpaper_sort::ordered_entry_ids(app, filters, logics, sorts).await?;
+    let ordered = crate::wallpaper::sort::ordered_entry_ids(app, filters, logics, sorts).await?;
     if ordered.is_empty() {
         return Err(Error::FailedPrecondition("queue is empty".into()));
     }
@@ -491,9 +422,7 @@ async fn step_shuffle(
         .ok_or_else(|| Error::FailedPrecondition("queue is empty".into()))
 }
 
-/// Set the rotation mode on the active playlist. Pure in-memory; the
-/// caller is responsible for persistence (settings + DB) when the
-/// active playlist is a real DB row.
+/// Set the rotation mode on the active playlist and persist it to settings.
 pub async fn set_mode(app: &Arc<AppState>, mode: Mode) {
     app.queue.lock().await.set_mode(mode);
     app.settings.update(|s| {
@@ -503,9 +432,8 @@ pub async fn set_mode(app: &Arc<AppState>, mode: Mode) {
     crate::tray::dbusmenu::notify_menu_changed(app).await;
 }
 
-/// Set the auto-rotation interval (seconds; `0` disables). Updates
-/// the live rotator via the watch handle and persists the value to
-/// settings so a daemon restart resumes the same cadence.
+/// Set the auto-rotation interval in seconds; `0` disables rotation.
+/// Updates the live rotator and persists the cadence to settings.
 pub async fn set_rotation_interval(app: &Arc<AppState>, secs: u32) {
     app.rotation.set_interval(secs);
     app.settings.update(|s| {
@@ -554,13 +482,7 @@ pub async fn queue_status(app: &Arc<AppState>) -> QueueStatus {
     }
 }
 
-/// Restore queue mode + rotation cadence from disk. Idempotent.
-///
-/// Wallpaper restoration is event-driven elsewhere: a long-lived
-/// watcher subscribes to `RouterEvent::DisplayUpsert` and applies
-/// each display's persisted wallpaper (per-display → global fallback)
-/// as the display becomes visible. This covers both startup and
-/// hot-plug. See `restore_watcher` in `main.rs`.
+/// Restore queue mode and rotation cadence from disk. Idempotent.
 pub async fn run_restore(app: &Arc<AppState>) -> Result<()> {
     use crate::events::GlobalEvent;
 
@@ -576,12 +498,8 @@ pub async fn run_restore(app: &Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
-/// Auto-rotation task body. Lives here (not in `playlist::rotator`)
-/// because it depends on `AppState` + `control::step`, both private
-/// to the binary. Reads the live `RotationConfig` from a watch and
-/// either parks (interval = 0) or fires `step(+1)` every
-/// `interval_secs`. Any config edit (new interval, manual kick)
-/// resets the deadline.
+/// Auto-rotation task body.
+/// Reads live cadence from a watch channel and applies the next wallpaper.
 pub async fn run_rotator(
     app: Arc<AppState>,
     mut rx: tokio::sync::watch::Receiver<RotationConfig>,
@@ -660,12 +578,8 @@ pub async fn rescan(app: &Arc<AppState>) -> Result<usize> {
     refresh_sources(app).await
 }
 
-/// Run every source plugin's `auto_detect(ctx)` against well-known
-/// locations and register whatever exists as a library. Duplicates
-/// (paths already registered for the same plugin) are silently
-/// skipped. Emits `LibraryUpsert` events and kicks off a full
-/// rescan so the newly-detected libraries immediately show up in the
-/// UI. Returns the snapshots that were actually added.
+/// Run source-plugin auto-detect and register any discovered libraries.
+/// Duplicate libraries are skipped before a refresh is triggered.
 pub async fn auto_detect_libraries(
     app: &Arc<AppState>,
 ) -> Result<Vec<crate::routing::LibrarySnapshot>> {
@@ -730,10 +644,8 @@ pub async fn auto_detect_libraries(
     Ok(added)
 }
 
-/// Pull every library row out of the DB and rehydrate it into the
-/// router-wire `LibrarySnapshot` shape (path + plugin_name). Used by
-/// the `LibraryList` query and the initial snapshot sent to WS
-/// subscribers; the router no longer caches these — DB is authoritative.
+/// Load DB libraries into the router-wire `LibrarySnapshot` shape.
+/// Used by library list queries and the initial WS snapshot.
 pub async fn list_library_snapshots(
     db: &sea_orm::DatabaseConnection,
 ) -> Vec<crate::routing::LibrarySnapshot> {
@@ -762,14 +674,8 @@ pub async fn list_library_snapshots(
     out
 }
 
-/// Query the DB for every registered library, grouped by the plugin
-/// name that owns it. Feeds per-plugin library paths into Lua's
-/// `ctx.libraries()` and seeds `protected_libraries` on sync so an
-/// empty scan doesn't nuke user-configured folders.
-/// Dedup a path list by canonical (symlink-resolved) target, preserving
-/// first-seen order. Paths that fail to canonicalize (e.g. don't exist)
-/// are kept and de-duped by their raw string instead. The original
-/// string is retained as the entry's `library_root`.
+/// Deduplicate paths by canonical target, preserving first-seen order.
+/// Unresolvable paths fall back to their raw string.
 fn dedup_paths_by_canonical(paths: &[String]) -> Vec<String> {
     use std::collections::HashSet;
     let mut seen: HashSet<std::path::PathBuf> = HashSet::new();
@@ -805,12 +711,6 @@ pub async fn libraries_by_plugin_name(
 
 /// Re-scan every loaded source plugin against the current DB library
 /// set and persist the resulting entries. Returns the playlist size.
-/// Called from startup after plugins load, from manual `rescan`, and
-/// from `LibraryAdd` / `LibraryRemove` so the in-memory snapshot and
-/// DB stay consistent with the user-managed library list.
-/// Discover the installed source plugins and publish them into the
-/// snapshot, without touching scanned entries. Idempotent; safe to call
-/// before any library exists so the Add-Library UI always has the list.
 pub async fn refresh_source_plugins(app: &Arc<AppState>) {
     let plugins = {
         let sm = app.source_manager.lock().await;
@@ -852,26 +752,14 @@ async fn refresh_sources_inner(app: &Arc<AppState>) -> Result<usize> {
     let libs_by_plugin = libraries_by_plugin_name(&app.db).await?;
 
     let source_mgr = app.source_manager.clone();
-    // Scan each physical directory once: symlinked Steam aliases
-    // (~/.steam/steam vs ~/.local/share/Steam) otherwise emit the same
-    // workshop entries twice (duplicate id), which both doubles the
-    // wallpaper list and triggers the UI's duplicate-key phantom-row bug.
-    // The full list still feeds `protected` below so both library rows
-    // survive the missing-library sweep.
+    // Scan each physical directory once; symlinked Steam aliases otherwise
+    // emit duplicate workshop entries and duplicate UI rows.
     let libs_for_scan: HashMap<String, Vec<String>> = libs_by_plugin
         .iter()
         .map(|(name, paths)| (name.clone(), dedup_paths_by_canonical(paths)))
         .collect();
-    // The Lua VM lock (`source_manager`) is held only during the scan
-    // itself. Wallpaper read consumers (`WallpaperList`/`WallpaperApply`)
-    // hit the DB and never park behind this section.
-    //
-    // `scan_all` is async because Lua plugins can call mlua async
-    // functions (`ctx.library_meta_*`) that await sea-orm. We still
-    // run the scan inside `spawn_blocking` so the long CPU-bound
-    // filesystem walks don't block an async worker — `Handle::block_on`
-    // from inside `spawn_blocking` drives the async-Lua future to
-    // completion on this dedicated thread.
+    // Hold the Lua VM lock only during the scan; wallpaper reads hit the DB
+    // and do not wait behind this section.
     let handle = tokio::runtime::Handle::current();
     let snapshot: Vec<WallpaperEntry> = tokio::task::spawn_blocking(move || {
         let mut sm = source_mgr.blocking_lock();
@@ -892,19 +780,16 @@ async fn refresh_sources_inner(app: &Arc<AppState>) -> Result<usize> {
         }
     };
 
-    // Sync to the DB first so every entry gets its canonical identity
-    // (`item.id`); the snapshot is installed afterwards carrying those
-    // ids. Readers keep seeing the previous snapshot until the swap.
+    // Sync to the DB first so every entry gets its canonical item id before
+    // readers observe the refreshed source-plugin list.
     for info in &plugins {
         let entries: Vec<_> = snapshot
             .iter()
             .filter(|e| e.plugin_name == info.name)
             .cloned()
             .collect();
-        // Libraries reachable this round = registered roots that still
-        // exist on disk. The full (non-deduped) list is passed so a
-        // symlink alias of a scanned root is also swept clean; a root
-        // that's gone (unmounted) is omitted so its items are spared.
+        // Only reachable registered roots are swept; missing roots are spared
+        // so unmounted libraries do not lose their items.
         let present: Vec<String> = libs_by_plugin
             .get(&info.name)
             .map(|paths| {
@@ -942,16 +827,12 @@ async fn refresh_sources_inner(app: &Arc<AppState>) -> Result<usize> {
     // truth); only the source-plugin list is cached in memory.
     let count = snapshot.len();
     *app.source_plugins.write().await = plugins;
-    // Queue plays dynamically from settings.wallpaper_filter; nothing
-    // to rebind after a sources refresh — the next `step()` will see
-    // the new DB rows. Invalidate any pre-built shuffle round so it's
-    // rematerialized including the freshly-imported items.
+    // Queue reads from the DB dynamically; reset the shuffle round so the
+    // next pick can include freshly imported items.
     app.queue.lock().await.reset_shuffle_round();
 
-    // Kick a one-shot probe drain so newly-imported items don't have
-    // to wait for the next scheduler tick. `spawn_async_unique` collapses
-    // overlapping refresh→probe bursts (e.g. a flurry of LibraryAdd
-    // calls) into a single in-flight pass.
+    // Kick one probe drain for newly imported items; spawn_async_unique
+    // collapses refresh bursts into one in-flight pass.
     let probe = app.probe.clone();
     let db = app.db.clone();
     app.tasks.spawn_async_unique(

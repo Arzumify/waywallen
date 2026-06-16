@@ -1,24 +1,3 @@
-//! Linux tray icon — hand-rolled StatusNotifierItem + DBusMenu over zbus.
-//!
-//! We avoid `ksni` / `libdbusmenu` / GTK: the daemon already ships a zbus
-//! session connection, so we serve the two extra object paths on it and
-//! call `org.kde.StatusNotifierWatcher.RegisterStatusNotifierItem`.
-//!
-//! Discovery contract (freedesktop SNI, object-path form):
-//!   - we pass the item object path to `RegisterStatusNotifierItem`; the
-//!     watcher pairs it with our unique bus name (the message sender) and
-//!     exposes `:1.NN/StatusNotifierItem` in `RegisteredStatusNotifierItems`
-//!   - item object path: `/StatusNotifierItem`
-//!   - menu object path: `/MenuBar` (advertised via `Menu` property)
-//!
-//! We deliberately do NOT `request_name` `org.kde.StatusNotifierItem-<pid>-1`:
-//! modern hosts (Plasma, Waybar, XFCE panel, GNOME AppIndicator, KNotifications,
-//! current libappindicator / Chromium / Electron ≥ 23.3) accept the path-only
-//! form, and skipping the own-name step lets us run under Flatpak without
-//! `--own-name=org.kde.*`.
-//!
-//! Without a Watcher we record a warning and bail — the daemon keeps running.
-
 pub mod dbusmenu;
 mod sni;
 
@@ -36,11 +15,8 @@ const WATCHER_PATH: &str = "/StatusNotifierWatcher";
 const WATCHER_IFACE: &str = "org.kde.StatusNotifierWatcher";
 
 pub async fn spawn(conn: Arc<Connection>, app: Arc<AppState>) -> Result<()> {
-    // Hosts (Plasma/Waybar/...) resolve `IconName` against their own
-    // `XDG_DATA_DIRS`, which never include the AppImage squashfs mount or
-    // a relocatable Flatpak/portable prefix. Derive `<prefix>/share/icons`
-    // from `current_exe()` (`<prefix>/bin/waywallen`) and expose it via
-    // SNI's `IconThemePath` so the host appends it to its theme search.
+    // Hosts resolve `IconName` against their own `XDG_DATA_DIRS`.
+    // That may miss the AppImage squashfs mount, so expose a theme path.
     let icon_theme_path = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent()?.parent().map(|p| p.join("share/icons")))

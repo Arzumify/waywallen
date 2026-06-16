@@ -1,15 +1,3 @@
-//! Central dispatcher for the daemon's `GlobalEvent` bus.
-//!
-//! Other modules `publish` into [`crate::events::EventBus`]; this task
-//! holds the single in-process subscriber that reacts to phase markers
-//! and spawns dependent work (e.g. wallpaper recall once
-//! `SourcesReady` fires). New cross-cutting reactions should grow here
-//! instead of new ad-hoc subscribe loops scattered across the daemon.
-//!
-//! WS clients still subscribe per-connection (`ws_server::dispatch`)
-//! — that path translates events to protobuf for the UI and is a
-//! distinct concern from this dispatcher.
-
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,7 +10,6 @@ use crate::AppState;
 
 /// Spawn the dispatcher. `restore_last` mirrors `cli.restore_last` —
 /// when false the wallpaper-recall watcher is never started even
-/// after `SourcesReady` fires.
 pub fn spawn(state: Arc<AppState>, restore_last: bool) {
     let tasks_h = state.tasks.clone();
     tasks_h.spawn_async(
@@ -31,7 +18,6 @@ pub fn spawn(state: Arc<AppState>, restore_last: bool) {
         async move {
             // Subscribe BEFORE re-reading the latches so an event that
             // fired between AppState construction and the first poll
-            // of this task is still caught (via the latch).
             let mut bus = state.events.subscribe();
             let mut recall_started = !restore_last;
 
@@ -66,15 +52,6 @@ pub fn spawn(state: Arc<AppState>, restore_last: bool) {
 
 /// Long-lived watcher: re-apply each display's persisted wallpaper as
 /// it becomes visible. Spawned by the dispatcher when `SourcesReady`
-/// fires so the DB is guaranteed populated when the first apply runs.
-/// Single path covers startup + hot-plug.
-///
-/// Coalescing rule: arrivals are grouped by `wp_id`. Each group fires
-/// one `apply_wallpaper_to_displays` call after a SETTLE window from
-/// the first arrival in the group, so two displays pointing at the
-/// same wallpaper share a single renderer process (the apply path's
-/// `find_reusable` only works when same-wp_id calls don't race in
-/// parallel).
 fn spawn_wallpaper_recall(state: Arc<AppState>) {
     let tasks_h = state.tasks.clone();
     tasks_h.spawn_async(
@@ -86,7 +63,6 @@ fn spawn_wallpaper_recall(state: Arc<AppState>) {
             const SETTLE: Duration = Duration::from_secs(2);
             // Far-future placeholder when nothing is pending, so the
             // select loop has a real deadline to wait on without an
-            // extra `Option<Sleep>` arm.
             const IDLE_PARK: Duration = Duration::from_secs(3600);
 
             let mut seen: HashSet<scheduler::DisplayId> = HashSet::new();

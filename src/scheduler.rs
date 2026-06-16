@@ -1,21 +1,3 @@
-//! Display scheduler — tracks registered display clients, fans frames
-//! out to them, and aggregates release signals back to the renderer.
-//!
-//! Phase 1 policy is intentionally minimal:
-//!
-//!   - Every display that registers with the daemon is automatically
-//!     bound to the single currently-active renderer.
-//!   - The projected `SetConfig` is always identity: `source_rect`
-//!     covers the entire renderer texture, `dest_rect` covers the
-//!     entire display, no transform, opaque black clear color.
-//!
-//! Later work will extend this with: per-display crop/stretch
-//! policies, multiple active renderers, layout managers, etc.
-//!
-//! The scheduler is a plain struct — the endpoint code is expected to
-//! wrap it in `Arc<Mutex<Scheduler>>` (plain `std::sync::Mutex`; locks
-//! are never held across `.await`).
-
 use std::collections::HashMap;
 
 /// Unique id handed out by [`Scheduler::register_display`]. Monotonic
@@ -27,9 +9,8 @@ pub type DisplayId = u64;
 pub struct DisplayInfo {
     pub id: DisplayId,
     pub name: String,
-    /// Stable consumer-provided identifier; `None` for legacy clients
-    /// that did not populate the v4 `instance_id` field. Drives the
-    /// settings lookup key (see `Router::settings_key`).
+    /// Stable consumer-provided identifier. `None` means the client did
+    /// not populate the v4 `instance_id` field.
     pub instance_id: Option<String>,
     pub width: u32,
     pub height: u32,
@@ -40,11 +21,8 @@ pub struct DisplayInfo {
     pub bound: bool,
 }
 
-/// Compact description of the renderer-side buffer pool this
-/// scheduler fans out to clients. Mirrors the `BindBuffers` event on
-/// the wire but with the texture-space metadata only; the actual
-/// `dma_buf` FDs live in the renderer manager's `BindSnapshot` and
-/// are dup'd per-client at broadcast time, not kept here.
+/// Compact renderer-side buffer-pool description fanned out to clients.
+/// Mirrors the `BindBuffers` event fields.
 #[derive(Debug, Clone)]
 pub struct ActiveBinding {
     pub renderer_id: String,
@@ -71,20 +49,16 @@ pub struct ProjectedConfig {
     pub clear_rgba: [f32; 4],
 }
 
-/// Outcome of a [`Scheduler::release_frame`] call. The manager uses
-/// this to decide whether it can tell the renderer a buffer slot is
-/// free for reuse.
+/// Outcome of a [`Scheduler::release_frame`] call.
+/// The manager uses this to decide whether a slot can be released.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ReleaseOutcome {
     /// Some other display still has this frame checked out. Do nothing.
     StillInFlight,
-    /// Last reference just dropped. The manager should notify the
-    /// renderer that `(buffer_generation, buffer_index, seq)` is now
-    /// free for reuse.
+    /// Last reference just dropped; the manager should notify the renderer.
     AllReleased,
-    /// The frame's generation has already been retired (a new
-    /// `bind_buffers` superseded it). The release is harmless — drop
-    /// it silently.
+    /// The frame generation was retired by a newer `bind_buffers`;
+    /// the release can be ignored.
     Stale,
     /// No matching outstanding frame; usually a protocol-violating
     /// duplicate release from a misbehaving client.
@@ -92,8 +66,7 @@ pub enum ReleaseOutcome {
 }
 
 /// Key that identifies an in-flight frame waiting on display releases.
-/// (buffer_generation is part of the key so releases from retired
-/// generations can be detected and discarded cleanly.)
+/// Includes generation so releases from retired pools stay distinct.
 type FrameKey = (u64, u32, u64); // (buffer_generation, buffer_index, seq)
 
 #[derive(Debug, Default)]
@@ -114,7 +87,6 @@ impl Scheduler {
 
     // ---------------------------------------------------------------
     // Display registration
-    // ---------------------------------------------------------------
 
     /// Register a display client and return its assigned opaque id.
     pub fn register_display(
@@ -137,20 +109,16 @@ impl Scheduler {
                 height,
                 refresh_mhz,
                 properties,
-                // Phase 1 policy: bound implicitly as soon as an active
-                // renderer exists. If we register before any renderer
-                // is active, `bound` is false and we'll flip it when
-                // `set_active_binding` is called.
+                // New displays are bound immediately when an active
+                // renderer already exists.
                 bound: self.active.is_some(),
             },
         );
         id
     }
 
-    /// Remove a display from the scheduler and drop any pending frame
-    /// references it held. Returns a vector of `(buffer_gen, idx, seq)`
-    /// frames that just became releasable as a result — the caller
-    /// should notify the renderer for each.
+    /// Remove a display and drop any pending frame references it held.
+    /// Returns frames that became fully released.
     pub fn unregister_display(&mut self, id: DisplayId) -> Vec<FrameKey> {
         self.displays.remove(&id);
         let mut freed = Vec::new();
@@ -170,9 +138,8 @@ impl Scheduler {
         self.displays.get(&id)
     }
 
-    /// Let a display tell the scheduler its size changed. Phase 1 does
-    /// not re-compute SetConfig on its own — that happens when the
-    /// next frame is scheduled — so this is a pure write.
+    /// Record a display size change. SetConfig is recomputed when the
+    /// manager asks for projection.
     pub fn update_display_size(&mut self, id: DisplayId, width: u32, height: u32) {
         if let Some(d) = self.displays.get_mut(&id) {
             d.width = width;
@@ -182,16 +149,11 @@ impl Scheduler {
 
     // ---------------------------------------------------------------
     // Renderer binding
-    // ---------------------------------------------------------------
 
-    /// Record that a renderer has published a new buffer pool. Returns
-    /// the list of display ids that the manager should now send a
-    /// `bind_buffers` + `set_config` to. (Caller is responsible for
-    /// actually constructing and dispatching the wire events.)
+    /// Record that a renderer published a new buffer pool.
+    /// Returns display ids that need a fresh bind.
     pub fn set_active_binding(&mut self, binding: ActiveBinding) -> Vec<DisplayId> {
-        // Advancing to a new buffer_generation retires every pending
-        // frame for the previous generation — those frames no longer
-        // need release aggregation (the old fds are gone).
+        // A new buffer_generation retires frames from previous pools.
         if let Some(old) = &self.active {
             if old.buffer_generation != binding.buffer_generation {
                 self.pending
@@ -224,11 +186,8 @@ impl Scheduler {
         self.active.as_ref()
     }
 
-    /// Compute the identity SetConfig for a given display under the
-    /// current active binding. Returns `None` if no renderer is bound
-    /// or the display is unknown. Each call bumps the scheduler's
-    /// `config_generation` counter so distinct SetConfig events can be
-    /// told apart on the wire.
+    /// Compute the identity SetConfig for a display.
+    /// Returns `None` when no renderer is currently bound.
     pub fn project_config(&mut self, display_id: DisplayId) -> Option<ProjectedConfig> {
         let active = self.active.as_ref()?;
         let disp = self.displays.get(&display_id)?;
@@ -250,14 +209,9 @@ impl Scheduler {
 
     // ---------------------------------------------------------------
     // Frame fan-out & release aggregation
-    // ---------------------------------------------------------------
 
     /// Called when the renderer produces a frame for `(gen, idx, seq)`.
-    /// Installs a pending refcount entry covering every currently bound
-    /// display and returns their ids so the caller can fan out the
-    /// `frame_ready` event. Returns an empty vec if the frame is for a
-    /// generation that does not match the current active binding
-    /// (stale / racy: the caller should drop it).
+    /// Creates pending release state for each currently bound display.
     pub fn begin_frame(
         &mut self,
         buffer_generation: u64,
@@ -286,9 +240,8 @@ impl Scheduler {
         out
     }
 
-    /// Called when a display sends `buffer_release`. Returns whether
-    /// the frame is now fully released, still in flight, already
-    /// retired, or never existed.
+    /// Called when a display sends `buffer_release`.
+    /// Returns the current release state for that frame.
     pub fn release_frame(
         &mut self,
         display_id: DisplayId,
@@ -329,7 +282,6 @@ impl Scheduler {
 
 // ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -447,9 +399,6 @@ mod tests {
 
         // a goes away — both frames should become complete (b already
         // released nothing, so a's removal drops refcount to 1, not 0).
-        // Wait, that's wrong: a and b both owe each frame. Removing a
-        // alone leaves b still owing. unregister returns the frames
-        // that went to refcount 0, which here is none.
         let freed = s.unregister_display(a);
         assert!(freed.is_empty(), "b still owes");
         // Now b releases both — those should complete.

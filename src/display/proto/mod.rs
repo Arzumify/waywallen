@@ -1,15 +1,3 @@
-//! `waywallen-display-v1` wire protocol bindings.
-//!
-//! The `generated` submodule is emitted at build time by
-//! `build.rs` (via the `wayproto-gen` tool) from
-//! `protocol/waywallen_display_v1.xml`. It defines `Request`,
-//! `Event`, `Rect`, `DecodeError`, per-opcode constants, and the
-//! binary encode/decode implementations.
-//!
-//! The hand-written `codec` submodule (added in a later step) layers
-//! framing + `SCM_RIGHTS` ancillary fd handling on top of the
-//! generated code.
-
 #[allow(dead_code, clippy::all)]
 pub mod generated {
     include!(concat!(env!("OUT_DIR"), "/display_proto_generated.rs"));

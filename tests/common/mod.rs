@@ -1,10 +1,6 @@
 #![allow(dead_code)]
 //! Shared helpers for integration tests.
 //!
-//! Each file under `tests/*.rs` is compiled as its own crate, so shared
-//! code must be pulled in with `#[path = "common/mod.rs"] mod common;`.
-//! `#![allow(dead_code)]` silences warnings in files that only use a
-//! subset of the helpers.
 
 use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -54,9 +50,8 @@ pub fn accept_with_timeout(
     rx.recv_timeout(timeout).ok()
 }
 
-/// Poll `path.exists()` until true or `timeout` elapses. Used to wait
-/// for the display endpoint to finish `UnixListener::bind` before
-/// clients attempt to connect.
+/// Poll `path.exists()` until true or `timeout` elapses.
+/// Used to wait for display endpoint socket binding.
 pub async fn wait_for_sock_bind(path: &Path, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -76,7 +71,6 @@ pub fn have_vulkan_device() -> bool {
 
 /// Resolve the external C++ host binary from `WAYWALLEN_RENDERER_BIN`.
 /// Tests that need the C++ host should early-return with a skip line
-/// when this yields `None`.
 pub fn cpp_renderer_bin_from_env() -> Option<PathBuf> {
     std::env::var_os("WAYWALLEN_RENDERER_BIN").map(PathBuf::from)
 }

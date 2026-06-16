@@ -1,5 +1,3 @@
-//! Display-backend auto-selection and subprocess supervision.
-
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -161,7 +159,6 @@ pub fn pick_backend(reg: &DisplayRegistry, caps: &DeCaps) -> PickOutcome {
 
     // Soft capability check: only warn on missing `requires`; don't veto
     // until the real wl_registry probe lands. This keeps Hyprland/Sway
-    // working today without a Wayland dep in the daemon.
     let mut best: Option<DisplayDef> = None;
     for d in all_defs {
         if !de_matches(&d) {
@@ -233,7 +230,6 @@ pub fn log_outcome(outcome: &PickOutcome, caps: &DeCaps) {
 
 /// Return `true` when the daemon should start a subprocess for this
 /// outcome. `External` backends rely on the DE to launch them (e.g.
-/// Plasma kpackage), so the daemon stays out of their way.
 pub fn should_daemon_spawn(outcome: &PickOutcome) -> bool {
     match outcome {
         PickOutcome::KdeHardMatch(def) | PickOutcome::Matched(def) => {
@@ -245,25 +241,15 @@ pub fn should_daemon_spawn(outcome: &PickOutcome) -> bool {
 
 // ---------------------------------------------------------------------------
 // Subprocess supervision
-// ---------------------------------------------------------------------------
 
 /// Initial restart delay after a backend exits unexpectedly. Kept
 /// generous so a crashing backend (e.g. a protocol error from a bad
-/// SetConfig) doesn't burn CPU on rapid respawns — a real fix needs
-/// log inspection, not a 4-Hz restart loop.
 const RESTART_INITIAL: Duration = Duration::from_secs(2);
 /// Upper bound on the exponential backoff.
 const RESTART_MAX: Duration = Duration::from_secs(10);
 
 /// Supervise a daemon-spawned display backend for the lifetime of the
 /// process. Exits cleanly when `shutdown_rx` flips to `true` (SIGTERMs
-/// the child via Tokio `kill_on_drop`). Unexpected child exits are
-/// retried with exponential backoff; `exit=0` is treated as a graceful
-/// completion (rare — usually only on --help or arg errors) and ends
-/// the loop.
-///
-/// Only applicable when `def.spawn == SpawnMode::Daemon`. Callers
-/// gate on `should_daemon_spawn` before invoking this.
 pub async fn run_backend(
     def: DisplayDef,
     socket: PathBuf,
@@ -305,13 +291,8 @@ pub async fn run_backend(
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
 
-        // Linux-only safety net: `kill_on_drop(true)` covers the happy
-        // path (daemon exits cleanly, Tokio drops the Child handle), but
-        // it does NOT cover the daemon getting SIGKILL'd mid-flight —
-        // in that case the runtime is torn down without dropping anything
-        // and the child becomes reparented to PID 1. PR_SET_PDEATHSIG
-        // asks the kernel to SIGTERM the child as soon as its parent
-        // thread-group-leader dies, regardless of how it died.
+        // Linux-only safety net: `kill_on_drop(true)` covers clean exits.
+        // PDEATHSIG also handles abrupt parent death.
         #[cfg(target_os = "linux")]
         unsafe {
             cmd.pre_exec(|| {
@@ -353,8 +334,6 @@ pub async fn run_backend(
                 log::info!("shutdown: stopping display backend '{}' (pid={pid:?})", def.name);
                 // Send SIGKILL, then wait up to 2s so we leave no zombie.
                 // If the child ignores or is stuck in uninterruptible
-                // sleep we still return — the runtime teardown will
-                // SIGKILL anything tokio still owns.
                 let _ = child.start_kill();
                 match tokio::time::timeout(Duration::from_secs(2), child.wait()).await {
                     Ok(Ok(st)) => log::info!(
@@ -422,7 +401,6 @@ async fn wait_shutdown(rx: &mut watch::Receiver<bool>) {
 
 // ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

@@ -141,11 +141,8 @@ pub fn pick_memory_type(
     ))
 }
 
-// dma-buf import: the driver's fd_props already constrains type_bits to
-// the legal set. NVIDIA exposes a dedicated "PRIME-importable" type that
-// shows up as the lowest-indexed bit; picking the strictly DEVICE_LOCAL
-// alternative (when both are present) makes vkAllocateMemory fail at
-// import time. Prefer the lowest matching bit unconditionally.
+// dma-buf import: the driver's fd_props already constrains type_bits.
+// Pick the first legal type instead of imposing local memory policy.
 pub fn pick_memory_type_for_import(
     mem_props: &vk::PhysicalDeviceMemoryProperties,
     type_bits: u32,

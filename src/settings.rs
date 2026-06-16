@@ -1,23 +1,3 @@
-//! Runtime-configurable settings store, persisted to
-//! `$XDG_CONFIG_HOME/waywallen/config.toml`.
-//!
-//! Layout:
-//!
-//! ```toml
-//! [global]
-//! rotation_secs = 0
-//!
-//! [plugin.wescene]
-//! # Free-form per-plugin table: keys are owned by the plugin, not the
-//! # daemon. M7 forwards these into the renderer subprocess via metadata.
-//! ```
-//!
-//! Write strategy: every mutation goes through `update()`, which takes
-//! the in-memory write lock, applies the closure, then pokes a
-//! `Notify`. A background task debounces those pokes by
-//! `DEBOUNCE_WRITE` and then atomically `rename`s a tempfile into
-//! place. Callers never block on disk.
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,17 +11,11 @@ use tokio::sync::Notify;
 use crate::display::layout::{Align, FillMode, Location, Rotation};
 
 /// Quiet period after the last `update()` before the debounced writer
-/// flushes to disk. Short enough that `Ctrl-C` shortly after a setting
-/// change still persists if the user waits a beat; long enough that
-/// rapid-fire UI toggles batch into a single write.
+/// flushes to disk.
 const DEBOUNCE_WRITE: Duration = Duration::from_secs(2);
 
 /// Daemon-wide layout defaults applied to displays that have no
 /// `[displays.<name>]` override.
-///
-/// Clear color is NOT a layout setting — it lives entirely with the
-/// renderer (see `RendererHandle::clear_rgba`). The daemon never lets
-/// the user override it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LayoutDefaults {
@@ -51,9 +25,8 @@ pub struct LayoutDefaults {
     pub rotation: Rotation,
 }
 
-/// Per-display override. Each field is `Option`; `None` means "inherit
-/// the global default". Keyed in `Settings::displays` by the display
-/// name advertised in `register_display`.
+/// Per-display overrides keyed by display name.
+/// `None` fields inherit from the global defaults.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DisplayPrefs {
@@ -63,10 +36,8 @@ pub struct DisplayPrefs {
     pub rotation: Option<Rotation>,
     pub autopause_mode: Option<AutopauseMode>,
     pub autopause_resume_ms: Option<u32>,
-    /// Last wallpaper id applied to this display, persisted so the
-    /// daemon can restore the per-display assignment on restart or
-    /// when the display re-connects mid-session. `None` falls back to
-    /// `GlobalSettings::last_wallpaper`.
+    /// Last wallpaper id applied to this display.
+    /// Used to restore per-display assignment on restart.
     pub last_wallpaper: Option<String>,
     pub alias: Option<String>,
     pub active_playlist_id: Option<i64>,
@@ -94,12 +65,8 @@ pub struct ResolvedLayout {
     pub rotation: Rotation,
 }
 
-/// What the daemon does when window-state reports arrive from a
-/// display. Mirrors the modes of the old KDE wallpaper plugin's
-/// `Common.PauseMode`, but the decision now lives in the daemon.
-///
-/// The mapping from (mode, `WW_WIN_HAS_*` flags) to "paused?" is in
-/// `routing::autopause::decide`.
+/// What the daemon does when window-state reports arrive from a display.
+/// Mirrors the legacy KDE wallpaper plugin modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AutopauseMode {
@@ -124,18 +91,14 @@ pub enum AutopauseMode {
 #[serde(default)]
 pub struct AutopauseDefaults {
     pub mode: AutopauseMode,
-    /// Milliseconds of "no autopause condition" required before the
-    /// renderer is allowed to Play again. Smooths bursty fullscreen
-    /// toggles (e.g. video player UI peek).
+    /// Milliseconds without an autopause condition before resuming.
+    /// Smooths bursty fullscreen transitions.
     pub resume_ms: u32,
     /// Pause all renderers when the session's screen-saver/lock-screen
     /// becomes active (`org.freedesktop.ScreenSaver.ActiveChanged`).
-    /// Monitored by `session_monitor` on the D-Bus session bus.
     pub pause_on_lock: bool,
     /// Pause all renderers when the current login session becomes
-    /// inactive (user switches to another session via the display
-    /// manager). Monitored via `org.freedesktop.login1.Session.Active`
-    /// on the D-Bus system bus.
+    /// inactive, such as after a user switch.
     pub pause_on_user_switch: bool,
 }
 
@@ -160,34 +123,24 @@ pub struct ResolvedAutopause {
 
 /// Daemon-wide defaults consumed by `WallpaperApply` when a renderer
 /// has no per-plugin override.
-///
-/// Note: fps is intentionally NOT here. Frame rate is a per-plugin
-/// concern (different renderer engines have different sane defaults
-/// and capabilities), so it lives in `[plugin.<name>]` tables only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GlobalSettings {
     pub last_wallpaper: Option<String>,
     /// Queue playback mode: `"sequential"` / `"shuffle"` / `"random"`.
     /// Restored on startup so the rotator resumes the same behavior.
-    /// (Old configs may have this under `playlist_mode` — the alias
-    /// keeps them readable.)
     #[serde(alias = "playlist_mode")]
     pub queue_mode: String,
     /// Auto-rotation interval in seconds; `0` = disabled.
     pub rotation_secs: u32,
-    /// Default fillmode/align/clear color applied when a display has
-    /// no per-display override. Drives the daemon-side projection of
-    /// `set_config` rects.
+    /// Default layout used when a display has no override.
+    /// Drives daemon-side projection.
     pub layout: LayoutDefaults,
     /// Daemon-wide autopause defaults. A display with no
     /// `[displays.<name>] autopause_*` override inherits from here.
     pub autopause: AutopauseDefaults,
-    /// Structured wallpaper-browser filter state. Kept typed in
-    /// memory, but serialized into the config file as a JSON string
-    /// for compact persistence and backwards compatibility with older
-    /// `wallpaper_filter_json = "..."`
-    /// snapshots.
+    /// Structured wallpaper-browser filter state.
+    /// Kept typed in memory but serialized as a JSON string.
     #[serde(
         default,
         rename = "wallpaper_filter_json",
@@ -236,9 +189,8 @@ impl Default for GlobalSettings {
 }
 
 impl GlobalSettings {
-    /// Filter rules + logics for the queue. The quick skip-type toggles
-    /// are folded in as `WpType IS_NOT <ty>` rules, each in its own
-    /// fresh group so they AND with the user's filter expression.
+    /// Filter rules and logic for the queue.
+    /// Quick skip toggles are folded into the rule list.
     pub fn wallpaper_queue_filter(
         &self,
     ) -> (
@@ -514,27 +466,18 @@ where
 pub struct Settings {
     #[serde(default)]
     pub global: GlobalSettings,
-    /// Per-plugin string→string bag. Keyed by plugin name
-    /// (`RendererDef.name`). String-only so the contents map cleanly
-    /// onto `SpawnRequest.metadata` (which is also `String→String`)
-    /// and the `SettingsGet/SetRequest` RPCs without per-value type
-    /// gymnastics.
+    /// Per-plugin string-to-string bag keyed by `RendererDef.name`.
+    /// String values map cleanly to TOML and protobuf.
     #[serde(default, rename = "plugin")]
     pub plugins: HashMap<String, HashMap<String, String>>,
-    /// Per-display layout overrides keyed by the display name
-    /// advertised in `register_display`. Empty entries are pruned by
-    /// `DisplayPrefs::is_empty`-aware writers; missing keys mean
-    /// "inherit global defaults".
+    /// Per-display layout overrides keyed by `register_display` name.
+    /// Empty entries are pruned by mutators.
     #[serde(default, rename = "display")]
     pub displays: HashMap<String, DisplayPrefs>,
 }
 
 /// Resolve the on-disk location. Order:
 ///   1. `$XDG_CONFIG_HOME/waywallen/config.toml`
-///   2. `$HOME/.config/waywallen/config.toml`
-///   3. `./waywallen.toml` (last-resort fallback so tests can pass
-///      `--config` without crossing a real home dir — phase 6 only
-///      picks the former two).
 pub fn default_config_path() -> PathBuf {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         return PathBuf::from(xdg).join("waywallen/config.toml");
@@ -545,11 +488,8 @@ pub fn default_config_path() -> PathBuf {
     PathBuf::from("waywallen.toml")
 }
 
-/// Resolve the SQLite database location. Mirrors [`default_config_path`]
-/// but targets the XDG *data* dir instead of the config dir:
-///   1. `$XDG_DATA_HOME/waywallen/waywallen-v2.db`
-///   2. `$HOME/.local/share/waywallen/waywallen-v2.db`
-///   3. `./waywallen-v2.db` (last-resort fallback)
+/// Resolve the SQLite database location.
+/// Mirrors [`default_config_path`] but targets the XDG data dir.
 pub fn default_db_path() -> PathBuf {
     if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
         return PathBuf::from(xdg).join("waywallen/waywallen-v2.db");
@@ -564,31 +504,17 @@ pub struct SettingsStore {
     inner: Arc<StdRwLock<Settings>>,
     notify: Arc<Notify>,
     path: PathBuf,
-    /// Serializes concurrent `flush()` calls. Without this the
-    /// debounced writer_loop and `flush_now()` (called on shutdown)
-    /// can both target the same `<name>.tmp` path simultaneously: one
-    /// task's `O_TRUNC` clobbers the other's in-flight write, and
-    /// whichever finishes the rename last installs whatever bytes its
-    /// own tmp ended up with — typically a partial file because the
-    /// other task interleaved a truncate. Held only across the
-    /// in-memory snapshot + write + rename; the in-memory state
-    /// itself is still guarded by `inner`.
+    /// Serializes concurrent `flush()` calls.
+    /// Covers both the debounced writer and shutdown flush.
     flush_lock: tokio::sync::Mutex<()>,
-    /// Set when the in-memory state diverges from what's on disk.
-    /// Cleared by a successful `flush()`. `update()` only marks
-    /// dirty when the closure actually changed something
-    /// (PartialEq on `Settings`), so duplicate apply / no-op tweaks
-    /// don't trigger redundant writes.
+    /// Set when the in-memory state diverges from disk.
+    /// Cleared by a successful `flush()`.
     dirty: AtomicBool,
 }
 
 impl SettingsStore {
-    /// Load from `path` if it exists, otherwise fall back to defaults
-    /// AND seed the file with the default state so it's visible from
-    /// day-one (handy for hand-editing without having to run the
-    /// daemon first). Spawns the debounced-writer task on the current
-    /// tokio runtime; callers should keep the returned `Arc` alive
-    /// for the lifetime of the daemon or the writer exits.
+    /// Load from `path`, or fall back to defaults and seed the file.
+    /// Seeding makes the config visible to users immediately.
     pub async fn load_or_default(path: PathBuf) -> Arc<Self> {
         let mut seed_on_disk = false;
         let initial = match tokio::fs::read_to_string(&path).await {
@@ -627,9 +553,8 @@ impl SettingsStore {
             notify: Arc::new(Notify::new()),
             path,
             flush_lock: tokio::sync::Mutex::new(()),
-            // Mark dirty up-front when there's no on-disk file yet so
-            // the seed flush below actually writes; otherwise dirty
-            // starts clean and `update()` flips it on real changes.
+            // Mark dirty when no on-disk file exists so the seed flush
+            // writes the default config.
             dirty: AtomicBool::new(seed_on_disk),
         });
 
@@ -646,9 +571,8 @@ impl SettingsStore {
         store
     }
 
-    /// Snapshot the current settings. Cheap: clones the inner struct
-    /// under a read lock. Callers that only need a few fields should
-    /// prefer `global()`/`plugin()` accessors instead.
+    /// Snapshot the current settings by cloning under a read lock.
+    /// Callers needing only globals should use narrower helpers.
     pub fn snapshot(&self) -> Settings {
         self.inner.read().expect("settings poisoned").clone()
     }
@@ -669,10 +593,8 @@ impl SettingsStore {
             .cloned()
     }
 
-    /// Resolve the effective layout for a display by name. Per-display
-    /// overrides win field-by-field; missing fields fall back to the
-    /// global `LayoutDefaults`. Hot path — called from
-    /// `Router::sync_display` on every set_config emission.
+    /// Resolve the effective layout for a display name.
+    /// Per-display overrides win field by field.
     pub fn resolved_layout(&self, display_name: &str) -> ResolvedLayout {
         let g = self.inner.read().expect("settings poisoned");
         let defaults = &g.global.layout;
@@ -704,10 +626,8 @@ impl SettingsStore {
         }
     }
 
-    /// Per-display wallpaper id with fallback to the global
-    /// `last_wallpaper`. The hot-plug recall watcher and the startup
-    /// restorer both go through this helper so the cascade is in one
-    /// place.
+    /// Per-display wallpaper id with fallback to global `last_wallpaper`.
+    /// Used by hot-plug recall and startup restore.
     pub fn resolved_last_wallpaper(&self, display_key: &str) -> Option<String> {
         let g = self.inner.read().expect("settings poisoned");
         if let Some(prefs) = g.displays.get(display_key) {
@@ -718,9 +638,8 @@ impl SettingsStore {
         g.global.last_wallpaper.clone()
     }
 
-    /// Snapshot just the per-display preferences (cloned). Used to
-    /// expose the override map over the control plane (e.g.
-    /// `DisplayInfo.layout_override` in protobuf).
+    /// Snapshot just the cloned per-display preferences.
+    /// Used to expose overrides over the control plane.
     pub fn display_prefs(&self, display_name: &str) -> Option<DisplayPrefs> {
         self.inner
             .read()
@@ -741,11 +660,8 @@ impl SettingsStore {
             .collect()
     }
 
-    /// Apply an in-memory mutation. Compares the post-closure state
-    /// against the pre-closure clone; only flips the dirty bit and
-    /// pokes the writer if the closure actually changed something.
-    /// No-op closures (or closures that set fields to their existing
-    /// values) cost a clone + equality check but no disk I/O.
+    /// Apply an in-memory mutation and compare before/after state.
+    /// Only changed settings mark the store dirty.
     pub fn update<F>(&self, f: F)
     where
         F: FnOnce(&mut Settings),
@@ -778,11 +694,8 @@ impl SettingsStore {
         }
     }
 
-    /// Force a synchronous flush of the current settings to disk,
-    /// bypassing the debounce window. Call this on shutdown so the
-    /// last write doesn't get stranded by a SIGTERM that arrives
-    /// inside the debounce period (otherwise `last_wallpaper`,
-    /// `active_playlist_id`, and friends silently fail to persist).
+    /// Force a synchronous flush of current settings to disk.
+    /// Bypasses the debounce window for shutdown.
     pub async fn flush_now(&self) {
         self.flush().await;
     }
@@ -851,40 +764,22 @@ impl SettingsStore {
         log::debug!("settings flushed to {}", self.path.display());
     }
 
-    /// Read-only view of the on-disk path (useful when the settings
-    /// store is constructed before the rest of `AppState`, so callers
-    /// can log the resolved path next to other startup diagnostics).
+    /// Read-only view of the on-disk path.
+    /// Useful before the rest of `AppState` is constructed.
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }
 
-    /// Bring the in-memory plugin tables in line with the loaded
-    /// renderer registry's manifest schemas:
-    ///
-    /// - declared keys missing from the user's toml are filled with
-    ///   the manifest's `default`;
-    /// - keys present in the toml but absent from the manifest are
-    ///   dropped (with a warn) — they're stale leftovers from a
-    ///   plugin removal/rename;
-    /// - declared keys whose persisted value violates `min`/`max`/
-    ///   `choices` get reset to default and warned about — the
-    ///   daemon refuses to start serving an out-of-range value just
-    ///   because it was on disk.
-    ///
-    /// Marks the store dirty when reconciliation altered anything so
-    /// the cleaned-up table flushes to disk on the next debounce
-    /// cycle. Returns `true` when a flush is needed (caller may also
-    /// want to publish a `SettingsChanged` event so any already-
-    /// connected WS client sees the merged truth).
+    /// Bring in-memory plugin tables in line with loaded renderer
+    /// manifest schemas.
     pub fn reconcile(&self, registry: &crate::plugin::renderer_registry::RendererRegistry) -> bool {
         use crate::plugin::renderer_registry::{check_setting_bounds, SettingDef, SettingType};
 
         let mut changed = false;
         let mut g = self.inner.write().expect("settings poisoned");
 
-        // Pre-compute manifest schemas keyed by plugin name so we can
-        // also iterate the user table and warn on truly-unknown
-        // plugins (versus a known plugin with an unknown key).
+        // Pre-compute manifest schemas keyed by plugin name so user
+        // tables can be checked for unknown plugins.
         let manifests: HashMap<String, &HashMap<String, SettingDef>> = registry
             .all_renderers()
             .into_iter()
@@ -959,11 +854,8 @@ impl SettingsStore {
             }
         }
 
-        // 2) Warn on whole plugins the user has settings for that the
-        //    daemon doesn't know about. Keep them in memory — the
-        //    plugin may come back on the next start (e.g. user just
-        //    moved a manifest) — and they're harmless because nothing
-        //    consumes them. Only the per-key drop above is destructive.
+        // Warn about persisted plugin settings whose manifest is absent.
+        // Keep them in memory so missing plugins do not lose settings.
         for plugin_name in g.plugins.keys() {
             if !manifests.contains_key(plugin_name) {
                 log::warn!(

@@ -20,7 +20,6 @@ const POLL_TIMEOUT_MS: i32 = 5_000;
 struct DisplayState {
     // VkDevice borrow held for the whole session; the FFI library
     // imports dma-bufs into this device, so its lifetime must outlive
-    // every callback.
     vkd: *const VkDevice,
 
     // Latest textures pool from on_textures_ready; cleared on releasing.
@@ -140,8 +139,6 @@ fn run_session(
         queue_family_index: vkd.queue_family,
         // FFI dlopens its own libvulkan and resolves entrypoints there;
         // setting None lets the library use its internal loader. Our
-        // ash-loaded entrypoints share the same VkInstance handle, so
-        // imports use the same driver.
         vk_get_instance_proc_addr: None,
     };
     let rc = unsafe { ffi::waywallen_display_bind_vulkan(d, &vk_ctx) };
@@ -352,8 +349,6 @@ fn validate_frame(state: &mut DisplayState, buffer_index: u32, seq: u64) -> Resu
     let pixel = unsafe {
         // Read pixel (0,0). DMA-BUF imported with modifier may have
         // tile-shape, so picking (0,0) is the most modifier-tolerant
-        // canary — the producer cleared the entire image to one
-        // colour, every pixel must equal `expected`.
         let p = staging.mapped;
         [*p, *p.add(1), *p.add(2), *p.add(3)]
     };
@@ -374,8 +369,6 @@ fn teardown(vkd: &VkDevice, state: &mut DisplayState) {
 
 // ---------------------------------------------------------------------------
 // FFI callbacks — every entry traps panics so a Rust panic never unwinds
-// across the C boundary.
-// ---------------------------------------------------------------------------
 
 unsafe extern "C" fn cb_textures_ready(
     user_data: *mut c_void,

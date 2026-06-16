@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use crate::model::repo;
 use crate::probe::media::{AvFormatProbe, MediaProbe};
-use crate::wallpaper_type::{WallpaperEntry, WallpaperType};
+use crate::wallpaper::types::{WallpaperEntry, WallpaperType};
 
 /// User-Agent the `ctx.http` default client sends.
 const WAYWALLEN_HTTP_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) waywallen";
@@ -49,24 +49,20 @@ fn resolve_plugin_import(root: &Path, name: &str) -> LuaResult<PathBuf> {
 
 // ---------------------------------------------------------------------------
 // Public types
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SourcePluginInfo {
     pub name: String,
-    /// Domain id of the owning installable plugin (from its
-    /// `plugin.toml`). Empty when the plugin was loaded without an
-    /// owning manifest (e.g. tests).
+    /// Domain id of the owning installable plugin.
+    /// Empty when loaded without package metadata.
     pub plugin_id: String,
     pub types: Vec<WallpaperType>,
     pub version: String,
-    /// Short label/placeholder a UI uses when prompting the user for a
-    /// library path (e.g. "Steam Library Path"). Empty when the plugin
-    /// didn't supply one; UIs fall back to a generic label.
+    /// Short UI label or placeholder for prompting a library path.
+    /// Empty when the plugin did not declare one.
     pub library_label: String,
-    /// Longer helper text explaining what kind of path the user should
-    /// choose. May contain newlines / inline-code Markdown markers
-    /// that the UI is free to render literally. Empty when omitted.
+    /// Longer helper text for choosing a library path.
+    /// May contain newlines or inline-code Markdown markers.
     pub library_hint: String,
 }
 
@@ -133,7 +129,6 @@ pub struct DiscoverDownload {
 
 // ---------------------------------------------------------------------------
 // SourceManager
-// ---------------------------------------------------------------------------
 
 pub struct SourceManager {
     lua: Lua,
@@ -148,8 +143,7 @@ pub struct SourceManager {
     /// Shared media probe exposed to Lua via ctx.probe(path).
     probe: Arc<dyn MediaProbe>,
     /// DB used by the `ctx.library_meta_*` async-Lua-function bridge.
-    /// `None` means the bridge silently no-ops (used by tests that
-    /// don't exercise persistence).
+    /// `None` makes the bridge no-op, which is useful for DB-less tests.
     db: Option<DatabaseConnection>,
 }
 
@@ -180,9 +174,7 @@ impl SourceManager {
     }
 
     /// Hand the DB to the source manager so `ctx.library_meta_get/set`
-    /// (registered as mlua async functions) can read/write the
-    /// `library.metadata` JSON column. Without this, the metadata
-    /// functions return nil / false.
+    /// can read and write per-library metadata.
     pub fn attach_db(&mut self, db: DatabaseConnection) {
         self.db = Some(db);
     }
@@ -246,9 +238,8 @@ impl SourceManager {
             .eval()
             .map_err(|e| Error::Internal(anyhow!("eval {}: {e}", path.display())))?;
 
-        // Call info() to get plugin metadata. All three steps are
-        // load-time daemon-internal failures; collapse to Internal with
-        // descriptive context.
+        // Load-time plugin metadata failures are daemon-internal and should
+        // surface as Internal with path context.
         let info_fn: LuaFunction = module
             .get("info")
             .map_err(|e| Error::Internal(anyhow!("plugin must export info(): {e}")))?;
@@ -270,16 +261,7 @@ impl SourceManager {
     }
 
     /// Run `scan(ctx)` on all loaded plugins and merge results.
-    /// `libs_by_plugin` is the per-plugin library list pulled from the
-    /// DB; each plugin sees its own slice via `ctx.libraries()`. A
-    /// plugin missing from the map (or with an empty list) is scanned
-    /// with no libraries — Lua plugins should emit zero entries in
-    /// that case rather than fall back to defaults.
-    ///
-    /// Async because `ctx.library_meta_*` are mlua async functions
-    /// that need a tokio runtime to drive their `sea-orm` calls; the
-    /// caller drives this via either an enclosing async context or
-    /// `Handle::block_on` from a `spawn_blocking` thread.
+    /// `libs_by_plugin` is the per-plugin library list from the DB.
     pub async fn scan_all(&mut self, libs_by_plugin: &HashMap<String, Vec<String>>) -> Result<()> {
         self.entries.clear();
         self.by_type.clear();
@@ -327,12 +309,8 @@ impl SourceManager {
                 description: tbl.get::<String>("description").ok(),
                 tags: tbl.get::<Vec<String>>("tags").unwrap_or_default(),
                 external_id: tbl.get::<String>("external_id").ok(),
-                // Optional plugin-supplied media meta. Plugins that
-                // know their own metadata (e.g. wallpaper_engine via
-                // project.json + ctx.file_size) can pre-fill these so
-                // the daemon's background probe task has less work.
-                // Missing fields stay `None` and are filled in later
-                // by the probe scheduler.
+                // Optional plugin-supplied media metadata.
+                // Plugins that know it can skip later probing.
                 size: tbl.get::<i64>("size").ok(),
                 width: tbl.get::<u32>("width").ok(),
                 height: tbl.get::<u32>("height").ok(),
@@ -350,13 +328,8 @@ impl SourceManager {
         Ok(())
     }
 
-    /// Build the `ctx` table passed to Lua `scan(ctx)`. `libraries` is
-    /// the per-plugin DB-driven library list exposed as
-    /// `ctx.libraries()`. `plugin_name` is `Some` when called from
-    /// `scan_plugin` (where plugin identity is known) and `None` from
-    /// `auto_detect_all` (which runs before plugins are registered in
-    /// the DB) — the latter disables the `library_meta_*` bridge
-    /// because there is no plugin row to scope writes to.
+    /// Build the `ctx` table passed to Lua callbacks.
+    /// `libraries` is exposed through `ctx.libraries()`.
     fn build_ctx(&self, plugin_name: Option<&str>, libraries: &[String]) -> Result<LuaTable> {
         let ctx = self.lua.create_table()?;
 
@@ -434,19 +407,15 @@ impl SourceManager {
         // ctx.basename(path) -> string|nil (same as filename on dirs)
         ctx.set("basename", filename_fn)?;
 
-        // ctx.env(name) -> string|nil. Intentionally kept available for
-        // auto-detect probing of well-known paths (e.g. $HOME). Not a
-        // cache — resolves on every call.
+        // ctx.env(name) -> string|nil. Used for auto-detect probing of
+        // well-known paths such as $HOME.
         let env_fn = self
             .lua
             .create_function(|_, name: String| Ok(std::env::var(&name).ok()))?;
         ctx.set("env", env_fn)?;
 
         // ctx.libraries() -> list of absolute library paths registered
-        // for this plugin in the daemon DB. Replaces the old
-        // config/env-based directory discovery: libraries are now a
-        // user-managed first-class concept owned by the daemon, and
-        // Lua plugins only see what the DB authorizes for them.
+        // for this plugin in the daemon DB.
         let libs_for_closure: Vec<String> = libraries.to_vec();
         let libraries_fn = self.lua.create_function(move |lua, ()| {
             let tbl = lua.create_table()?;
@@ -481,8 +450,7 @@ impl SourceManager {
         ctx.set("log", log_fn)?;
 
         // ctx.file_size(path) -> integer|nil
-        // Cheap stat-only helper: lets a Lua source plugin pre-fill
-        // `entry.size` without paying for a libavformat probe.
+        // Cheap stat-only helper for Lua plugins to pre-fill size metadata.
         let file_size_fn = self.lua.create_function(|_, path: String| {
             let bytes = std::fs::metadata(&path)
                 .ok()
@@ -492,10 +460,7 @@ impl SourceManager {
         ctx.set("file_size", file_size_fn)?;
 
         // ctx.probe(path) -> table|nil
-        // Returns a table with present file/media fields, or nil if all
-        // fields are None. Composes the cheap stat tier (size) and the
-        // libavformat tier (width/height) into a single table so Lua
-        // plugins keep the historical schema.
+        // Returns present file/media fields, or nil if nothing was found.
         let probe_arc = Arc::clone(&self.probe);
         let probe_fn = self.lua.create_function(move |lua, path: String| {
             let s = crate::probe::stat::stat_file(&path);
@@ -519,21 +484,6 @@ impl SourceManager {
 
         // ctx.library_meta_get(library_path, key) -> string|nil
         // ctx.library_meta_set(library_path, key, value_or_nil) -> bool
-        //
-        // Per-library KV scratch space backed by `library.metadata`
-        // (JSON column). Scoped to the *current* plugin: a plugin can
-        // only read/write metadata on libraries it owns. The
-        // (plugin_name, library_path) tuple resolves to a library row
-        // via the existing `idx_library_plugin_path` unique index, so
-        // both lookups are cheap.
-        //
-        // Implemented as mlua async functions: when invoked, the Lua
-        // coroutine yields and the surrounding `scan_fn.call_async` /
-        // `extras_fn.call_async` driver awaits the sea-orm future on
-        // whatever runtime is driving the call. Returns nil / false if
-        // the DB hasn't been attached or the (plugin, library) tuple
-        // doesn't exist yet — set-before-scan is a no-op rather than an
-        // error so plugins can be defensive without crashing the scan.
         {
             let kv_db = self.db.clone();
             let kv_plugin = plugin_name.map(str::to_owned);
@@ -612,18 +562,11 @@ impl SourceManager {
             ctx.set("library_meta_set", library_meta_set_fn)?;
         }
 
-        // Source plugins write `entry.metadata` directly using the
-        // canonical schema:
-        //   metadata = { path = resource, [extras...] }
-        // The daemon validates the resulting table against the
-        // resolved renderer manifest in
-        // `renderer_registry::validate_metadata`.
+        // Source plugins write entry fields directly using the canonical
+        // schema exposed by WallpaperEntry.
 
-        // ctx.http — fluent client: ctx.http:get(url):headers({...}):send();
-        //   builder :header/:headers/:query/:form/:json/:body/:timeout/:send,
-        //   response :status/:ok/:headers/:text/:bytes/:json.
-        // ctx.html — table: query/query_one (-> {tag,text,html,inner_html,attrs}), text.
-        // ctx.url — table: encode/decode/encode_component/host/parse/join.
+        // ctx.http is a fluent client:
+        // ctx.http:get(url):headers({...}):send()
         ctx.set("http", mlua_extra::http::default(WAYWALLEN_HTTP_USER_AGENT))?;
         ctx.set("html", mlua_extra::html::create_module(&self.lua)?)?;
         ctx.set("url", mlua_extra::url::create_module(&self.lua)?)?;
@@ -633,7 +576,6 @@ impl SourceManager {
 
     // -----------------------------------------------------------------------
     // Query API
-    // -----------------------------------------------------------------------
 
     pub fn list(&self) -> &[WallpaperEntry] {
         &self.entries
@@ -652,20 +594,6 @@ impl SourceManager {
 
     /// Ask the plugin that produced `entry` for the CLI `extras`
     /// dictionary the daemon should pass to the renderer subprocess
-    /// at spawn time (under SPAWN_VERSION 3 these become `--<key>
-    /// <value>` argv after `--ipc <socket>`).
-    ///
-    /// The Lua plugin exports `extras(entry, ctx) -> table` returning
-    /// a flat `{string -> string}` map. `ctx` carries the same helpers
-    /// scan(ctx) sees — including `library_meta_get` — so plugins can
-    /// pull values they cached at scan time out of `library.metadata`
-    /// instead of duplicating them on every entry. A plugin without an
-    /// `extras()` function yields an empty map (no CLI extras).
-    ///
-    /// `extras["path"]` is mandatory in the result — that's the
-    /// canonical resource path. The daemon does NOT enforce that here;
-    /// renderers fail at spawn-time with `--path <file> is required`
-    /// if the plugin omitted it.
     pub async fn call_extras(
         &self,
         plugin_name: &str,
@@ -675,18 +603,14 @@ impl SourceManager {
             .plugins
             .get(plugin_name)
             .ok_or_else(|| Error::SourcePluginNotFound(plugin_name.to_string()))?;
-        // Body runs in a sub-block so any mlua failure rolls up into a
-        // single typed `SourceExtrasFailed` carrying the plugin name —
-        // callers (ws_server, control) just need the typed surface and
-        // the underlying Lua trace as a string.
+        // Keep the Lua body in one block so failures map to one typed
+        // SourceExtrasFailed carrying the plugin name.
         let body = async {
             let module: LuaTable = self.lua.registry_value(key)?;
             let extras_fn: Option<LuaFunction> = module.get("extras").ok();
             let Some(extras_fn) = extras_fn else {
-                // A source plugin with no extras() can't produce the
-                // renderer's `--path`; nothing to hand off. (The old
-                // entry.metadata fallback is gone — metadata is no longer
-                // carried; plugins derive extras from ctx + entry fields.)
+                // A source plugin without extras() cannot produce renderer
+                // CLI arguments, including --path.
                 log::warn!("source plugin '{plugin_name}' has no extras() function");
                 return Ok::<_, mlua::Error>(HashMap::new());
             };
@@ -701,20 +625,16 @@ impl SourceManager {
             if let Some(d) = &entry.description {
                 entry_tbl.set("description", d.clone())?;
             }
-            // `library_root` and `external_id` are the two "where did this
-            // come from" anchors plugins need at extras-time: the former
-            // to look up library-scoped metadata, the latter as a
-            // first-class id (e.g. wallpaper_engine workshop_id) without
-            // re-parsing the resource path.
+            // These identify where the item came from, so extras() can map
+            // DB entries back to plugin-owned resources.
             if !entry.library_root.is_empty() {
                 entry_tbl.set("library_root", entry.library_root.clone())?;
             }
             if let Some(eid) = &entry.external_id {
                 entry_tbl.set("external_id", eid.clone())?;
             }
-            // Build the same ctx scan(ctx) sees, so extras can call
-            // `library_meta_get` etc. Empty libraries list — extras runs
-            // per-entry, not per-library, and shouldn't need to enumerate.
+            // Build the same ctx scan(ctx) sees; extras runs per item, so
+            // the libraries list is intentionally empty.
             let ctx = self
                 .build_ctx(Some(plugin_name), &[])
                 .map_err(mlua::Error::external)?;
@@ -734,10 +654,7 @@ impl SourceManager {
     }
 
     /// Ask the plugin that produced `entry` for the wallpaper's
-    /// editable property schema as a JSON string (the shape WE's
-    /// `project.json::general.properties` exports). `Ok(None)` when
-    /// the plugin doesn't expose `properties` or returned nil — both
-    /// are normal for non-WE sources.
+    /// editable property schema as a JSON string.
     pub async fn call_properties(
         &self,
         plugin_name: &str,
@@ -777,10 +694,6 @@ impl SourceManager {
 
     /// Ask every plugin that exports `auto_detect(ctx)` to probe
     /// well-known filesystem locations and report any that exist.
-    /// Returns `(plugin_name -> [paths])`. Plugins without an
-    /// `auto_detect` export are silently skipped. Each plugin's ctx
-    /// sees an empty `libraries()` because auto-detect runs *before*
-    /// any libraries are registered.
     pub async fn auto_detect_all(&self) -> Result<HashMap<String, Vec<String>>> {
         let mut out: HashMap<String, Vec<String>> = HashMap::new();
         let empty: [String; 0] = [];
@@ -811,11 +724,9 @@ impl SourceManager {
 
     // -----------------------------------------------------------------------
     // Discover API — generic remote browsing relayed into plugin Lua.
-    // -----------------------------------------------------------------------
 
     /// List the source plugins that opt into discovery (export an
-    /// `info().discover` table) along with their declared sort/tag
-    /// vocabulary. Plugins without the table are skipped.
+    /// `info().discover` table) and their declared sort/tag options.
     pub fn discover_sources(&self) -> Result<Vec<DiscoverSourceInfo>> {
         let mut out = Vec::new();
         for (name, key) in &self.plugins {
@@ -859,8 +770,7 @@ impl SourceManager {
     }
 
     /// Relay a discover/search request to a plugin's `discover(ctx, params)`
-    /// Lua function. `params` is `{ query, sort, page, tags }`. The plugin
-    /// returns `{ items = {...}, has_more = bool }`.
+    /// Lua function. `params` is `{ query, sort, page, tags }`.
     pub async fn call_discover(
         &self,
         plugin_name: &str,
@@ -946,8 +856,7 @@ impl SourceManager {
     }
 
     /// Relay a download-resolution request to a plugin's
-    /// `download(ctx, id)` function. The daemon owns the actual file
-    /// download and filesystem writes.
+    /// `download(ctx, id)` function. The daemon owns the actual file transfer.
     pub async fn call_download(&self, plugin_name: &str, id: &str) -> Result<DiscoverDownload> {
         let key = self
             .plugins
@@ -1014,7 +923,6 @@ impl SourceManager {
 
 // ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 fn parse_lua_string_map(tbl: &LuaTable, key: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
@@ -1057,10 +965,8 @@ fn json_to_lua(lua: &Lua, val: &serde_json::Value) -> LuaResult<LuaValue> {
     }
 }
 
-/// Convert a `LuaValue` back to `serde_json::Value`. Lua tables are
-/// treated as arrays iff they have only contiguous 1..=N integer keys;
-/// otherwise as objects (keys stringified). `Nil`/`LightUserData`/
-/// `Function`/`Thread`/`UserData`/`Error` produce `None`.
+/// Convert a `LuaValue` back to `serde_json::Value`.
+/// Lua tables become arrays only with contiguous 1..=N integer keys.
 fn lua_to_json(val: &LuaValue) -> Option<serde_json::Value> {
     match val {
         LuaValue::Nil => Some(serde_json::Value::Null),
@@ -1114,7 +1020,6 @@ fn lua_to_json(val: &LuaValue) -> Option<serde_json::Value> {
 
 // ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -1362,9 +1267,8 @@ return bad
         assert!(entries.iter().all(|e| e.width.is_none()));
         assert!(entries.iter().all(|e| e.height.is_none()));
         assert!(entries.iter().all(|e| e.content_rating.is_none()));
-        // SPAWN_VERSION 3: the canonical resource path lives in
-        // `entry.resource` and is surfaced to the renderer via the
-        // plugin's `extras(entry)` Lua callback.
+        // SPAWN_VERSION 3 keeps the canonical resource path in
+        // `entry.resource`.
 
         let clip_path = lib.path().join("clip.MP4").to_string_lossy().to_string();
         let clip = entries

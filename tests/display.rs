@@ -1,8 +1,3 @@
-// Merged display protocol integration tests.
-// Originally split across display_handshake.rs / display_sync_fd_fanout.rs /
-// display_sync_fd_single.rs; merged into one binary to avoid linking the
-// daemon lib three times.
-
 #[path = "common/mod.rs"]
 mod common;
 
@@ -11,22 +6,6 @@ mod handshake {
     use super::common;
     // End-to-end smoke test for the `waywallen-display-v1` handshake.
     //
-    // Spins up a real `endpoint::serve` task bound to a tempfile
-    // socket, connects a client through the generated codec, and walks
-    // the protocol up through `display_accepted`. Bind/SetConfig/FrameReady
-    // are NOT exercised here because a real `BindSnapshot` requires a
-    // `waywallen-renderer` subprocess — that pipeline is covered by the
-    // `display_sync_fd_*` and `ipc_renderer_handshake_rust` tests.
-    //
-    // What this test verifies:
-    //
-    //   1. The daemon binds `display.sock` successfully
-    //   2. Client can connect, send `hello`, and receive `welcome`
-    //   3. `welcome.features` advertises `"explicit_sync_fd"`
-    //   4. Client can send `register_display` and receive `display_accepted`
-    //   5. The returned `display_id` is non-zero and monotonically assigned
-    //   6. No renderer → the server emits a clean error (not a panic) when
-    //      the client waits for the next event, and the client sees EOF
 
     use std::sync::Arc;
     use std::time::Duration;
@@ -125,7 +104,6 @@ mod handshake {
 
             // After display_accepted, the server will try to find a
             // renderer, fail, and close. The test's job is just to record
-            // the successful handshake.
             Ok(id)
         });
 
@@ -218,8 +196,6 @@ mod handshake {
 
         // Probe both ends of the range: too high and too low (saturating
         // to 0 if PROTOCOL_VERSION is already 0, in which case low_probe
-        // == 0 and the test still exercises a non-supported value when
-        // MIN_SUPPORTED > 0; otherwise low_probe == PROTOCOL_VERSION - 1).
         let high_probe = PROTOCOL_VERSION.saturating_add(99);
         for probe in [high_probe, PROTOCOL_VERSION.saturating_sub(1)] {
             if probe == PROTOCOL_VERSION {
@@ -275,9 +251,6 @@ mod sync_fd_fanout {
     use super::common;
     // Multi-display sync_fd fan-out test: verify that TWO concurrent
     // display clients, each subscribed to the same renderer, both
-    // receive real `dma_fence` sync_file fds (not dummy eventfds) on
-    // every `FrameReady` — proving that `clone_sync_fd` correctly dup's
-    // the producer's fence to all subscribers.
 
     use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixStream;
@@ -330,7 +303,6 @@ mod sync_fd_fanout {
 
         // bind_buffers — the daemon may rebind mid-stream when it promotes
         // the renderer to HOST_VISIBLE, so track the *latest* generation
-        // we've seen rather than freezing the very first one.
         let (bind, bind_fds) = codec::recv_event(&stream)?;
         let mut buffer_generation = match bind {
             Event::BindBuffers {
@@ -367,13 +339,7 @@ mod sync_fd_fanout {
                     frames += 1;
                 }
                 // Unbind/Bind/SetConfig may happen mid-stream when the
-                // daemon promotes the renderer to HOST_VISIBLE because the
-                // test display advertised an unknown GPU id (and is thus
-                // treated as cross-GPU). The fence-fanout assertion below
-                // doesn't care about the rebind sequence, only that real
-                // sync_fds reach both consumers — but we DO need to track
-                // the latest generation so the FrameReady gen-equality
-                // check stays sane after the rebind.
+                // daemon promotes the renderer to HOST_VISIBLE.
                 Event::BindBuffers {
                     buffer_generation: g,
                     ..
@@ -474,14 +440,6 @@ mod sync_fd_single {
     use super::common;
     // End-to-end smoke test: a real Vulkan `waywallen_renderer` subprocess
     // produces real `dma_fence` sync_fds on every `FrameReady`, those fds
-    // survive the `renderer_manager::run_reader` harvest, and
-    // `display::endpoint` forwards them to a connected client as the
-    // acquire fence fd on `Event::FrameReady`.
-    //
-    // Uses the in-process RendererManager + Router rig (no HTTP layer, no
-    // separate daemon process) so it can be run from `cargo test` without
-    // port contention. A real Vulkan device is required; the test skips
-    // itself (with a WARN) if no suitable device is found.
 
     use std::os::fd::AsRawFd;
     use std::sync::Arc;
@@ -597,12 +555,8 @@ mod sync_fd_single {
                 "expected display_accepted, got {accepted:?}"
             );
 
-            // bind_buffers (real dma-buf fds from the renderer). The
-            // daemon may rebind mid-stream when it promotes the renderer to
-            // HOST_VISIBLE for a cross-GPU consumer (this test reports
-            // drm_render = 0:0, i.e. unknown, which is treated as
-            // cross-GPU); track the *latest* generation so the gen-equality
-            // check on FrameReady stays sane after such a rebind.
+            // bind_buffers carries real dma-buf fds from the renderer.
+            // The daemon may rebind mid-stream during promotion.
             let (bind, bind_fds) = codec::recv_event(&stream)?;
             let Event::BindBuffers {
                 buffer_generation: initial_gen,
@@ -660,10 +614,7 @@ mod sync_fd_single {
                         anyhow::ensure!(release_fd.as_raw_fd() >= 0, "invalid release fd");
 
                         // Distinguish a real dma_fence sync_file from our
-                        // eventfd placeholder. The f_op of a sync_file is
-                        // "sync_file", so the readlink of the /proc fd
-                        // starts with "anon_inode:sync_file". eventfd's
-                        // readlink is "anon_inode:[eventfd]".
+                        // eventfd placeholder by inspecting the proc fd link.
                         let link =
                             std::fs::read_link(format!("/proc/self/fd/{}", acquire_fd.as_raw_fd()))
                                 .unwrap_or_default();
@@ -680,8 +631,6 @@ mod sync_fd_single {
 
                         // Release path: v1 dropped the BufferRelease request.
                         // The release_syncobj is signaled by the consumer's
-                        // GPU work; here we just drop the fds (closes them)
-                        // since the test is only verifying acquire-fd plumbing.
                         drop(fds);
                         let _ = (g, buffer_index, seq);
                         frames_seen += 1;
@@ -720,8 +669,6 @@ mod sync_fd_single {
         eprintln!("received {real_fence_count} real dma_fence sync_files out of 3 frames");
         // Acceptance: at least 1 of 3 must be a real sync_file, proving
         // the producer-to-consumer sync_fd path works end-to-end. We do
-        // not require all 3 because the very first frame on some drivers
-        // may not yet have the semaphore exported in time.
         assert!(
             real_fence_count >= 1,
             "no real dma_fence sync_files observed; sync_fd path is broken"

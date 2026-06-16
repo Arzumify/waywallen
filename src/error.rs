@@ -1,46 +1,14 @@
-//! Daemon-wide typed error.
-//!
-//! Most of the daemon's internal layers (`control`, `repo`,
-//! `renderer_manager`, …) still return `anyhow::Result`. The
-//! `From<anyhow::Error>` impl lets their callers `?`-propagate without
-//! a flag day. New code that **is** the source of a typed failure (the
-//! WebSocket dispatch arms, future control-layer migrations) should
-//! construct the matching variant directly so the wire-side
-//! `pb::ErrorCode` lands correctly — `Internal` is the "no better
-//! mapping known" fallback, not the default.
-//!
-//! Wire conversion lives here too (`Error::to_response`, `ok_response`)
-//! so this module is the single authority for the daemon-error → wire
-//! shape mapping. The legacy coarse `pb::Status` is derived from
-//! `error_code()`; old clients keep working without touching the daemon.
-//!
-//! Naming: import as `use crate::error::{Error, Result};` rather than
-//! re-exporting from `lib.rs`. Several modules `use anyhow::Result;` and
-//! a root-level shadow would silently change their meaning.
-//!
-//! Layering: `error.rs` depends on `control_proto` (the generated
-//! protobuf types). The reverse never holds — `control_proto.rs` is
-//! pure codegen + lightweight conversion helpers and must stay free of
-//! daemon error types so the build graph keeps the proto layer at the
-//! bottom.
-
 use thiserror::Error;
 
 use crate::control_proto as pb;
 
 /// Daemon-wide typed error. See module docs for construction guidance.
 //
-// `dead_code` is allowed at the enum level: this is intentional API
-// surface. Several variants (`InvalidArgument`, `FailedPrecondition`,
-// `LibraryNotFound`, …) are not yet constructed by any caller — they
-// reserve a stable mapping into `pb::ErrorCode` for the next round of
-// migration (control / repo layers moving off `anyhow::Result`).
 #[allow(dead_code)]
 #[derive(Debug, Error)]
 pub enum Error {
-    /// Catch-all for opaque errors bubbling up from layers still on
-    /// `anyhow::Result`. Code that knows the failure category should
-    /// construct a more specific variant.
+    /// Catch-all for opaque errors bubbling up from `anyhow::Result`.
+    /// Code with a known category should use a specific variant.
     #[error("{0:#}")]
     Internal(#[from] anyhow::Error),
 
@@ -58,25 +26,18 @@ pub enum Error {
     #[error("decode: {0}")]
     Decode(#[from] prost::DecodeError),
 
-    /// JSON encode/decode failure (used by `repo` for the
-    /// `library.metadata` TEXT column and similar). Surfaces as
-    /// `ErrorCode::Internal` — clients shouldn't have to distinguish
-    /// "the daemon failed to serialize state" from other internal bugs.
+    /// JSON encode/decode failure.
+    /// Used by `repo` for `library.metadata` and similar columns.
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 
-    /// `tokio::task::JoinError` — a `spawn_blocking` / `spawn` future
-    /// panicked or was cancelled. Always indicates a daemon-internal
-    /// fault; surfaces as `ErrorCode::Internal`.
+    /// `tokio::task::JoinError` from a spawned task.
+    /// Panics and unexpected cancellation are daemon-internal failures.
     #[error("task join: {0}")]
     Join(#[from] tokio::task::JoinError),
 
-    /// `mlua::Error` — Lua VM error from a source-plugin callback,
-    /// registry value mismatch, table key lookup, etc. Surfaces as
-    /// `ErrorCode::Internal`. Plugin call sites that *know* the
-    /// failure is a user-facing extras/scan callback should wrap with
-    /// `Error::SourceExtrasFailed { plugin, message }` instead so the
-    /// wire code carries the right meaning.
+    /// Lua VM error from a source-plugin callback, registry mismatch,
+    /// table key lookup, or similar operation.
     #[error("lua: {0}")]
     Lua(#[from] mlua::Error),
 
@@ -121,9 +82,8 @@ pub enum Error {
     #[error("spawn failed: {0}")]
     RendererSpawnFailed(String),
 
-    /// `renderer_manager.send_control` (Play / Pause / Mouse / SetFps)
-    /// failed — usually a closed socket or a renderer the manager has
-    /// already reaped.
+    /// `renderer_manager.send_control` failed.
+    /// Usually a closed socket or missing renderer handle.
     #[error("renderer control failed: {0}")]
     RendererControlFailed(String),
 
@@ -136,9 +96,8 @@ pub enum Error {
     #[error("source plugin '{0}' not found")]
     SourcePluginNotFound(String),
 
-    /// Source plugin's `extras(entry)` Lua callback raised. The
-    /// callback's stringified error rides in `message` so we don't have
-    /// to keep its lifetime around.
+    /// Source plugin's `extras(entry)` Lua callback raised.
+    /// The stringified Lua error rides in `message`.
     #[error("source_plugin '{plugin}'.extras() failed: {message}")]
     SourceExtrasFailed { plugin: String, message: String },
 
@@ -157,9 +116,8 @@ pub enum Error {
     #[error("source_plugin '{plugin}'.discover() failed: {message}")]
     DiscoverFailed { plugin: String, message: String },
 
-    /// Caller asked an apply path to handle a wallpaper whose `wp_type`
-    /// the path cannot serve (e.g. the xdp portal fallback only accepts
-    /// images).
+    /// Caller asked an apply path to handle an unsupported `wp_type`.
+    /// For example, the portal fallback only accepts images.
     #[error("wallpaper type '{0}' not supported by this apply path")]
     WallpaperTypeNotSupported(String),
 
@@ -172,9 +130,8 @@ pub enum Error {
     #[error("settings validation failed: {0}")]
     SettingsValidationFailed(String),
 
-    /// Settings persisted, but live `ApplySettings` push to one or
-    /// more running renderers failed. Carries the joined per-renderer
-    /// failure list so the caller can show which ones broke.
+    /// Settings persisted, but live `ApplySettings` push failed.
+    /// Carries the joined per-renderer errors.
     #[error("settings persisted but live hot-reload failed: {0}")]
     SettingsApplyFailed(String),
 
@@ -191,13 +148,8 @@ pub enum Error {
     #[error("playlist invalid: {0}")]
     PlaylistInvalid(String),
 
-    /// Diagnostic wrapper: attaches a context message to an existing
-    /// error without downgrading its type. `error_code()` recurses to
-    /// the inner variant so wire-side typing is preserved.
-    ///
-    /// Display mirrors anyhow's chain: `outer_ctx: inner_ctx: TypedErr`.
-    /// Build via `Error::context(self, ctx)` or, on a `Result`, via the
-    /// `ResultExt::context` / `with_context` extension methods.
+    /// Diagnostic wrapper that attaches context without changing type.
+    /// `error_code()` recurses to the source error.
     #[error("{context}: {source}")]
     WithContext {
         context: String,
@@ -206,23 +158,14 @@ pub enum Error {
     },
 }
 
-/// Daemon-wide `Result` alias. Callers explicitly import as
-/// `use crate::error::Result;` (see module docs for why this isn't
-/// re-exported from `lib.rs`). Currently unused outside this module —
-/// callers in `ws_server` spell out `Result<_, Error>` to keep the
-/// alias from competing with the ubiquitous `use anyhow::Result;`. The
-/// alias stays so future migrations of `control` / `repo` to typed
-/// errors land on a single canonical name.
+/// Daemon-wide `Result` alias.
+/// Callers explicitly import it as `use crate::error::Result;`.
 #[allow(dead_code)]
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 impl Error {
-    /// Attach a diagnostic context message. The original variant's
-    /// `error_code()` is preserved — the wrapper is purely a
-    /// human-readable annotation.
-    ///
-    /// Mirrors `anyhow::Error::context`: outermost context appears
-    /// first when the chain renders.
+    /// Attach a diagnostic context message.
+    /// The original variant's `error_code()` is preserved.
     pub fn context(self, ctx: impl std::fmt::Display) -> Self {
         Self::WithContext {
             context: ctx.to_string(),
@@ -230,10 +173,8 @@ impl Error {
         }
     }
 
-    /// Map this error onto its wire-level `pb::ErrorCode`. Always
-    /// returns a non-`Ok` code — `Ok` is reserved for the success
-    /// path (`ok_response`). `WithContext` recurses so a context
-    /// wrapper never downgrades a typed variant to `Internal`.
+    /// Map this error onto its wire-level `pb::ErrorCode`.
+    /// Always returns a non-`Ok` code.
     pub fn error_code(&self) -> pb::ErrorCode {
         use pb::ErrorCode as E;
         match self {
@@ -273,7 +214,6 @@ impl Error {
 
     /// Coarse legacy `pb::Status` derived from `error_code()`. Kept so
     /// pre-`error_code` clients see a sensible status without a daemon
-    /// flag day.
     pub fn status(&self) -> pb::Status {
         use pb::ErrorCode as E;
         use pb::Status as S;
@@ -320,12 +260,6 @@ impl Error {
 
 /// Map onto the zbus error vocabulary so the D-Bus surface
 /// (`Daemon1`) carries some structure beyond the generic `Failed`.
-/// Variants without a clean zbus analogue (`FailedPrecondition`,
-/// `NoDisplayRegistered`, internal-class) collapse to `Failed`.
-///
-/// `WithContext` recurses via `error_code()`-style logic — we pattern
-/// on the inner variant so a context wrapper doesn't downgrade
-/// everything to `Failed`.
 impl From<Error> for zbus::fdo::Error {
     fn from(e: Error) -> Self {
         let msg = e.to_string();
@@ -347,7 +281,6 @@ impl From<Error> for zbus::fdo::Error {
             | E::PlaylistInvalid => zbus::fdo::Error::InvalidArgs(msg),
             // FailedPrecondition / NoDisplayRegistered / Internal-class
             // / Db / Spawn / Control / Extras / SettingsApply — no
-            // dedicated zbus variant, fall through.
             _ => zbus::fdo::Error::Failed(msg),
         }
     }
@@ -367,8 +300,6 @@ pub fn ok_response(request_id: u64, payload: pb::response::Payload) -> pb::Respo
 
 /// Extension trait for `Result<T, E>` where `E: Into<Error>`. Mirrors
 /// `anyhow::Context` so callers migrating from `.with_context(...)?`
-/// keep an idiomatic spelling — `result.context("loading row")?` —
-/// while landing on the daemon-wide typed `Error` via the wrapper.
 pub trait ResultExt<T> {
     /// Attach a static context. Always evaluates the context; prefer
     /// `with_context` when the context is expensive to build.

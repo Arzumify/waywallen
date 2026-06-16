@@ -1,16 +1,3 @@
-//! Plain CRUD on the routing table. No I/O, no awaits.
-//!
-//! `RoutingTable` is the source of truth for which displays exist,
-//! which renderers exist, and how they are linked. The router wraps
-//! it in a `tokio::Mutex` and layers the dispatcher logic on top.
-//!
-//! **Invariant (Phase 1, single-wallpaper mode):** every display has
-//! at most one enabled link. The wire protocol does not multiplex
-//! multiple renderers' DMA-BUF pools onto a single display, so
-//! `add_link` enforces this by deleting any existing link(s) for the
-//! same display before inserting the new one. Renderers, however, may
-//! be referenced by N displays.
-
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -52,8 +39,8 @@ pub const FULL_DST: LinkDstRect = LinkDstRect {
     h: f32::INFINITY,
 };
 
-/// A single (renderer → display) routing edge. Phase 3 grows
-/// geometry; Phase 4 adds per-link multiplexing on the wire.
+/// A single renderer-to-display routing edge.
+/// Geometry and ordering are stored per link.
 #[derive(Debug, Clone)]
 pub struct Link {
     pub id: LinkId,
@@ -68,7 +55,7 @@ pub struct Link {
     pub transform: u32,
     /// Background clear color (RGBA, 0..=1).
     pub clear_rgba: [f32; 4],
-    /// Z-order (higher = on top). Phase 4 multi-link composition.
+    /// Z-order for composition; higher values are on top.
     pub z_order: i32,
 }
 
@@ -88,7 +75,6 @@ impl RoutingTable {
 
     // ---------------------------------------------------------------
     // Renderers
-    // ---------------------------------------------------------------
 
     pub fn add_renderer(&mut self, handle: Arc<RendererHandle>) {
         let id = handle.id.clone();
@@ -97,7 +83,6 @@ impl RoutingTable {
 
     /// Remove a renderer and the links pointing at it. Returns the
     /// (link_id, display_id) pairs that were removed so the caller can
-    /// notify those displays (e.g. emit Unbind).
     pub fn remove_renderer(&mut self, id: &str) -> Vec<(LinkId, DisplayId)> {
         self.renderers.remove(id);
         let link_ids = self.by_renderer.remove(id).unwrap_or_default();
@@ -121,8 +106,7 @@ impl RoutingTable {
         self.renderers.keys().cloned().collect()
     }
 
-    /// Phase 1 helper: pick "any" renderer to seed a new display's
-    /// initial link with. Replaced by per-display config in Phase 2.
+    /// Pick a deterministic renderer to seed a new display's initial link.
     pub fn first_renderer(&self) -> Option<RendererId> {
         let mut ids: Vec<&RendererId> = self.renderers.keys().collect();
         ids.sort();
@@ -131,17 +115,12 @@ impl RoutingTable {
 
     // ---------------------------------------------------------------
     // Links
-    // ---------------------------------------------------------------
 
     /// Add a `(renderer → display)` link and return its id. Enforces
     /// the single-wallpaper invariant by *first* deleting any prior
-    /// link(s) on `display_id` (whether enabled or not) so callers
-    /// cannot accidentally end up with the daemon trying to push two
-    /// renderers' DMA-BUFs at one display. If you need a "swap"
-    /// semantic just call `add_link` directly — the cleanup is implicit.
     pub fn add_link(&mut self, renderer_id: RendererId, display_id: DisplayId) -> LinkId {
-        // Delete any pre-existing links for this display. Phase 1
-        // policy: each display sees exactly one renderer.
+        // Delete pre-existing links for this display so it has exactly
+        // one active renderer in the current routing model.
         let existing: Vec<LinkId> = self
             .by_display
             .get(&display_id)
@@ -257,7 +236,6 @@ impl RoutingTable {
 
     // ---------------------------------------------------------------
     // Display registry (just the ids — full metadata stays in scheduler)
-    // ---------------------------------------------------------------
 
     pub fn remove_display(&mut self, display_id: DisplayId) -> Vec<Link> {
         let link_ids = self.by_display.remove(&display_id).unwrap_or_default();
@@ -276,7 +254,6 @@ impl RoutingTable {
 
 // ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -333,7 +310,6 @@ mod tests {
     fn remove_display_drops_its_links() {
         // Under the single-link-per-display invariant, only the most
         // recently-added link survives in `by_display`. `remove_display`
-        // must drop that one link plus its renderer-side index entry.
         let mut t = RoutingTable::new();
         let _ = t.add_link("r1".into(), 1);
         // r2's add evicts r1's link as part of the invariant.

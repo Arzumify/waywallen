@@ -157,10 +157,8 @@ async fn run_async(
         children.push(ChildHandle::new(child, slot));
     }
 
-    // Display children connect, register, and the router auto-links each
-    // to our stub renderer (it's the only one). We wait until every
-    // display is bound to the renderer's current generation — only then
-    // are FrameReady events fanned out (see Router::on_renderer_frame).
+    // Display children connect, register, and auto-link to the only
+    // renderer. Wait until all links are bound.
     renderer.push_self_test_event(make_bind_event(&renderer));
     if let Err(e) = wait_for_displays_bound(&router, NUM_DISPLAYS).await {
         log::warn!("fanout: displays did not all register: {e}");
@@ -227,8 +225,6 @@ async fn run_async(
 
         // Pace frames so the consumer has a chance to drain its socket
         // and signal release_syncobj before we push the next frame.
-        // Production renderers run at 60 Hz; matching that is fine
-        // here.
         tokio::time::sleep(FRAME_PACE).await;
     }
 

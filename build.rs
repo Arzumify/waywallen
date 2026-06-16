@@ -1,10 +1,3 @@
-//! Build script for waywallen.
-//!
-//! Generates Rust bindings for both wire protocols from XML into
-//! `$OUT_DIR`:
-//!   - `display_proto_generated.rs`  (src/display_proto/mod.rs includes it)
-//!   - `ipc_generated.rs`            (src/ipc/mod.rs includes it)
-
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
