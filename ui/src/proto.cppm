@@ -114,6 +114,7 @@ using proto::LibraryRemoveRequest;
 using proto::LibrarySnapshot;
 
 using proto::AutopauseSettings;
+using proto::AutomuteSettings;
 using proto::GlobalSettings;
 using proto::LayoutPrefs;
 using proto::PluginSettings;
