@@ -1968,11 +1968,27 @@ impl Router {
             let layout = self.resolved_layout_for_renderer(&info, &link.renderer_id, &inner);
             let cfg = project_link(&link, &renderer, &info, cfg_gen, &layout);
             let new_r = link.renderer_id.clone();
+            let replay = renderer
+                .wp_type
+                .eq_ignore_ascii_case("image")
+                .then(|| renderer.latest_frame())
+                .flatten()
+                .filter(|frame| frame.buffer_generation == new_g);
             let s = inner.displays.get_mut(&display_id).unwrap();
             let _ = s.tx.send(DisplayOutEvent::Bind {
                 renderer: renderer.clone(),
             });
             let _ = s.tx.send(DisplayOutEvent::SetConfig(cfg));
+            if let Some(frame) = replay {
+                let _ = s.tx.send(DisplayOutEvent::Frame {
+                    renderer: renderer.clone(),
+                    buffer_generation: frame.buffer_generation,
+                    buffer_index: frame.buffer_index,
+                    seq: frame.seq,
+                    release_point: frame.release_point,
+                    expected_count: 1,
+                });
+            }
             s.last_renderer = Some(new_r);
             s.last_buffer_generation = Some(new_g);
         } else {
@@ -2784,7 +2800,7 @@ mod tests {
     // -----------------------------------------------------------------
     // update_display_size resync
 
-    use crate::renderer_manager::BindSnapshot;
+    use crate::renderer_manager::{BindSnapshot, FrameSnapshot};
 
     fn fake_bind_snapshot(generation: u64, w: u32, h: u32) -> BindSnapshot {
         BindSnapshot {
@@ -2815,6 +2831,71 @@ mod tests {
             }
         }
         out
+    }
+
+    fn drain_display_events(
+        rx: &mut mpsc::UnboundedReceiver<DisplayOutEvent>,
+    ) -> Vec<DisplayOutEvent> {
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            out.push(ev);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn relink_to_reused_renderer_replays_latest_frame() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+
+        let r1 = RendererHandle::test_stub("r1", "image");
+        *r1.bind_snapshot().lock().unwrap() = Some(fake_bind_snapshot(1, 1920, 1080));
+        mgr.register_test_handle(r1.clone()).await;
+        router.register_renderer(r1.clone()).await;
+
+        let r2 = RendererHandle::test_stub("r2", "image");
+        *r2.bind_snapshot().lock().unwrap() = Some(fake_bind_snapshot(1, 1920, 1080));
+        mgr.register_test_handle(r2.clone()).await;
+        router.register_renderer(r2.clone()).await;
+
+        let mut a = router.register_display(reg("A", 1920, 1080)).await;
+        let mut b = router.register_display(reg("B", 1920, 1080)).await;
+        let _ = drain_display_events(&mut a.rx);
+        let _ = drain_display_events(&mut b.rx);
+
+        router.relink_displays_to(&[b.id], "r2").await;
+        let _ = drain_display_events(&mut b.rx);
+
+        r1.test_set_latest_frame(FrameSnapshot {
+            buffer_generation: 1,
+            buffer_index: 0,
+            seq: 42,
+            release_point: 7,
+        });
+
+        router.relink_displays_to(&[b.id], "r1").await;
+        let events = drain_display_events(&mut b.rx);
+        let mut saw_frame = false;
+        for ev in events {
+            if let DisplayOutEvent::Frame {
+                renderer,
+                buffer_generation,
+                buffer_index,
+                seq,
+                release_point,
+                expected_count,
+            } = ev
+            {
+                assert_eq!(renderer.id, "r1");
+                assert_eq!(buffer_generation, 1);
+                assert_eq!(buffer_index, 0);
+                assert_eq!(seq, 42);
+                assert_eq!(release_point, 7);
+                assert_eq!(expected_count, 1);
+                saw_frame = true;
+            }
+        }
+        assert!(saw_frame, "relinked display did not receive current frame");
     }
 
     #[tokio::test]

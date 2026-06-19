@@ -74,6 +74,14 @@ pub struct BindSnapshot {
     pub fds: Vec<OwnedFd>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameSnapshot {
+    pub buffer_generation: u64,
+    pub buffer_index: u32,
+    pub seq: u64,
+    pub release_point: u64,
+}
+
 /// Bit 0 of `BindSnapshot::flags` / `ControlMsg::ConfigureBuffers.flags`:
 /// the renderer must back the dmabuf with HOST_VISIBLE memory.
 pub const BUF_HOST_VISIBLE: u32 = 1 << 0;
@@ -134,6 +142,9 @@ pub struct RendererHandle {
     /// The reader thread stashes the fd attached to each FrameReady event.
     sync_fds: Arc<StdMutex<std::collections::VecDeque<(u64, OwnedFd)>>>,
 
+    /// Most recent frame metadata, tied to the active bind generation.
+    latest_frame: Arc<StdMutex<Option<FrameSnapshot>>>,
+
     /// Producer-exported timeline drm_syncobj used as the release
     /// fence target. Populated by a ReleaseSyncobj event.
     release_syncobj: Arc<StdMutex<Option<OwnedFd>>>,
@@ -169,6 +180,15 @@ impl RendererHandle {
 
     pub fn frame_ready_seen(&self) -> bool {
         self.sync_fds.lock().map(|g| !g.is_empty()).unwrap_or(false)
+    }
+
+    pub fn latest_frame(&self) -> Option<FrameSnapshot> {
+        let frame = self.latest_frame.lock().ok().and_then(|g| *g)?;
+        let sync_fds = self.sync_fds.lock().ok()?;
+        sync_fds
+            .iter()
+            .any(|(seq, _)| *seq == frame.seq)
+            .then_some(frame)
     }
 
     /// Borrow the cached bind snapshot. Returns `None` until the host's
@@ -499,6 +519,7 @@ impl RendererManager {
         let bind_snapshot: Arc<StdMutex<Option<BindSnapshot>>> = Arc::new(StdMutex::new(None));
         let sync_fds: Arc<StdMutex<std::collections::VecDeque<(u64, OwnedFd)>>> =
             Arc::new(StdMutex::new(std::collections::VecDeque::new()));
+        let latest_frame: Arc<StdMutex<Option<FrameSnapshot>>> = Arc::new(StdMutex::new(None));
         let release_syncobj: Arc<StdMutex<Option<OwnedFd>>> = Arc::new(StdMutex::new(None));
         let format_caps: Arc<StdMutex<Option<crate::dma::negotiate::PeerCaps>>> =
             Arc::new(StdMutex::new(None));
@@ -510,6 +531,7 @@ impl RendererManager {
         let reader_events = events_tx.clone();
         let reader_snapshot = bind_snapshot.clone();
         let reader_sync_fds = sync_fds.clone();
+        let reader_latest_frame = latest_frame.clone();
         let reader_release_syncobj = release_syncobj.clone();
         let reader_format_caps = format_caps.clone();
         let reader_pending = pending_configure.clone();
@@ -523,6 +545,7 @@ impl RendererManager {
                 reader_events,
                 reader_snapshot,
                 reader_sync_fds,
+                reader_latest_frame,
                 reader_release_syncobj,
                 reader_format_caps,
                 reader_pending,
@@ -556,6 +579,7 @@ impl RendererManager {
             events: events_tx,
             bind_snapshot,
             sync_fds,
+            latest_frame,
             release_syncobj,
             format_caps,
             last_dispatched_scheme: Arc::new(StdMutex::new(None)),
@@ -978,6 +1002,7 @@ fn run_reader(
     events: broadcast::Sender<EventMsg>,
     bind_snapshot: Arc<StdMutex<Option<BindSnapshot>>>,
     sync_fds: Arc<StdMutex<std::collections::VecDeque<(u64, OwnedFd)>>>,
+    latest_frame: Arc<StdMutex<Option<FrameSnapshot>>>,
     release_syncobj: Arc<StdMutex<Option<OwnedFd>>>,
     format_caps: Arc<StdMutex<Option<crate::dma::negotiate::PeerCaps>>>,
     pending_configure: Arc<StdMutex<Option<u32>>>,
@@ -1093,6 +1118,9 @@ fn run_reader(
                 if let Ok(mut guard) = sync_fds.lock() {
                     guard.clear();
                 }
+                if let Ok(mut guard) = latest_frame.lock() {
+                    *guard = None;
+                }
                 // Clear any in-flight ConfigureBuffers, warning if the
                 // renderer answered with different flags.
                 if let Ok(mut guard) = pending_configure.lock() {
@@ -1107,7 +1135,13 @@ fn run_reader(
                     }
                 }
             }
-        } else if let EventMsg::FrameReady { seq, .. } = msg {
+        } else if let EventMsg::FrameReady {
+            image_index,
+            seq,
+            release_point,
+            ..
+        } = msg
+        {
             // frame_ready always carries exactly one sync_fd: the codec
             // enforced expected_fds() == 1 before handing us `fds`.
             let mut taken = fds;
@@ -1117,6 +1151,20 @@ fn run_reader(
                     guard.pop_front();
                 }
                 guard.push_back((seq, fd));
+            }
+            let gen = bind_snapshot
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().map(|s| s.generation));
+            if let Some(buffer_generation) = gen {
+                if let Ok(mut guard) = latest_frame.lock() {
+                    *guard = Some(FrameSnapshot {
+                        buffer_generation,
+                        buffer_index: image_index,
+                        seq,
+                        release_point,
+                    });
+                }
             }
         } else if let EventMsg::ReleaseSyncobj = msg {
             // Producer's exported timeline drm_syncobj. Exactly one fd;
@@ -1373,6 +1421,20 @@ impl RendererHandle {
             .and_then(|g| g.as_ref().map(|c| c.blacklist.len()))
             .unwrap_or(0)
     }
+
+    pub fn test_set_latest_frame(&self, frame: FrameSnapshot) {
+        use nix::sys::memfd::{memfd_create, MemFdCreateFlag};
+        use std::ffi::CString;
+
+        let name = CString::new("waywallen-frame-test").unwrap();
+        let fd = memfd_create(&name, MemFdCreateFlag::MFD_CLOEXEC).unwrap();
+        if let Ok(mut guard) = self.sync_fds.lock() {
+            guard.push_back((frame.seq, fd));
+        }
+        if let Ok(mut guard) = self.latest_frame.lock() {
+            *guard = Some(frame);
+        }
+    }
 }
 
 impl RendererHandle {
@@ -1392,6 +1454,7 @@ impl RendererHandle {
             events: events_tx,
             bind_snapshot: Arc::new(StdMutex::new(None)),
             sync_fds: Arc::new(StdMutex::new(std::collections::VecDeque::new())),
+            latest_frame: Arc::new(StdMutex::new(None)),
             release_syncobj: Arc::new(StdMutex::new(None)),
             format_caps: Arc::new(StdMutex::new(None)),
             last_dispatched_scheme: Arc::new(StdMutex::new(None)),
@@ -1616,6 +1679,7 @@ mod reuse_tests {
             events: events_tx,
             bind_snapshot: Arc::new(StdMutex::new(None)),
             sync_fds: Arc::new(StdMutex::new(std::collections::VecDeque::new())),
+            latest_frame: Arc::new(StdMutex::new(None)),
             release_syncobj: Arc::new(StdMutex::new(None)),
             format_caps: Arc::new(StdMutex::new(None)),
             last_dispatched_scheme: Arc::new(StdMutex::new(None)),
@@ -1698,6 +1762,7 @@ mod reuse_tests {
             events: events_tx,
             bind_snapshot: Arc::new(StdMutex::new(None)),
             sync_fds: Arc::new(StdMutex::new(std::collections::VecDeque::new())),
+            latest_frame: Arc::new(StdMutex::new(None)),
             release_syncobj: Arc::new(StdMutex::new(None)),
             format_caps: Arc::new(StdMutex::new(None)),
             last_dispatched_scheme: Arc::new(StdMutex::new(None)),
