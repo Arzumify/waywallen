@@ -510,6 +510,14 @@ fn global_to_pb(g: &crate::settings::GlobalSettings) -> pb::GlobalSettings {
             pause_on_lock: g.autopause.pause_on_lock,
             pause_on_user_switch: g.autopause.pause_on_user_switch,
         }),
+        automute: Some(pb::AutomuteSettings {
+            mode: autopause_mode_to_pb(g.automute.mode) as i32,
+            resume_ms: g.automute.resume_ms,
+            pause_on_lock: g.automute.pause_on_lock,
+            pause_on_user_switch: g.automute.pause_on_user_switch,
+            fade_in_ms: g.automute.fade_in_ms,
+            fade_out_ms: g.automute.fade_out_ms
+        }),
         queue_mode: g.queue_mode.clone(),
         rotation_secs: g.rotation_secs,
         wallpaper_skip_types: g.wallpaper_skip_types.clone(),

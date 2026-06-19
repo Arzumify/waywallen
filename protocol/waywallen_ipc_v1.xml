@@ -199,6 +199,17 @@
   <event_in name="pause" opcode="4"/>
 
   <!--
+    Opcode 12 and 13 are for mute/unmute functionality added in the
+    variant supporting auto-mute.
+  -->
+  <event_in name="mute" opcode="12">
+    <arg name="fade_ms" type="u32"/>
+  </event_in>
+  <event_in name="unmute" opcode="13">
+    <arg name="fade_ms" type="u32"/>
+  </event_in>
+
+  <!--
     Pointer motion. Optional inbound event; only delivered when the
     renderer's manifest declares `events = ["pointer"]`. Field shapes
     mirror waywallen-display-v1 `pointer_motion` (opcode 8) — the

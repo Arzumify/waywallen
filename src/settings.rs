@@ -36,6 +36,10 @@ pub struct DisplayPrefs {
     pub rotation: Option<Rotation>,
     pub autopause_mode: Option<AutopauseMode>,
     pub autopause_resume_ms: Option<u32>,
+    pub automute_mode: Option<AutopauseMode>,
+    pub automute_resume_ms: Option<u32>,
+    pub automute_fade_in_ms: Option<u32>,
+    pub automute_fade_out_ms: Option<u32>,
     /// Last wallpaper id applied to this display.
     /// Used to restore per-display assignment on restart.
     pub last_wallpaper: Option<String>,
@@ -51,6 +55,10 @@ impl DisplayPrefs {
             && self.rotation.is_none()
             && self.autopause_mode.is_none()
             && self.autopause_resume_ms.is_none()
+            && self.automute_mode.is_none()
+            && self.automute_resume_ms.is_none()
+            && self.automute_fade_in_ms.is_none()
+            && self.automute_fade_out_ms.is_none()
             && self.last_wallpaper.is_none()
             && self.alias.is_none()
             && self.active_playlist_id.is_none()
@@ -113,12 +121,51 @@ impl Default for AutopauseDefaults {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutomuteDefaults {
+    pub mode: AutopauseMode,
+    /// Milliseconds without an mute condition before resuming.
+    /// Smooths bursty fullscreen transitions.
+    pub resume_ms: u32,
+    /// Pause all renderers when the session's screen-saver/lock-screen
+    /// becomes active (`org.freedesktop.ScreenSaver.ActiveChanged`).
+    pub pause_on_lock: bool,
+    /// Pause all renderers when the current login session becomes
+    /// inactive, such as after a user switch.
+    pub pause_on_user_switch: bool,
+    pub fade_in_ms: u32,
+    pub fade_out_ms: u32,
+}
+
+impl Default for AutomuteDefaults {
+    fn default() -> Self {
+        Self {
+            mode: AutopauseMode::Never,
+            resume_ms: 500,
+            pause_on_lock: true,
+            pause_on_user_switch: true,
+            fade_in_ms: 500,
+            fade_out_ms: 500,
+        }
+    }
+}
+
+
 /// Resolved autopause settings for a single display (per-display
 /// override falling through to the global default).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResolvedAutopause {
     pub mode: AutopauseMode,
     pub resume_ms: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResolvedAutomute {
+    pub mode: AutopauseMode,
+    pub resume_ms: u32,
+    pub fade_in_ms: u32,
+    pub fade_out_ms: u32,
 }
 
 /// Daemon-wide defaults consumed by `WallpaperApply` when a renderer
@@ -139,6 +186,7 @@ pub struct GlobalSettings {
     /// Daemon-wide autopause defaults. A display with no
     /// `[displays.<name>] autopause_*` override inherits from here.
     pub autopause: AutopauseDefaults,
+    pub automute: AutomuteDefaults,
     /// Structured wallpaper-browser filter state.
     /// Kept typed in memory but serialized as a JSON string.
     #[serde(
@@ -178,6 +226,7 @@ impl Default for GlobalSettings {
             rotation_secs: 0,
             layout: LayoutDefaults::default(),
             autopause: AutopauseDefaults::default(),
+            automute: AutomuteDefaults::default(),
             wallpaper_filter: WallpaperFilterState::default(),
             wallpaper_sorts: Vec::new(),
             wallpaper_skip_types: Vec::new(),
@@ -623,6 +672,20 @@ impl SettingsStore {
             resume_ms: prefs
                 .and_then(|p| p.autopause_resume_ms)
                 .unwrap_or(d.resume_ms),
+        }
+    }
+
+    pub fn resolved_automute(&self, display_name: &str) -> ResolvedAutomute {
+        let g = self.inner.read().expect("settings poisoned");
+        let d = g.global.automute;
+        let prefs = g.displays.get(display_name);
+        ResolvedAutomute {
+            mode: prefs.and_then(|p| p.automute_mode).unwrap_or(d.mode),
+            resume_ms: prefs
+                .and_then(|p| p.automute_resume_ms)
+                .unwrap_or(d.resume_ms),
+            fade_in_ms: prefs.and_then(|p| p.automute_fade_in_ms).unwrap_or(d.fade_in_ms),
+            fade_out_ms: prefs.and_then(|p| p.automute_fade_out_ms).unwrap_or(d.fade_out_ms),
         }
     }
 

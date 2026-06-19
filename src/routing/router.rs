@@ -15,7 +15,7 @@ use crate::display::layout::{FillMode, LayoutInput};
 use crate::ipc::proto::{ControlMsg, EventMsg};
 use crate::renderer_manager::{DrmNode, RendererHandle, RendererId, RendererManager};
 use crate::scheduler::{DisplayId, DisplayInfo, ProjectedConfig};
-use crate::settings::{ResolvedAutopause, ResolvedLayout, SettingsStore};
+use crate::settings::{ResolvedAutomute, ResolvedAutopause, ResolvedLayout, SettingsStore};
 use crate::wallpaper::properties::WallpaperLayoutOverride;
 
 use super::autopause;
@@ -116,18 +116,33 @@ pub struct LibrarySnapshot {
     pub plugin_name: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PausedRendererStatus {
+    Muted,
+    Paused
+}
+
 /// Lifecycle state of a renderer as seen by the router.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RendererStatus {
     Playing,
-    Paused,
+    Paused(PausedRendererStatus),
+}
+
+impl Default for RendererStatus {
+    fn default() -> Self {
+        Self::Playing
+    }
 }
 
 impl RendererStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Playing => "playing",
-            Self::Paused => "paused",
+            Self::Paused(status) => match status {
+                PausedRendererStatus::Muted => "muted",
+                PausedRendererStatus::Paused => "paused"
+            },
         }
     }
 }
@@ -197,9 +212,9 @@ struct Inner {
     table: RoutingTable,
     displays: HashMap<DisplayId, DisplayState>,
     renderer_tasks: HashMap<RendererId, JoinHandle<()>>,
-    /// Renderers we've already sent `Pause` to. Used to compute the
-    /// Play/Pause diff without sending duplicate controls.
-    paused_renderers: std::collections::HashSet<RendererId>,
+    /// The states of the paused renderers we know about.
+    /// Used to compute play/pause and mute/unmute state.
+    renderer_states: HashMap<RendererId, PausedRendererStatus>,
     /// Set when the screen-saver / lock-screen is active. Causes all
     /// renderers to pause regardless of display window state.
     session_locked: bool,
@@ -209,6 +224,7 @@ struct Inner {
     /// User-requested global pause state. This shares the same
     /// daemon-owned lifecycle path as autopause.
     manual_paused: bool,
+    manual_muted: bool,
     /// Generation counter for the session-pause debounce timer. Bumped
     /// on every session-state transition to invalidate stale timers.
     session_gen: u64,
@@ -252,7 +268,7 @@ impl Router {
                 table: RoutingTable::new(),
                 displays: HashMap::new(),
                 renderer_tasks: HashMap::new(),
-                paused_renderers: std::collections::HashSet::new(),
+                renderer_states: HashMap::new(),
                 orphan_timers: HashMap::new(),
                 unbind_acks_pending: HashMap::new(),
                 wallpaper_layout_overrides: HashMap::new(),
@@ -261,6 +277,7 @@ impl Router {
                 session_locked: false,
                 session_inactive: false,
                 manual_paused: false,
+                manual_muted: false,
                 session_gen: 0,
             }),
             mgr,
@@ -355,6 +372,23 @@ impl Router {
             }
         }
         s.resolved_autopause(&info.name)
+    }
+
+    fn resolved_automute(&self, info: &DisplayInfo) -> ResolvedAutomute {
+        let Some(s) = self.settings.get() else {
+            return ResolvedAutomute {
+                mode: crate::settings::AutopauseMode::Never,
+                resume_ms: 500,
+                fade_in_ms: 500,
+                fade_out_ms: 500,
+            };
+        };
+        if let Some(iid) = info.instance_id.as_deref() {
+            if s.display_prefs(iid).is_some() {
+                return s.resolved_automute(iid);
+            }
+        }
+        s.resolved_automute(&info.name)
     }
 
     /// Set or clear per-display layout fields. `None` for a field
@@ -602,7 +636,7 @@ impl Router {
             if let Some(task) = inner.orphan_timers.remove(id) {
                 task.abort();
             }
-            inner.paused_renderers.remove(id);
+            inner.renderer_states.remove(id);
             removed.into_iter().map(|(_, did)| did).collect()
         };
         self.emit(RouterEvent::RendererRemoved(id.to_string()));
@@ -947,9 +981,14 @@ impl Router {
     pub async fn update_display_window_state(self: &Arc<Self>, display_id: DisplayId, flags: u32) {
         // Snapshot under lock: compute the new raw decision and decide
         // whether anything observable changed.
+        enum PauseHow {
+            Pause,
+            Mute(u32)
+        }
+
         enum Action {
-            ScheduleResume { gen: u64, ms: u32 },
-            Reconcile,
+            ScheduleResume { gen: u64, ms: u32, pause_how: PauseHow },
+            Reconcile(PauseHow),
             Noop,
         }
         let action = {
@@ -957,8 +996,9 @@ impl Router {
             let Some(state) = inner.displays.get_mut(&display_id) else {
                 return;
             };
-            let resolved = self.resolved_autopause(&state.info);
-            let new_raw = autopause::decide(resolved.mode, flags);
+            let resolved_pause = self.resolved_autopause(&state.info);
+            let resolved_mute = self.resolved_automute(&state.info);
+            let new_raw = autopause::decide(resolved_pause.mode, resolved_mute.mode, flags);
             let prev_raw = state.autopause.raw_want_pause;
             let same_flags = state.autopause.last_flags == flags;
             state.autopause.last_flags = flags;
@@ -966,24 +1006,31 @@ impl Router {
                 Action::Noop
             } else {
                 state.autopause.raw_want_pause = new_raw;
-                if new_raw {
+                if let RendererStatus::Paused(paused_how) = new_raw {
                     // Immediate pause: cancel any pending resume by
                     // bumping the generation, flip requested.
                     state.autopause.gen = state.autopause.gen.wrapping_add(1);
-                    let changed = !state.autopause.requested;
-                    state.autopause.requested = true;
+                    let changed = matches!(state.autopause.requested, RendererStatus::Playing);
+                    state.autopause.requested = RendererStatus::Paused(paused_how);
                     if changed {
-                        Action::Reconcile
+                        Action::Reconcile(match paused_how {
+                            PausedRendererStatus::Muted => PauseHow::Mute(resolved_mute.fade_out_ms),
+                            PausedRendererStatus::Paused => PauseHow::Pause
+                        })
                     } else {
                         Action::Noop
                     }
-                } else if state.autopause.requested {
+                } else if let RendererStatus::Paused(paused_how) = state.autopause.requested {
                     // Pending resume after debounce; bump generation to
                     // invalidate older resume tasks.
                     state.autopause.gen = state.autopause.gen.wrapping_add(1);
                     Action::ScheduleResume {
                         gen: state.autopause.gen,
-                        ms: resolved.resume_ms,
+                        ms: resolved_pause.resume_ms,
+                        pause_how: match paused_how {
+                            PausedRendererStatus::Muted => PauseHow::Mute(resolved_mute.fade_in_ms),
+                            PausedRendererStatus::Paused => PauseHow::Pause
+                        },
                     }
                 } else {
                     // Was already not requesting pause; nothing to do.
@@ -993,8 +1040,8 @@ impl Router {
         };
         match action {
             Action::Noop => {}
-            Action::Reconcile => self.reconcile_lifecycle().await,
-            Action::ScheduleResume { gen, ms } => {
+            Action::Reconcile(pause_how) => self.reconcile_lifecycle().await,
+            Action::ScheduleResume { gen, ms, pause_how } => {
                 let router = Arc::clone(self);
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(ms as u64)).await;
@@ -1009,11 +1056,11 @@ impl Router {
                         }
                         // Raw signal flipped back to "pause" while we
                         // were sleeping — leave `requested` as-is.
-                        if state.autopause.raw_want_pause {
+                        if matches!(state.autopause.raw_want_pause, RendererStatus::Paused(..)) {
                             return;
                         }
-                        if state.autopause.requested {
-                            state.autopause.requested = false;
+                        if matches!(state.autopause.requested, RendererStatus::Paused(..)) {
+                            state.autopause.requested = RendererStatus::Playing;
                             true
                         } else {
                             false
@@ -1114,14 +1161,39 @@ impl Router {
         }
     }
 
+    pub async fn set_manual_mute(self: &Arc<Self>, muted: bool) {
+        let changed = {
+            let mut inner = self.inner.lock().await;
+            if inner.manual_muted == muted {
+                false
+            } else {
+                inner.manual_muted = muted;
+                true
+            }
+        };
+        if changed {
+            self.reconcile_lifecycle().await;
+        }
+    }
+
     /// Whether this renderer is currently in the paused set (zero
     /// enabled links). Returns `false` for unknown ids.
     pub async fn is_paused(self: &Arc<Self>, renderer_id: &str) -> bool {
         self.inner
             .lock()
             .await
-            .paused_renderers
-            .contains(renderer_id)
+            .renderer_states
+            .get(renderer_id)
+            .is_some_and(|status| *status == PausedRendererStatus::Paused)
+    }
+
+    pub async fn is_muted(self: &Arc<Self>, renderer_id: &str) -> bool {
+        self.inner
+            .lock()
+            .await
+            .renderer_states
+            .get(renderer_id)
+            .is_some_and(|status| *status == PausedRendererStatus::Muted)
     }
 
     /// Subscribe to router events (display add/change/remove). The
@@ -1315,11 +1387,9 @@ impl Router {
     pub async fn snapshot_renderer(self: &Arc<Self>, id: &str) -> Option<RendererSnapshot> {
         let inner = self.inner.lock().await;
         let handle = inner.table.get_renderer(id)?;
-        let status = if inner.paused_renderers.contains(id) {
-            RendererStatus::Paused
-        } else {
-            RendererStatus::Playing
-        };
+        let status = inner.renderer_states.get(id)
+            .map(|status| RendererStatus::Paused(*status))
+            .unwrap_or(RendererStatus::Playing);
         let (tw, th) = handle.texture_size();
         Some(RendererSnapshot {
             id: handle.id.clone(),
@@ -1343,11 +1413,9 @@ impl Router {
         ids.into_iter()
             .filter_map(|id| {
                 let handle = inner.table.get_renderer(&id)?;
-                let status = if inner.paused_renderers.contains(&id) {
-                    RendererStatus::Paused
-                } else {
-                    RendererStatus::Playing
-                };
+                let status = inner.renderer_states.get(&id)
+                    .map(|status| RendererStatus::Paused(*status))
+                    .unwrap_or(RendererStatus::Playing);
                 let (tw, th) = handle.texture_size();
                 Some(RendererSnapshot {
                     id: handle.id.clone(),
@@ -1736,15 +1804,20 @@ impl Router {
                 let has_active_link = !links.is_empty();
                 // Autopause only matters when at least one active link
                 // exists; no-link pause is handled by ref-count.
-                let any_autopaused = has_active_link
-                    && links.iter().any(|l| {
-                        inner
-                            .displays
-                            .get(&l.display_id)
-                            .map(|s| s.autopause.requested)
-                            .unwrap_or(false)
-                    });
-                let session_paused = {
+                let (any_autopaused, any_automuted) = if has_active_link {
+                    links.iter().fold((false, false), |(any_autopaused, any_automuted), l| {
+                        if any_automuted && any_autopaused { (any_automuted, any_autopaused) }
+                        else if let Some(display) = inner.displays.get(&l.display_id) {
+                            if let RendererStatus::Paused(how_paused) = display.autopause.requested {
+                                match how_paused {
+                                    PausedRendererStatus::Muted => (any_autopaused, true),
+                                    PausedRendererStatus::Paused => (true, any_automuted)
+                                }
+                            } else { (any_autopaused, any_automuted) }
+                        } else { (any_autopaused, any_automuted) }
+                    })
+                } else { (false, false) };
+                let session_allows_pause = {
                     let ap = self
                         .settings
                         .get()
@@ -1753,23 +1826,43 @@ impl Router {
                     (ap.pause_on_lock && inner.session_locked)
                         || (ap.pause_on_user_switch && inner.session_inactive)
                 };
+                let am = self
+                    .settings
+                    .get()
+                    .map(|s| s.global().automute)
+                    .unwrap_or_default();
+                let session_allows_mute = (am.pause_on_lock && inner.session_locked)
+                    || (am.pause_on_user_switch && inner.session_inactive);
                 let manual_paused = inner.manual_paused;
+                let manual_muted = inner.manual_muted;
                 let should_pause =
-                    manual_paused || !has_active_link || any_autopaused || session_paused;
-                let was_paused = inner.paused_renderers.contains(&rid);
-                if !should_pause && was_paused {
-                    inner.paused_renderers.remove(&rid);
+                    manual_paused || !has_active_link || any_autopaused || session_allows_pause;
+                let should_mute =
+                    manual_muted || !has_active_link || any_automuted || session_allows_mute;
+                let previous_state = inner.renderer_states.get(&rid)
+                    .map(|status| RendererStatus::Paused(*status))
+                    .unwrap_or(RendererStatus::Playing);
+                let was_paused = previous_state == RendererStatus::Paused(PausedRendererStatus::Paused);
+                let was_muted = previous_state == RendererStatus::Paused(PausedRendererStatus::Muted);
+                if !should_pause && !should_mute && (was_paused || was_muted) {
+                    inner.renderer_states.remove(&rid);
                     let cause = if has_active_link {
                         "pause-clear"
                     } else {
                         "ref-count"
                     };
-                    out.push((rid, ControlMsg::Play, cause));
+                    if was_paused {
+                        out.push((rid, ControlMsg::Play, cause));
+                    } else if was_muted {
+                        out.push((rid, ControlMsg::Unmute {
+                            fade_ms: am.fade_in_ms,
+                        }, cause));
+                    }
                 } else if should_pause && !was_paused {
-                    inner.paused_renderers.insert(rid.clone());
+                    inner.renderer_states.insert(rid.clone(), PausedRendererStatus::Paused);
                     let cause = if manual_paused {
                         "manual"
-                    } else if session_paused {
+                    } else if session_allows_pause {
                         "session"
                     } else if has_active_link {
                         "autopause"
@@ -1777,6 +1870,20 @@ impl Router {
                         "ref-count"
                     };
                     out.push((rid, ControlMsg::Pause, cause));
+                } else if should_mute && !was_muted {
+                    inner.renderer_states.insert(rid.clone(), PausedRendererStatus::Muted);
+                    let cause = if manual_paused {
+                        "manual"
+                    } else if session_allows_pause {
+                        "session"
+                    } else if has_active_link {
+                        "autopause"
+                    } else {
+                        "ref-count"
+                    };
+                    out.push((rid, ControlMsg::Mute {
+                        fade_ms: am.fade_out_ms,
+                    }, cause));
                 }
             }
             out
@@ -2525,7 +2632,7 @@ mod tests {
             RouterEvent::RendererUpsert(snap) => {
                 assert_eq!(snap.id, "R1");
                 assert_eq!(snap.wp_type, "scene");
-                assert_eq!(snap.status, RendererStatus::Paused);
+                assert_eq!(snap.status, RendererStatus::Paused(PausedRendererStatus::Paused));
                 assert_eq!(snap.name, "test-stub");
             }
             other => panic!("expected RendererUpsert, got {other:?}"),
@@ -2568,7 +2675,7 @@ mod tests {
                 break;
             };
             if let RouterEvent::RendererUpsert(snap) = evt {
-                if snap.id == "R1" && snap.status == RendererStatus::Paused {
+                if snap.id == "R1" && snap.status == RendererStatus::Paused(PausedRendererStatus::Paused) {
                     saw_paused = true;
                     break;
                 }

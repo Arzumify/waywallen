@@ -565,6 +565,16 @@ pub async fn resume_all(app: &Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
+pub async fn mute_all(app: &Arc<AppState>) -> Result<()> {
+    app.router.set_manual_mute(true).await;
+    Ok(())
+}
+
+pub async fn unmute_all(app: &Arc<AppState>) -> Result<()> {
+    app.router.set_manual_mute(false).await;
+    Ok(())
+}
+
 pub async fn rescan(app: &Arc<AppState>) -> Result<usize> {
     refresh_sources(app).await
 }

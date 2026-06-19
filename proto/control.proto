@@ -952,24 +952,28 @@ message GlobalSettings {
   // the display record (not in this message).
   AutopauseSettings autopause = 9;
 
+  // Daemon-wide automute defaults. Per-display overrides live on
+  // the display record (not in this message).
+  AutomuteSettings automute = 10;
+
   // Queue playback mode: "sequential" / "shuffle" / "random". Unknown
   // values are coerced back to "sequential" on the daemon side.
-  string queue_mode = 10;
+  string queue_mode = 11;
 
   // Auto-rotation interval in seconds. `0` disables auto-rotation.
-  uint32 rotation_secs = 11;
+  uint32 rotation_secs = 12;
 
   // Wallpaper types the browser hides via the quick type toggles
   // (above the structured filter rules). Persisted so the selection
   // survives restarts.
-  repeated string wallpaper_skip_types = 12;
+  repeated string wallpaper_skip_types = 13;
 
   // Quick tag filter (independent of the rules): show only wallpapers
   // having any of these tags. Empty = all. Persisted across restarts.
-  repeated string wallpaper_filter_tags = 13;
+  repeated string wallpaper_filter_tags = 14;
 
   // Content ratings hidden by the browser's quick toggles. Persisted.
-  repeated string wallpaper_skip_content_ratings = 14;
+  repeated string wallpaper_skip_content_ratings = 15;
 }
 
 // When to pause the wallpaper based on window state on the same
@@ -991,6 +995,18 @@ message AutopauseSettings {
   bool pause_on_lock = 3;
   // Pause when the current login session becomes inactive (user switch).
   bool pause_on_user_switch = 4;
+}
+
+message AutomuteSettings {
+  AutopauseMode mode = 1;
+  // Milliseconds of "no autopause condition" required before resume.
+  uint32 resume_ms = 2;
+  // Pause when the session's lock screen becomes active.
+  bool pause_on_lock = 3;
+  // Pause when the current login session becomes inactive (user switch).
+  bool pause_on_user_switch = 4;
+  uint32 fade_in_ms = 5;
+  uint32 fade_out_ms = 6;
 }
 
 // One plugin's settings table. Wire format is string→string for

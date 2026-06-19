@@ -38,6 +38,8 @@ const ID_ROT_1H: i32 = 26;
 const ID_SEP_PL: i32 = 12;
 const ID_PAUSE: i32 = 5;
 const ID_RESUME: i32 = 6;
+const ID_MUTE: i32 = 27;
+const ID_UNMUTE: i32 = 28;
 const ID_SEP2: i32 = 7;
 const ID_RESCAN: i32 = 8;
 const ID_SEP3: i32 = 9;
@@ -164,6 +166,16 @@ impl DBusMenu {
             ID_RESUME => {
                 if let Err(e) = control::resume_all(&app).await {
                     log::warn!("tray resume: {e}");
+                }
+            }
+            ID_MUTE => {
+                if let Err(e) = control::mute_all(&app).await {
+                    log::warn!("tray mute: {e}");
+                }
+            }
+            ID_UNMUTE => {
+                if let Err(e) = control::unmute_all(&app).await {
+                    log::warn!("tray unmute: {e}");
                 }
             }
             ID_RESCAN => {
@@ -326,6 +338,9 @@ fn build_root(menu: &MenuState) -> ItemStruct {
         item_to_value(make_leaf(ID_PAUSE, "Pause", None)),
         item_to_value(make_leaf(ID_RESUME, "Resume", None)),
         item_to_value(make_leaf(ID_SEP2, "", Some("separator"))),
+        item_to_value(make_leaf(ID_MUTE, "Mute", None)),
+        item_to_value(make_leaf(ID_UNMUTE, "Unmute", None)),
+        item_to_value(make_leaf(ID_SEP2, "", Some("separator"))),
         item_to_value(make_leaf(ID_RESCAN, "Rescan wallpapers", None)),
         item_to_value(make_leaf(ID_SEP3, "", Some("separator"))),
         item_to_value(make_leaf(ID_QUIT, "Quit", None)),
@@ -442,6 +457,8 @@ fn props_for(id: i32, menu: &MenuState) -> Option<HashMap<String, OwnedValue>> {
         }
         ID_PAUSE => Some(make_leaf(id, "Pause", None).1),
         ID_RESUME => Some(make_leaf(id, "Resume", None).1),
+        ID_MUTE => Some(make_leaf(id, "Mute", None).1),
+        ID_UNMUTE => Some(make_leaf(id, "Unmute", None).1),
         ID_RESCAN => Some(make_leaf(id, "Rescan wallpapers", None).1),
         ID_QUIT => Some(make_leaf(id, "Quit", None).1),
         _ => None,
@@ -473,6 +490,12 @@ async fn dispatch_click(app: &Arc<AppState>, id: i32) -> zbus::fdo::Result<()> {
         }
         ID_RESUME => {
             let _ = control::resume_all(app).await;
+        }
+        ID_MUTE => {
+            let _ = control::mute_all(app).await;
+        }
+        ID_UNMUTE => {
+            let _ = control::mute_all(app).await;
         }
         ID_RESCAN => {
             let _ = control::rescan(app).await;

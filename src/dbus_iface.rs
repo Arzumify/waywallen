@@ -105,6 +105,18 @@ impl Daemon1 {
             .map_err(zbus::fdo::Error::from)
     }
 
+    async fn mute(&self) -> zbus::fdo::Result<()> {
+        control::mute_all(&self.app)
+            .await
+            .map_err(zbus::fdo::Error::from)
+    }
+
+    async fn unmute(&self) -> zbus::fdo::Result<()> {
+        control::unmute_all(&self.app)
+            .await
+            .map_err(zbus::fdo::Error::from)
+    }
+
     async fn rescan(&self) -> zbus::fdo::Result<u32> {
         control::rescan(&self.app)
             .await
