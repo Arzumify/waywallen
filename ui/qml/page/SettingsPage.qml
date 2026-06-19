@@ -182,7 +182,7 @@ MD.Page {
                         FieldLabel { text: qsTr("Trigger") }
 
                         MD.ComboBox {
-                            id: m_mode_box
+                            id: m_autopause_mode_box
                             Layout.fillWidth: true
                             model: root.kAutopauseModes.map(o => o.label)
                             onActivated: idx => root._mut(g => {
@@ -193,7 +193,7 @@ MD.Page {
                             })
                         }
                         Binding {
-                            target: m_mode_box
+                            target: m_autopause_mode_box
                             property: "currentIndex"
                             value: root._autopauseIndex(getQ.global?.autopause?.mode ?? 0)
                         }
@@ -210,7 +210,7 @@ MD.Page {
                             spacing: 8
 
                             MD.Slider {
-                                id: m_resume_slider
+                                id: m_autopause_resume_slider
                                 Layout.fillWidth: true
                                 from: 0
                                 to: 5000
@@ -223,13 +223,13 @@ MD.Page {
                                 })
                             }
                             Binding {
-                                target: m_resume_slider
+                                target: m_autopause_resume_slider
                                 property: "value"
                                 value: getQ.global?.autopause?.resumeMs ?? 500
                             }
 
                             MD.Text {
-                                text: Math.round(m_resume_slider.value) + " ms"
+                                text: Math.round(m_autopause_resume_slider.value) + " ms"
                                 typescale: MD.Token.typescale.body_small
                                 color: MD.Token.color.on_surface_variant
                                 Layout.preferredWidth: 64
@@ -315,6 +315,236 @@ MD.Page {
                             target: m_pause_on_user_switch
                             property: "checked"
                             value: getQ.global?.autopause?.pauseOnUserSwitch ?? true
+                        }
+                    }
+                }
+            }
+
+            // ---- Auto-mute -------------------------------------------------
+            SectionPane {
+                contentItem: ColumnLayout {
+                    spacing: 12
+
+                    SectionTitle { text: qsTr("Auto-mute") }
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 4
+
+                        FieldLabel { text: qsTr("Trigger") }
+
+                        MD.ComboBox {
+                            id: m_automute_mode_box
+                            Layout.fillWidth: true
+                            model: root.kAutopauseModes.map(o => o.label)
+                            onActivated: idx => root._mut(g => {
+                                const am = Object.assign({},
+                                    g.automute || ({ mode: 0, resumeMs: 500, fadeInMs: 500, fadeOutMs: 500 }));
+                                am.mode = root.kAutopauseModes[idx].value;
+                                g.automute = am;
+                            })
+                        }
+                        Binding {
+                            target: m_automute_mode_box
+                            property: "currentIndex"
+                            value: root._autopauseIndex(getQ.global?.automute?.mode ?? 0)
+                        }
+                    }
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 4
+
+                        FieldLabel { text: qsTr("Resume delay (ms)") }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            MD.Slider {
+                                id: m_automute_resume_slider
+                                Layout.fillWidth: true
+                                from: 0
+                                to: 5000
+                                stepSize: 100
+                                onMoved: root._mut(g => {
+                                    const am = Object.assign({},
+                                        g.automute || ({ mode: 0, resumeMs: 500, fadeInMs: 500, fadeOutMs: 500 }));
+                                    am.resumeMs = Math.round(value);
+                                    g.automute = am;
+                                })
+                            }
+                            Binding {
+                                target: m_automute_resume_slider
+                                property: "value"
+                                value: getQ.global?.automute?.resumeMs ?? 500
+                            }
+
+                            MD.Text {
+                                text: Math.round(m_automute_resume_slider.value) + " ms"
+                                typescale: MD.Token.typescale.body_small
+                                color: MD.Token.color.on_surface_variant
+                                Layout.preferredWidth: 64
+                                horizontalAlignment: Text.AlignRight
+                            }
+                        }
+                    }
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 4
+
+                        FieldLabel { text: qsTr("Fade-in (ms)") }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            MD.Slider {
+                                id: m_fade_in_slider
+                                Layout.fillWidth: true
+                                from: 0
+                                to: 5000
+                                stepSize: 100
+                                onMoved: root._mut(g => {
+                                    const am = Object.assign({},
+                                        g.automute || ({ mode: 0, resumeMs: 500, fadeInMs: 500, fadeOutMs: 500 }));
+                                    am.fadeInMs = Math.round(value);
+                                    g.automute = am;
+                                })
+                            }
+                            Binding {
+                                target: m_fade_in_slider
+                                property: "value"
+                                value: getQ.global?.automute?.fadeInMs ?? 500
+                            }
+
+                            MD.Text {
+                                text: Math.round(m_fade_in_slider.value) + " ms"
+                                typescale: MD.Token.typescale.body_small
+                                color: MD.Token.color.on_surface_variant
+                                Layout.preferredWidth: 64
+                                horizontalAlignment: Text.AlignRight
+                            }
+                        }
+                    }
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 4
+
+                        FieldLabel { text: qsTr("Fade-out (ms)") }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            MD.Slider {
+                                id: m_fade_out_slider
+                                Layout.fillWidth: true
+                                from: 0
+                                to: 5000
+                                stepSize: 100
+                                onMoved: root._mut(g => {
+                                    const am = Object.assign({},
+                                        g.automute || ({ mode: 0, resumeMs: 500, fadeInMs: 500, fadeOutMs: 500 }));
+                                    am.fadeOutMs = Math.round(value);
+                                    g.automute = am;
+                                })
+                            }
+                            Binding {
+                                target: m_fade_out_slider
+                                property: "value"
+                                value: getQ.global?.automute?.fadeOutMs ?? 500
+                            }
+
+                            MD.Text {
+                                text: Math.round(m_fade_out_slider.value) + " ms"
+                                typescale: MD.Token.typescale.body_small
+                                color: MD.Token.color.on_surface_variant
+                                Layout.preferredWidth: 64
+                                horizontalAlignment: Text.AlignRight
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 2
+
+                            MD.Text {
+                                text: qsTr("Mute on lock screen")
+                                typescale: MD.Token.typescale.body_medium
+                                color: MD.Token.color.on_surface
+                            }
+                            MD.Text {
+                                text: qsTr("Mute while the screen is locked")
+                                typescale: MD.Token.typescale.body_small
+                                color: MD.Token.color.on_surface_variant
+                                wrapMode: Text.WordWrap
+                                Layout.fillWidth: true
+                            }
+                        }
+
+                        MD.Switch {
+                            id: m_mute_on_lock
+                            onToggled: root._mut(g => {
+                                const am = Object.assign({},
+                                    g.automute || ({ mode: 0, resumeMs: 500,
+                                        pauseOnLock: true,
+                                        pauseOnUserSwitch: true }));
+                                am.pauseOnLock = checked;
+                                g.automute = am;
+                            })
+                        }
+                        Binding {
+                            target: m_mute_on_lock
+                            property: "checked"
+                            value: getQ.global?.automute?.pauseOnLock ?? true
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 2
+
+                            MD.Text {
+                                text: qsTr("Mute on user switch")
+                                typescale: MD.Token.typescale.body_medium
+                                color: MD.Token.color.on_surface
+                            }
+                            MD.Text {
+                                text: qsTr("Mute when switching to another user session")
+                                typescale: MD.Token.typescale.body_small
+                                color: MD.Token.color.on_surface_variant
+                                wrapMode: Text.WordWrap
+                                Layout.fillWidth: true
+                            }
+                        }
+
+                        MD.Switch {
+                            id: m_mute_on_user_switch
+                            onToggled: root._mut(g => {
+                                const am = Object.assign({},
+                                    g.automute || ({ mode: 0, resumeMs: 500,
+                                        pauseOnLock: true,
+                                        pauseOnUserSwitch: true }));
+                                am.pauseOnUserSwitch = checked;
+                                g.automute = am;
+                            })
+                        }
+                        Binding {
+                            target: m_mute_on_user_switch
+                            property: "checked"
+                            value: getQ.global?.automute?.pauseOnUserSwitch ?? true
                         }
                     }
                 }
