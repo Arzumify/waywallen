@@ -448,27 +448,45 @@ fn resolved_layout_from_pb(p: &pb::LayoutPrefs) -> crate::settings::ResolvedLayo
     }
 }
 
-fn autopause_mode_to_pb(m: crate::settings::AutopauseMode) -> pb::AutopauseMode {
-    use crate::settings::AutopauseMode as M;
-    match m {
-        M::Never => pb::AutopauseMode::Never,
-        M::Any => pb::AutopauseMode::Any,
-        M::Max => pb::AutopauseMode::Max,
-        M::Focus => pb::AutopauseMode::Focus,
-        M::FocusOrMax => pb::AutopauseMode::FocusOrMax,
-        M::FullScreen => pb::AutopauseMode::FullScreen,
+fn auto_action_to_pb(v: crate::settings::AutoAction) -> pb::AutoAction {
+    use crate::settings::AutoAction as A;
+    match v {
+        A::None => pb::AutoAction::None,
+        A::PauseAudio => pb::AutoAction::PauseAudio,
+        A::Pause => pb::AutoAction::Pause,
+        A::Stop => pb::AutoAction::Stop,
     }
 }
 
-fn autopause_mode_from_pb(v: i32) -> crate::settings::AutopauseMode {
-    use crate::settings::AutopauseMode as M;
-    match pb::AutopauseMode::try_from(v).unwrap_or(pb::AutopauseMode::Never) {
-        pb::AutopauseMode::Never => M::Never,
-        pb::AutopauseMode::Any => M::Any,
-        pb::AutopauseMode::Max => M::Max,
-        pb::AutopauseMode::Focus => M::Focus,
-        pb::AutopauseMode::FocusOrMax => M::FocusOrMax,
-        pb::AutopauseMode::FullScreen => M::FullScreen,
+fn auto_action_from_pb(v: i32) -> crate::settings::AutoAction {
+    use crate::settings::AutoAction as A;
+    match pb::AutoAction::try_from(v).unwrap_or(pb::AutoAction::None) {
+        pb::AutoAction::None => A::None,
+        pb::AutoAction::PauseAudio => A::PauseAudio,
+        pb::AutoAction::Pause => A::Pause,
+        pb::AutoAction::Stop => A::Stop,
+    }
+}
+
+fn auto_replay_to_pb(p: &crate::settings::AutoReplayPolicy) -> pb::AutoReplayPolicy {
+    pb::AutoReplayPolicy {
+        any_window: auto_action_to_pb(p.any_window) as i32,
+        focused: auto_action_to_pb(p.focused) as i32,
+        maximized: auto_action_to_pb(p.maximized) as i32,
+        fullscreen: auto_action_to_pb(p.fullscreen) as i32,
+        session_locked: auto_action_to_pb(p.session_locked) as i32,
+        session_inactive: auto_action_to_pb(p.session_inactive) as i32,
+    }
+}
+
+fn auto_replay_from_pb(p: &pb::AutoReplayPolicy) -> crate::settings::AutoReplayPolicy {
+    crate::settings::AutoReplayPolicy {
+        any_window: auto_action_from_pb(p.any_window),
+        focused: auto_action_from_pb(p.focused),
+        maximized: auto_action_from_pb(p.maximized),
+        fullscreen: auto_action_from_pb(p.fullscreen),
+        session_locked: auto_action_from_pb(p.session_locked),
+        session_inactive: auto_action_from_pb(p.session_inactive),
     }
 }
 
@@ -504,20 +522,7 @@ fn global_to_pb(g: &crate::settings::GlobalSettings) -> pb::GlobalSettings {
             ),
             location_set: true,
         }),
-        autopause: Some(pb::AutopauseSettings {
-            mode: autopause_mode_to_pb(g.autopause.mode) as i32,
-            resume_ms: g.autopause.resume_ms,
-            pause_on_lock: g.autopause.pause_on_lock,
-            pause_on_user_switch: g.autopause.pause_on_user_switch,
-        }),
-        automute: Some(pb::AutomuteSettings {
-            mode: autopause_mode_to_pb(g.automute.mode) as i32,
-            resume_ms: g.automute.resume_ms,
-            pause_on_lock: g.automute.pause_on_lock,
-            pause_on_user_switch: g.automute.pause_on_user_switch,
-            fade_in_ms: g.automute.fade_in_ms,
-            fade_out_ms: g.automute.fade_out_ms
-        }),
+        auto_replay: Some(auto_replay_to_pb(&g.effective_auto_replay())),
         queue_mode: g.queue_mode.clone(),
         rotation_secs: g.rotation_secs,
         wallpaper_skip_types: g.wallpaper_skip_types.clone(),
@@ -2163,11 +2168,8 @@ async fn dispatch_inner(
                             s.global.layout.rotation = rt;
                         }
                     }
-                    if let Some(ap) = g.autopause.as_ref() {
-                        s.global.autopause.mode = autopause_mode_from_pb(ap.mode);
-                        s.global.autopause.resume_ms = ap.resume_ms;
-                        s.global.autopause.pause_on_lock = ap.pause_on_lock;
-                        s.global.autopause.pause_on_user_switch = ap.pause_on_user_switch;
+                    if let Some(policy) = g.auto_replay.as_ref() {
+                        s.global.auto_replay = Some(auto_replay_from_pb(policy));
                     }
                     if !g.queue_mode.is_empty() {
                         s.global.queue_mode = g.queue_mode.clone();
@@ -2195,8 +2197,8 @@ async fn dispatch_inner(
                 let snap = state.router.snapshot_displays().await;
                 state.router.emit_displays_replace_for_settings_change(snap);
             }
-            // Hot-apply queue mode and rotation interval; autopause re-reads
-            // settings on every window-state event.
+            // Hot-apply queue mode and rotation interval; auto replay re-reads
+            // settings on every display state event.
             let new_queue_mode = state.settings.snapshot().global.queue_mode.clone();
             if new_queue_mode != prev_queue_mode {
                 if let Some(m) = queue::state::Mode::from_str(&new_queue_mode) {

@@ -353,8 +353,18 @@ async fn async_main() -> anyhow::Result<()> {
                 Ok(())
             });
     }
+    {
+        let app_for_restore = state.clone();
+        let shutdown_for_restore = state.shutdown_subscribe();
+        state
+            .tasks
+            .spawn_async(tasks::TaskKind::Service, "auto-stop/restore", async move {
+                control::run_auto_stop_restore(app_for_restore, shutdown_for_restore).await;
+                Ok(())
+            });
+    }
 
-    // Session-level autopause monitor. Watches D-Bus for lock-screen and
+    // Session state monitor. Watches D-Bus for lock-screen and
     // user-switch events, then forwards them to the router.
     session_monitor::spawn(router.clone(), state.shutdown_subscribe());
 

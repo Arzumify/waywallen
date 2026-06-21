@@ -201,6 +201,17 @@ impl RoutingTable {
         self.links.get(&link_id)
     }
 
+    pub fn set_link_enabled(&mut self, link_id: LinkId, enabled: bool) -> bool {
+        let Some(link) = self.links.get_mut(&link_id) else {
+            return false;
+        };
+        if link.enabled == enabled {
+            return false;
+        }
+        link.enabled = enabled;
+        true
+    }
+
     pub fn remove_link(&mut self, link_id: LinkId) -> Option<Link> {
         let link = self.links.remove(&link_id)?;
         if let Some(v) = self.by_display.get_mut(&link.display_id) {

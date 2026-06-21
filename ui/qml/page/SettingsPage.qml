@@ -14,35 +14,58 @@ MD.Page {
     title: 'Settings'
     scrolling: !m_flick.atYBeginning
 
-    component SectionTitle: MD.Text {
-        typescale: MD.Token.typescale.title_medium
+    component FieldLabel: MD.Text {
+        typescale: MD.Token.typescale.label_large
         color: MD.Token.color.on_surface
     }
 
-    component SectionHint: MD.Text {
+    component SettingHeader: MD.Text {
         Layout.fillWidth: true
-        typescale: MD.Token.typescale.body_medium
+        typescale: MD.Token.typescale.title_small
         color: MD.Token.color.on_surface_variant
-        wrapMode: Text.WordWrap
+        topPadding: 16
+        bottomPadding: 6
+        leftPadding: 4
     }
 
-    component FieldLabel: MD.Text {
-        typescale: MD.Token.typescale.label_medium
-        color: MD.Token.color.on_surface_variant
-    }
+    component SettingItem: Rectangle {
+        id: settingItem
+        default property alias content: settingContent.data
+        property bool first: true
+        property bool last: true
 
-    component SectionPane: MD.Pane {
         Layout.fillWidth: true
-        radius: 16
-        backgroundColor: MD.MProp.color.surface
+        implicitHeight: settingContent.implicitHeight + 16
+        color: MD.Token.color.surface_container
+
+        readonly property real radiusBig: 16
+
+        topLeftRadius: first ? radiusBig : 0
+        topRightRadius: first ? radiusBig : 0
+        bottomLeftRadius: last ? radiusBig : 0
+        bottomRightRadius: last ? radiusBig : 0
+
+        ColumnLayout {
+            id: settingContent
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.leftMargin: 16
+            anchors.rightMargin: 16
+        }
     }
 
     W.SettingsGetQuery {
         id: getQ
+        onGlobalChanged: root._maybeClearSubmittedGlobal()
     }
 
     W.SettingsSetQuery {
         id: setQ
+        onStatusChanged: {
+            if (status === 3)
+                m_pending.submittedGlobal = null;
+        }
     }
 
     Connections {
@@ -66,6 +89,7 @@ MD.Page {
     QtObject {
         id: m_pending
         property var nextGlobal: null
+        property var submittedGlobal: null
     }
 
     Qml.Timer {
@@ -78,6 +102,7 @@ MD.Page {
             setQ.global = g;
             setQ.plugins = getQ.plugins;
             setQ.reload();
+            m_pending.submittedGlobal = g;
             m_pending.nextGlobal = null;
         }
     }
@@ -87,25 +112,97 @@ MD.Page {
             return;
         const base = m_pending.nextGlobal
                    ? m_pending.nextGlobal
-                   : Object.assign({}, getQ.global);
+                   : (m_pending.submittedGlobal
+                      ? m_pending.submittedGlobal
+                      : Object.assign({}, getQ.global));
         fn(base);
         m_pending.nextGlobal = base;
         m_flush.restart();
     }
 
-    readonly property var kAutopauseModes: [
-        { value: WC.AutopauseMode.AUTOPAUSE_MODE_NEVER,         label: qsTr("Never") },
-        { value: WC.AutopauseMode.AUTOPAUSE_MODE_ANY,           label: qsTr("Any window open") },
-        { value: WC.AutopauseMode.AUTOPAUSE_MODE_MAX,           label: qsTr("Maximized or fullscreen") },
-        { value: WC.AutopauseMode.AUTOPAUSE_MODE_FOCUS,         label: qsTr("Window focused") },
-        { value: WC.AutopauseMode.AUTOPAUSE_MODE_FOCUS_OR_MAX,  label: qsTr("Focused or maximized") },
-        { value: WC.AutopauseMode.AUTOPAUSE_MODE_FULL_SCREEN,   label: qsTr("Fullscreen only") }
+    property int autoReplayRevision: 0
+
+    readonly property var kAutoReplayRows: [
+        { key: "anyWindow",       label: qsTr("Any window") },
+        { key: "focused",         label: qsTr("Focused window") },
+        { key: "maximized",       label: qsTr("Maximized window") },
+        { key: "fullscreen",      label: qsTr("Fullscreen window") },
+        { key: "sessionLocked",   label: qsTr("Session locked") },
+        { key: "sessionInactive", label: qsTr("Session inactive") }
     ]
 
-    function _autopauseIndex(mode) {
-        for (let i = 0; i < kAutopauseModes.length; ++i)
-            if (kAutopauseModes[i].value === mode) return i;
+    readonly property var kAutoActions: [
+        { value: WC.AutoAction.AUTO_ACTION_NONE,        label: qsTr("None") },
+        { value: WC.AutoAction.AUTO_ACTION_PAUSE_AUDIO, label: qsTr("Pause audio") },
+        { value: WC.AutoAction.AUTO_ACTION_PAUSE,       label: qsTr("Pause") },
+        { value: WC.AutoAction.AUTO_ACTION_STOP,        label: qsTr("Stop") }
+    ]
+
+    function _listIndex(list, value) {
+        for (let i = 0; i < list.length; ++i)
+            if (list[i].value === value) return i;
         return 0;
+    }
+
+    function _currentGlobal() {
+        return m_pending.nextGlobal
+            ? m_pending.nextGlobal
+            : (m_pending.submittedGlobal
+               ? m_pending.submittedGlobal
+               : getQ.global);
+    }
+
+    function _defaultAutoReplay() {
+        return {
+            anyWindow: WC.AutoAction.AUTO_ACTION_NONE,
+            focused: WC.AutoAction.AUTO_ACTION_NONE,
+            maximized: WC.AutoAction.AUTO_ACTION_NONE,
+            fullscreen: WC.AutoAction.AUTO_ACTION_PAUSE,
+            sessionLocked: WC.AutoAction.AUTO_ACTION_STOP,
+            sessionInactive: WC.AutoAction.AUTO_ACTION_STOP
+        };
+    }
+
+    function _globalPageKey(g) {
+        if (!g)
+            return "";
+        return JSON.stringify({
+            autoReplay: root._normalizedAutoReplay(g.autoReplay || ({})),
+            queueMode: g.queueMode ?? "sequential",
+            rotationSecs: Number(g.rotationSecs ?? 0)
+        });
+    }
+
+    function _normalizedAutoReplay(policy) {
+        return Object.assign(root._defaultAutoReplay(), policy || ({}));
+    }
+
+    function _maybeClearSubmittedGlobal() {
+        if (!m_pending.submittedGlobal)
+            return;
+        if (root._globalPageKey(getQ.global) === root._globalPageKey(m_pending.submittedGlobal))
+            m_pending.submittedGlobal = null;
+    }
+
+    function _autoReplay() {
+        root.autoReplayRevision;
+        const g = root._currentGlobal();
+        return root._normalizedAutoReplay(g?.autoReplay || ({}));
+    }
+
+    function _mutAutoReplay(fn) {
+        root._mut(g => {
+            const policy = Object.assign(root._defaultAutoReplay(), g.autoReplay || ({}));
+            fn(policy);
+            g.autoReplay = policy;
+        });
+        root.autoReplayRevision += 1;
+    }
+
+    function _updateAutoReplayAction(key, action) {
+        root._mutAutoReplay(policy => {
+            policy[key] = action;
+        });
     }
 
     readonly property var kQueueModes: [
@@ -128,491 +225,147 @@ MD.Page {
 
         ColumnLayout {
             width: m_flick.contentWidth
-            spacing: 12
+            spacing: 2
 
-            // ---- General (UI-local, persisted via QSettings) ----------------
-            SectionPane {
-                contentItem: ColumnLayout {
-                    spacing: 12
+            SettingHeader { text: qsTr("General") }
 
-                    SectionTitle { text: qsTr("General") }
+            SettingItem {
+                first: true
+                last: true
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+
+                        FieldLabel { text: qsTr("Auto-expand sidebar") }
+
+                        MD.Text {
+                            text: qsTr("Expand or collapse the sidebar with the window size.")
+                            typescale: MD.Token.typescale.body_small
+                            color: MD.Token.color.on_surface_variant
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
+                    }
+
+                    MD.Switch {
+                        id: m_sidebar_auto_expand
+                        checked: W.Global.sidebarAutoExpand
+                        onToggled: W.Global.sidebarAutoExpand = checked
+                    }
+                }
+            }
+
+            SettingHeader { text: qsTr("Auto replay") }
+
+            Repeater {
+                model: root.kAutoReplayRows
+                delegate: SettingItem {
+                    id: autoReplayItem
+                    required property int index
+                    required property var modelData
+
+                    first: autoReplayItem.index === 0
+                    last: autoReplayItem.index === root.kAutoReplayRows.length - 1
 
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 8
 
-                        ColumnLayout {
+                        FieldLabel {
                             Layout.fillWidth: true
-                            spacing: 2
-
-                            MD.Text {
-                                text: qsTr("Auto-expand sidebar")
-                                typescale: MD.Token.typescale.body_medium
-                                color: MD.Token.color.on_surface
-                            }
-                            MD.Text {
-                                text: qsTr("Expand or collapse the sidebar with the window size.")
-                                typescale: MD.Token.typescale.body_small
-                                color: MD.Token.color.on_surface_variant
-                                wrapMode: Text.WordWrap
-                                Layout.fillWidth: true
-                            }
+                            text: autoReplayItem.modelData.label
                         }
 
-                        MD.Switch {
-                            id: m_sidebar_auto_expand
-                            checked: W.Global.sidebarAutoExpand
-                            onToggled: W.Global.sidebarAutoExpand = checked
+                        MD.ComboBox {
+                            id: autoReplayActionBox
+                            Layout.preferredWidth: 180
+                            model: root.kAutoActions.map(o => o.label)
+                            onActivated: idx => root._updateAutoReplayAction(
+                                autoReplayItem.modelData.key,
+                                root.kAutoActions[idx].value)
+                        }
+                        Binding {
+                            target: autoReplayActionBox
+                            property: "currentIndex"
+                            value: root._listIndex(
+                                root.kAutoActions,
+                                root._autoReplay()[autoReplayItem.modelData.key] ?? 0)
                         }
                     }
                 }
             }
 
-            // ---- Auto-pause -------------------------------------------------
-            SectionPane {
-                contentItem: ColumnLayout {
-                    spacing: 12
+            SettingHeader { text: qsTr("Rotation") }
 
-                    SectionTitle { text: qsTr("Auto-pause") }
+            SettingItem {
+                first: true
+                last: false
 
-                    ColumnLayout {
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    FieldLabel {
                         Layout.fillWidth: true
-                        spacing: 4
-
-                        FieldLabel { text: qsTr("Trigger") }
-
-                        MD.ComboBox {
-                            id: m_autopause_mode_box
-                            Layout.fillWidth: true
-                            model: root.kAutopauseModes.map(o => o.label)
-                            onActivated: idx => root._mut(g => {
-                                const ap = Object.assign({},
-                                    g.autopause || ({ mode: 0, resumeMs: 500 }));
-                                ap.mode = root.kAutopauseModes[idx].value;
-                                g.autopause = ap;
-                            })
-                        }
-                        Binding {
-                            target: m_autopause_mode_box
-                            property: "currentIndex"
-                            value: root._autopauseIndex(getQ.global?.autopause?.mode ?? 0)
-                        }
+                        text: qsTr("Queue mode")
                     }
 
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 4
-
-                        FieldLabel { text: qsTr("Resume delay (ms)") }
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 8
-
-                            MD.Slider {
-                                id: m_autopause_resume_slider
-                                Layout.fillWidth: true
-                                from: 0
-                                to: 5000
-                                stepSize: 100
-                                onMoved: root._mut(g => {
-                                    const ap = Object.assign({},
-                                        g.autopause || ({ mode: 0, resumeMs: 500 }));
-                                    ap.resumeMs = Math.round(value);
-                                    g.autopause = ap;
-                                })
-                            }
-                            Binding {
-                                target: m_autopause_resume_slider
-                                property: "value"
-                                value: getQ.global?.autopause?.resumeMs ?? 500
-                            }
-
-                            MD.Text {
-                                text: Math.round(m_autopause_resume_slider.value) + " ms"
-                                typescale: MD.Token.typescale.body_small
-                                color: MD.Token.color.on_surface_variant
-                                Layout.preferredWidth: 64
-                                horizontalAlignment: Text.AlignRight
-                            }
-                        }
+                    MD.ComboBox {
+                        id: m_queue_box
+                        Layout.preferredWidth: 180
+                        model: root.kQueueModes.map(o => o.label)
+                        onActivated: idx => root._mut(g => {
+                            g.queueMode = root.kQueueModes[idx].value;
+                        })
                     }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: 2
-
-                            MD.Text {
-                                text: qsTr("Pause on lock screen")
-                                typescale: MD.Token.typescale.body_medium
-                                color: MD.Token.color.on_surface
-                            }
-                            MD.Text {
-                                text: qsTr("Pause while the screen is locked")
-                                typescale: MD.Token.typescale.body_small
-                                color: MD.Token.color.on_surface_variant
-                                wrapMode: Text.WordWrap
-                                Layout.fillWidth: true
-                            }
-                        }
-
-                        MD.Switch {
-                            id: m_pause_on_lock
-                            onToggled: root._mut(g => {
-                                const ap = Object.assign({},
-                                    g.autopause || ({ mode: 0, resumeMs: 500,
-                                                      pauseOnLock: true,
-                                                      pauseOnUserSwitch: true }));
-                                ap.pauseOnLock = checked;
-                                g.autopause = ap;
-                            })
-                        }
-                        Binding {
-                            target: m_pause_on_lock
-                            property: "checked"
-                            value: getQ.global?.autopause?.pauseOnLock ?? true
-                        }
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: 2
-
-                            MD.Text {
-                                text: qsTr("Pause on user switch")
-                                typescale: MD.Token.typescale.body_medium
-                                color: MD.Token.color.on_surface
-                            }
-                            MD.Text {
-                                text: qsTr("Pause when switching to another user session")
-                                typescale: MD.Token.typescale.body_small
-                                color: MD.Token.color.on_surface_variant
-                                wrapMode: Text.WordWrap
-                                Layout.fillWidth: true
-                            }
-                        }
-
-                        MD.Switch {
-                            id: m_pause_on_user_switch
-                            onToggled: root._mut(g => {
-                                const ap = Object.assign({},
-                                    g.autopause || ({ mode: 0, resumeMs: 500,
-                                                      pauseOnLock: true,
-                                                      pauseOnUserSwitch: true }));
-                                ap.pauseOnUserSwitch = checked;
-                                g.autopause = ap;
-                            })
-                        }
-                        Binding {
-                            target: m_pause_on_user_switch
-                            property: "checked"
-                            value: getQ.global?.autopause?.pauseOnUserSwitch ?? true
-                        }
+                    Binding {
+                        target: m_queue_box
+                        property: "currentIndex"
+                        value: root._queueIndex(root._currentGlobal()?.queueMode ?? "sequential")
                     }
                 }
             }
 
-            // ---- Auto-mute -------------------------------------------------
-            SectionPane {
-                contentItem: ColumnLayout {
-                    spacing: 12
+            SettingItem {
+                first: false
+                last: true
 
-                    SectionTitle { text: qsTr("Auto-mute") }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
 
-                    ColumnLayout {
+                    FieldLabel {
                         Layout.fillWidth: true
-                        spacing: 4
-
-                        FieldLabel { text: qsTr("Trigger") }
-
-                        MD.ComboBox {
-                            id: m_automute_mode_box
-                            Layout.fillWidth: true
-                            model: root.kAutopauseModes.map(o => o.label)
-                            onActivated: idx => root._mut(g => {
-                                const am = Object.assign({},
-                                    g.automute || ({ mode: 0, resumeMs: 500, fadeInMs: 500, fadeOutMs: 500 }));
-                                am.mode = root.kAutopauseModes[idx].value;
-                                g.automute = am;
-                            })
-                        }
-                        Binding {
-                            target: m_automute_mode_box
-                            property: "currentIndex"
-                            value: root._autopauseIndex(getQ.global?.automute?.mode ?? 0)
-                        }
+                        text: qsTr("Rotation interval")
                     }
 
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 4
-
-                        FieldLabel { text: qsTr("Resume delay (ms)") }
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 8
-
-                            MD.Slider {
-                                id: m_automute_resume_slider
-                                Layout.fillWidth: true
-                                from: 0
-                                to: 5000
-                                stepSize: 100
-                                onMoved: root._mut(g => {
-                                    const am = Object.assign({},
-                                        g.automute || ({ mode: 0, resumeMs: 500, fadeInMs: 500, fadeOutMs: 500 }));
-                                    am.resumeMs = Math.round(value);
-                                    g.automute = am;
-                                })
-                            }
-                            Binding {
-                                target: m_automute_resume_slider
-                                property: "value"
-                                value: getQ.global?.automute?.resumeMs ?? 500
-                            }
-
-                            MD.Text {
-                                text: Math.round(m_automute_resume_slider.value) + " ms"
-                                typescale: MD.Token.typescale.body_small
-                                color: MD.Token.color.on_surface_variant
-                                Layout.preferredWidth: 64
-                                horizontalAlignment: Text.AlignRight
-                            }
-                        }
+                    MD.TextField {
+                        id: m_rot_field
+                        Layout.preferredWidth: 120
+                        mdState.dense: true
+                        placeholderText: qsTr("Interval")
+                        inputMethodHints: Qt.ImhDigitsOnly
+                        validator: IntValidator { bottom: 0 }
+                        onEditingFinished: root._mut(g => {
+                            g.rotationSecs = Number(text) || 0;
+                        })
+                    }
+                    Binding {
+                        target: m_rot_field
+                        property: "text"
+                        value: String(root._currentGlobal()?.rotationSecs ?? 0)
+                        when: ! m_rot_field.activeFocus
                     }
 
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 4
-
-                        FieldLabel { text: qsTr("Fade-in (ms)") }
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 8
-
-                            MD.Slider {
-                                id: m_fade_in_slider
-                                Layout.fillWidth: true
-                                from: 0
-                                to: 5000
-                                stepSize: 100
-                                onMoved: root._mut(g => {
-                                    const am = Object.assign({},
-                                        g.automute || ({ mode: 0, resumeMs: 500, fadeInMs: 500, fadeOutMs: 500 }));
-                                    am.fadeInMs = Math.round(value);
-                                    g.automute = am;
-                                })
-                            }
-                            Binding {
-                                target: m_fade_in_slider
-                                property: "value"
-                                value: getQ.global?.automute?.fadeInMs ?? 500
-                            }
-
-                            MD.Text {
-                                text: Math.round(m_fade_in_slider.value) + " ms"
-                                typescale: MD.Token.typescale.body_small
-                                color: MD.Token.color.on_surface_variant
-                                Layout.preferredWidth: 64
-                                horizontalAlignment: Text.AlignRight
-                            }
-                        }
-                    }
-
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 4
-
-                        FieldLabel { text: qsTr("Fade-out (ms)") }
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 8
-
-                            MD.Slider {
-                                id: m_fade_out_slider
-                                Layout.fillWidth: true
-                                from: 0
-                                to: 5000
-                                stepSize: 100
-                                onMoved: root._mut(g => {
-                                    const am = Object.assign({},
-                                        g.automute || ({ mode: 0, resumeMs: 500, fadeInMs: 500, fadeOutMs: 500 }));
-                                    am.fadeOutMs = Math.round(value);
-                                    g.automute = am;
-                                })
-                            }
-                            Binding {
-                                target: m_fade_out_slider
-                                property: "value"
-                                value: getQ.global?.automute?.fadeOutMs ?? 500
-                            }
-
-                            MD.Text {
-                                text: Math.round(m_fade_out_slider.value) + " ms"
-                                typescale: MD.Token.typescale.body_small
-                                color: MD.Token.color.on_surface_variant
-                                Layout.preferredWidth: 64
-                                horizontalAlignment: Text.AlignRight
-                            }
-                        }
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: 2
-
-                            MD.Text {
-                                text: qsTr("Mute on lock screen")
-                                typescale: MD.Token.typescale.body_medium
-                                color: MD.Token.color.on_surface
-                            }
-                            MD.Text {
-                                text: qsTr("Mute while the screen is locked")
-                                typescale: MD.Token.typescale.body_small
-                                color: MD.Token.color.on_surface_variant
-                                wrapMode: Text.WordWrap
-                                Layout.fillWidth: true
-                            }
-                        }
-
-                        MD.Switch {
-                            id: m_mute_on_lock
-                            onToggled: root._mut(g => {
-                                const am = Object.assign({},
-                                    g.automute || ({ mode: 0, resumeMs: 500,
-                                        pauseOnLock: true,
-                                        pauseOnUserSwitch: true }));
-                                am.pauseOnLock = checked;
-                                g.automute = am;
-                            })
-                        }
-                        Binding {
-                            target: m_mute_on_lock
-                            property: "checked"
-                            value: getQ.global?.automute?.pauseOnLock ?? true
-                        }
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: 2
-
-                            MD.Text {
-                                text: qsTr("Mute on user switch")
-                                typescale: MD.Token.typescale.body_medium
-                                color: MD.Token.color.on_surface
-                            }
-                            MD.Text {
-                                text: qsTr("Mute when switching to another user session")
-                                typescale: MD.Token.typescale.body_small
-                                color: MD.Token.color.on_surface_variant
-                                wrapMode: Text.WordWrap
-                                Layout.fillWidth: true
-                            }
-                        }
-
-                        MD.Switch {
-                            id: m_mute_on_user_switch
-                            onToggled: root._mut(g => {
-                                const am = Object.assign({},
-                                    g.automute || ({ mode: 0, resumeMs: 500,
-                                        pauseOnLock: true,
-                                        pauseOnUserSwitch: true }));
-                                am.pauseOnUserSwitch = checked;
-                                g.automute = am;
-                            })
-                        }
-                        Binding {
-                            target: m_mute_on_user_switch
-                            property: "checked"
-                            value: getQ.global?.automute?.pauseOnUserSwitch ?? true
-                        }
-                    }
-                }
-            }
-
-            // ---- Rotation ---------------------------------------------------
-            SectionPane {
-                contentItem: ColumnLayout {
-                    spacing: 12
-
-                    SectionTitle { text: qsTr("Rotation") }
-
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 4
-
-                        FieldLabel { text: qsTr("Queue mode") }
-
-                        MD.ComboBox {
-                            id: m_queue_box
-                            Layout.fillWidth: true
-                            model: root.kQueueModes.map(o => o.label)
-                            onActivated: idx => root._mut(g => {
-                                g.queueMode = root.kQueueModes[idx].value;
-                            })
-                        }
-                        Binding {
-                            target: m_queue_box
-                            property: "currentIndex"
-                            value: root._queueIndex(getQ.global?.queueMode ?? "sequential")
-                        }
-                    }
-
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 4
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 8
-
-                            MD.TextField {
-                                id: m_rot_field
-                                Layout.preferredWidth: 120
-                                mdState.dense: true
-                                placeholderText: qsTr("Interval")
-                                inputMethodHints: Qt.ImhDigitsOnly
-                                validator: IntValidator { bottom: 0 }
-                                onEditingFinished: root._mut(g => {
-                                    g.rotationSecs = Number(text) || 0;
-                                })
-                            }
-                            // `when` gate keeps the Binding from clobbering
-                            // mid-typed text when an unrelated settings
-                            // round-trip refreshes `getQ.global`.
-                            Binding {
-                                target: m_rot_field
-                                property: "text"
-                                value: String(getQ.global?.rotationSecs ?? 0)
-                                when: ! m_rot_field.activeFocus
-                            }
-
-                            MD.Text {
-                                text: qsTr("s")
-                                typescale: MD.Token.typescale.body_medium
-                                color: MD.Token.color.on_surface_variant
-                            }
-                        }
+                    MD.Text {
+                        text: qsTr("s")
+                        typescale: MD.Token.typescale.body_medium
+                        color: MD.Token.color.on_surface_variant
                     }
                 }
             }

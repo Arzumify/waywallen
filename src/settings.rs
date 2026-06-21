@@ -34,12 +34,7 @@ pub struct DisplayPrefs {
     pub location: Option<Location>,
     pub align: Option<Align>,
     pub rotation: Option<Rotation>,
-    pub autopause_mode: Option<AutopauseMode>,
-    pub autopause_resume_ms: Option<u32>,
-    pub automute_mode: Option<AutopauseMode>,
-    pub automute_resume_ms: Option<u32>,
-    pub automute_fade_in_ms: Option<u32>,
-    pub automute_fade_out_ms: Option<u32>,
+    pub auto_replay: Option<AutoReplayPolicy>,
     /// Last wallpaper id applied to this display.
     /// Used to restore per-display assignment on restart.
     pub last_wallpaper: Option<String>,
@@ -53,12 +48,7 @@ impl DisplayPrefs {
             && self.location.is_none()
             && self.align.is_none()
             && self.rotation.is_none()
-            && self.autopause_mode.is_none()
-            && self.autopause_resume_ms.is_none()
-            && self.automute_mode.is_none()
-            && self.automute_resume_ms.is_none()
-            && self.automute_fade_in_ms.is_none()
-            && self.automute_fade_out_ms.is_none()
+            && self.auto_replay.is_none()
             && self.last_wallpaper.is_none()
             && self.alias.is_none()
             && self.active_playlist_id.is_none()
@@ -73,99 +63,86 @@ pub struct ResolvedLayout {
     pub rotation: Rotation,
 }
 
-/// What the daemon does when window-state reports arrive from a display.
-/// Mirrors the legacy KDE wallpaper plugin modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum AutopauseMode {
-    /// Never pause from window-state reports.
+pub enum AutoCondition {
     #[default]
-    Never,
-    /// Any mapped (non-minimized) window on this display.
-    Any,
-    /// Any maximized OR fullscreen window on this display.
-    Max,
-    /// Some window on this display has keyboard focus.
-    Focus,
-    /// `Focus` OR `Max`.
-    FocusOrMax,
-    /// Some window on this display is fullscreen.
-    FullScreen,
+    AnyWindow,
+    Focused,
+    Maximized,
+    Fullscreen,
+    SessionLocked,
+    SessionInactive,
 }
 
-/// Daemon-wide autopause defaults. Per-display overrides via
-/// `DisplayPrefs::{autopause_mode,autopause_resume_ms}`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct AutopauseDefaults {
-    pub mode: AutopauseMode,
-    /// Milliseconds without an autopause condition before resuming.
-    /// Smooths bursty fullscreen transitions.
-    pub resume_ms: u32,
-    /// Pause all renderers when the session's screen-saver/lock-screen
-    /// becomes active (`org.freedesktop.ScreenSaver.ActiveChanged`).
-    pub pause_on_lock: bool,
-    /// Pause all renderers when the current login session becomes
-    /// inactive, such as after a user switch.
-    pub pause_on_user_switch: bool,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoAction {
+    #[default]
+    None,
+    PauseAudio,
+    Pause,
+    Stop,
 }
 
-impl Default for AutopauseDefaults {
-    fn default() -> Self {
-        Self {
-            mode: AutopauseMode::Never,
-            resume_ms: 500,
-            pause_on_lock: true,
-            pause_on_user_switch: true,
+impl AutoAction {
+    pub fn priority(self) -> u8 {
+        match self {
+            AutoAction::None => 0,
+            AutoAction::PauseAudio => 1,
+            AutoAction::Pause => 2,
+            AutoAction::Stop => 3,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct AutomuteDefaults {
-    pub mode: AutopauseMode,
-    /// Milliseconds without an mute condition before resuming.
-    /// Smooths bursty fullscreen transitions.
-    pub resume_ms: u32,
-    /// Pause all renderers when the session's screen-saver/lock-screen
-    /// becomes active (`org.freedesktop.ScreenSaver.ActiveChanged`).
-    pub pause_on_lock: bool,
-    /// Pause all renderers when the current login session becomes
-    /// inactive, such as after a user switch.
-    pub pause_on_user_switch: bool,
-    pub fade_in_ms: u32,
-    pub fade_out_ms: u32,
+pub struct AutoReplayPolicy {
+    pub any_window: AutoAction,
+    pub focused: AutoAction,
+    pub maximized: AutoAction,
+    pub fullscreen: AutoAction,
+    pub session_locked: AutoAction,
+    pub session_inactive: AutoAction,
 }
 
-impl Default for AutomuteDefaults {
+impl Default for AutoReplayPolicy {
     fn default() -> Self {
         Self {
-            mode: AutopauseMode::Never,
-            resume_ms: 500,
-            pause_on_lock: true,
-            pause_on_user_switch: true,
-            fade_in_ms: 500,
-            fade_out_ms: 500,
+            any_window: AutoAction::None,
+            focused: AutoAction::None,
+            maximized: AutoAction::None,
+            fullscreen: AutoAction::Pause,
+            session_locked: AutoAction::Stop,
+            session_inactive: AutoAction::Stop,
         }
     }
 }
 
+impl AutoReplayPolicy {
+    pub fn action_for(self, condition: AutoCondition) -> AutoAction {
+        match condition {
+            AutoCondition::AnyWindow => self.any_window,
+            AutoCondition::Focused => self.focused,
+            AutoCondition::Maximized => self.maximized,
+            AutoCondition::Fullscreen => self.fullscreen,
+            AutoCondition::SessionLocked => self.session_locked,
+            AutoCondition::SessionInactive => self.session_inactive,
+        }
+    }
 
-/// Resolved autopause settings for a single display (per-display
-/// override falling through to the global default).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ResolvedAutopause {
-    pub mode: AutopauseMode,
-    pub resume_ms: u32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ResolvedAutomute {
-    pub mode: AutopauseMode,
-    pub resume_ms: u32,
-    pub fade_in_ms: u32,
-    pub fade_out_ms: u32,
+    pub fn set_action(&mut self, condition: AutoCondition, action: AutoAction) {
+        let slot = match condition {
+            AutoCondition::AnyWindow => &mut self.any_window,
+            AutoCondition::Focused => &mut self.focused,
+            AutoCondition::Maximized => &mut self.maximized,
+            AutoCondition::Fullscreen => &mut self.fullscreen,
+            AutoCondition::SessionLocked => &mut self.session_locked,
+            AutoCondition::SessionInactive => &mut self.session_inactive,
+        };
+        *slot = action;
+    }
 }
 
 /// Daemon-wide defaults consumed by `WallpaperApply` when a renderer
@@ -183,10 +160,12 @@ pub struct GlobalSettings {
     /// Default layout used when a display has no override.
     /// Drives daemon-side projection.
     pub layout: LayoutDefaults,
-    /// Daemon-wide autopause defaults. A display with no
-    /// `[displays.<name>] autopause_*` override inherits from here.
-    pub autopause: AutopauseDefaults,
-    pub automute: AutomuteDefaults,
+    #[serde(
+        default,
+        alias = "auto_actions",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub auto_replay: Option<AutoReplayPolicy>,
     /// Structured wallpaper-browser filter state.
     /// Kept typed in memory but serialized as a JSON string.
     #[serde(
@@ -225,8 +204,7 @@ impl Default for GlobalSettings {
             queue_mode: "sequential".to_string(),
             rotation_secs: 0,
             layout: LayoutDefaults::default(),
-            autopause: AutopauseDefaults::default(),
-            automute: AutomuteDefaults::default(),
+            auto_replay: None,
             wallpaper_filter: WallpaperFilterState::default(),
             wallpaper_sorts: Vec::new(),
             wallpaper_skip_types: Vec::new(),
@@ -238,6 +216,10 @@ impl Default for GlobalSettings {
 }
 
 impl GlobalSettings {
+    pub fn effective_auto_replay(&self) -> AutoReplayPolicy {
+        self.auto_replay.unwrap_or_default()
+    }
+
     /// Filter rules and logic for the queue.
     /// Quick skip toggles are folded into the rule list.
     pub fn wallpaper_queue_filter(
@@ -586,7 +568,9 @@ impl SettingsStore {
                     path.display()
                 );
                 seed_on_disk = true;
-                Settings::default()
+                let mut settings = Settings::default();
+                settings.global.auto_replay = Some(AutoReplayPolicy::default());
+                settings
             }
             Err(e) => {
                 log::warn!(
@@ -661,32 +645,19 @@ impl SettingsStore {
         }
     }
 
-    /// Autopause mode + resume debounce resolved against the
-    /// (per-display override → global default) cascade.
-    pub fn resolved_autopause(&self, display_name: &str) -> ResolvedAutopause {
+    pub fn resolved_auto_replay(&self, display_name: &str) -> AutoReplayPolicy {
         let g = self.inner.read().expect("settings poisoned");
-        let d = g.global.autopause;
-        let prefs = g.displays.get(display_name);
-        ResolvedAutopause {
-            mode: prefs.and_then(|p| p.autopause_mode).unwrap_or(d.mode),
-            resume_ms: prefs
-                .and_then(|p| p.autopause_resume_ms)
-                .unwrap_or(d.resume_ms),
+        if let Some(policy) = g
+            .displays
+            .get(display_name)
+            .and_then(|prefs| prefs.auto_replay)
+        {
+            return policy;
         }
-    }
-
-    pub fn resolved_automute(&self, display_name: &str) -> ResolvedAutomute {
-        let g = self.inner.read().expect("settings poisoned");
-        let d = g.global.automute;
-        let prefs = g.displays.get(display_name);
-        ResolvedAutomute {
-            mode: prefs.and_then(|p| p.automute_mode).unwrap_or(d.mode),
-            resume_ms: prefs
-                .and_then(|p| p.automute_resume_ms)
-                .unwrap_or(d.resume_ms),
-            fade_in_ms: prefs.and_then(|p| p.automute_fade_in_ms).unwrap_or(d.fade_in_ms),
-            fade_out_ms: prefs.and_then(|p| p.automute_fade_out_ms).unwrap_or(d.fade_out_ms),
+        if let Some(policy) = &g.global.auto_replay {
+            return *policy;
         }
+        AutoReplayPolicy::default()
     }
 
     /// Per-display wallpaper id with fallback to global `last_wallpaper`.
@@ -1015,6 +986,14 @@ fillmode = "preserve_aspect_fit"
         assert!(!p.is_empty());
         p.last_wallpaper = None;
         assert!(p.is_empty());
+    }
+
+    #[test]
+    fn auto_replay_default_actions() {
+        let policy = AutoReplayPolicy::default();
+        assert_eq!(policy.fullscreen, AutoAction::Pause);
+        assert_eq!(policy.session_locked, AutoAction::Stop);
+        assert_eq!(policy.session_inactive, AutoAction::Stop);
     }
 
     #[tokio::test]

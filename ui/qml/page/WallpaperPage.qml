@@ -290,15 +290,13 @@ MD.Page {
     // them on every settings echo would revert a just-applied toggle
     // whenever the round-trip lags.
     property bool _quickFiltersSeeded: false
+    property bool _filterStateSeeded: false
 
     W.SettingsGetQuery {
         id: filterSettingsGet
         onGlobalChanged: {
             // Restore sort first so the filter pipeline below doesn't
-            // dispatch a list reload with the stale sort: doQuery may
-            // route through wallpaperQuery.reload() synchronously when
-            // filter state already matches, and m_sorts must already
-            // be the persisted value at that point.
+            // dispatch a list reload with the stale sort.
             root.restoreSortFromSettings(global.wallpaperSorts || []);
             if (!root._quickFiltersSeeded) {
                 wallpaperQuery.skipTypes = global.wallpaperSkipTypes || [];
@@ -306,10 +304,13 @@ MD.Page {
                 wallpaperQuery.skipContentRatings = global.wallpaperSkipContentRatings || [];
                 root._quickFiltersSeeded = true;
             }
-            wallpaperFilterModel.replaceState(
-                        global.wallpaperFilters || [],
-                        global.wallpaperFilterLogics || []);
-            wallpaperFilterModel.doQuery();
+            const filters = global.wallpaperFilters || [];
+            const logics = global.wallpaperFilterLogics || [];
+            const filterStateChanged = wallpaperQuery.replaceFilterState(filters, logics);
+            if (filterStateChanged || !root._filterStateSeeded) {
+                wallpaperFilterModel.replaceState(filters, logics);
+                root._filterStateSeeded = true;
+            }
         }
     }
 

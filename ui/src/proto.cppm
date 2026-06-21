@@ -113,8 +113,7 @@ using proto::LibraryRemoved;
 using proto::LibraryRemoveRequest;
 using proto::LibrarySnapshot;
 
-using proto::AutopauseSettings;
-using proto::AutomuteSettings;
+using proto::AutoReplayPolicy;
 using proto::GlobalSettings;
 using proto::LayoutPrefs;
 using proto::PluginSettings;
@@ -123,7 +122,7 @@ using proto::SettingsGetRequest;
 using proto::SettingsGetResponse;
 using proto::SettingsSetRequest;
 using proto::AlignGadget::Align;
-using proto::AutopauseModeGadget::AutopauseMode;
+using proto::AutoActionGadget::AutoAction;
 using proto::FillModeGadget::FillMode;
 using proto::LayoutSourceGadget::LayoutSource;
 using proto::RotationGadget::Rotation;

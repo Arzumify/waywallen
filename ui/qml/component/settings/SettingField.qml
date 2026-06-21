@@ -45,6 +45,7 @@ ColumnLayout {
 
     readonly property bool isRenderNode: schema.key === "render_node"
     readonly property bool isResolution: schema.key === "resolution"
+    readonly property bool isFadeMs: schema.key === "fade_in_ms" || schema.key === "fade_out_ms"
 
     // Wire enum value → display label. Kept in sync with
     // <waywallen-bridge/resolution.h> WW_RESOLUTION_*.
@@ -67,7 +68,7 @@ ColumnLayout {
         // u32 falls back to a (dense) textfield when the range is too
         // wide to be useful on a slider.
         if (t === kU32)
-            return !(_hasNumericRange() && _intRangeFitsSlider());
+            return !(_hasNumericRange() && (_intRangeFitsSlider() || root.isFadeMs));
         return !_hasNumericRange();
     }
 

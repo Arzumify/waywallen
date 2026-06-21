@@ -929,7 +929,7 @@ message GlobalSettings {
   // `target_extent` + `render_size_policy` in v7. Both were dropped in
   // the post-extent refactor — render size is now a per-renderer
   // decision driven by the `resolution` plugin setting.
-  reserved 1, 2, 4, 5;
+  reserved 1, 2, 4, 5, 9, 10;
   reserved "default_width", "default_height", "target_extent", "render_size_policy";
   // Structured wallpaper-browser filter state. The daemon persists it
   // internally as JSON, but the control plane stays structured so the
@@ -947,14 +947,6 @@ message GlobalSettings {
   // per-display override. UI sends these as the "default for new
   // displays" preset.
   LayoutPrefs layout_defaults = 3;
-
-  // Daemon-wide autopause defaults. Per-display overrides live on
-  // the display record (not in this message).
-  AutopauseSettings autopause = 9;
-
-  // Daemon-wide automute defaults. Per-display overrides live on
-  // the display record (not in this message).
-  AutomuteSettings automute = 10;
 
   // Queue playback mode: "sequential" / "shuffle" / "random". Unknown
   // values are coerced back to "sequential" on the daemon side.
@@ -974,39 +966,26 @@ message GlobalSettings {
 
   // Content ratings hidden by the browser's quick toggles. Persisted.
   repeated string wallpaper_skip_content_ratings = 15;
+
+  // Canonical automatic replay policy.
+  AutoReplayPolicy auto_replay = 16;
 }
 
-// When to pause the wallpaper based on window state on the same
-// display. Mirrors the `AutopauseMode` Rust enum in `src/settings.rs`.
-enum AutopauseMode {
-  AUTOPAUSE_MODE_NEVER        = 0;
-  AUTOPAUSE_MODE_ANY          = 1;
-  AUTOPAUSE_MODE_MAX          = 2;
-  AUTOPAUSE_MODE_FOCUS        = 3;
-  AUTOPAUSE_MODE_FOCUS_OR_MAX = 4;
-  AUTOPAUSE_MODE_FULL_SCREEN  = 5;
+enum AutoAction {
+  AUTO_ACTION_NONE        = 0;
+  AUTO_ACTION_PAUSE_AUDIO = 1;
+  AUTO_ACTION_PAUSE       = 2;
+  AUTO_ACTION_STOP        = 3;
 }
 
-message AutopauseSettings {
-  AutopauseMode mode = 1;
-  // Milliseconds of "no autopause condition" required before resume.
-  uint32 resume_ms = 2;
-  // Pause when the session's lock screen becomes active.
-  bool pause_on_lock = 3;
-  // Pause when the current login session becomes inactive (user switch).
-  bool pause_on_user_switch = 4;
-}
-
-message AutomuteSettings {
-  AutopauseMode mode = 1;
-  // Milliseconds of "no autopause condition" required before resume.
-  uint32 resume_ms = 2;
-  // Pause when the session's lock screen becomes active.
-  bool pause_on_lock = 3;
-  // Pause when the current login session becomes inactive (user switch).
-  bool pause_on_user_switch = 4;
-  uint32 fade_in_ms = 5;
-  uint32 fade_out_ms = 6;
+message AutoReplayPolicy {
+  reserved 1, 2, 3;
+  AutoAction any_window = 10;
+  AutoAction focused = 11;
+  AutoAction maximized = 12;
+  AutoAction fullscreen = 13;
+  AutoAction session_locked = 14;
+  AutoAction session_inactive = 15;
 }
 
 // One plugin's settings table. Wire format is string→string for

@@ -17,7 +17,6 @@ namespace waywallen
 
 namespace
 {
-
 auto layout_to_map(const proto::LayoutPrefs& l) -> QVariantMap {
     QVariantMap m;
     m[u"fillmode"_s]    = static_cast<int>(l.fillmode());
@@ -40,42 +39,26 @@ auto map_to_layout(const QVariantMap& m) -> proto::LayoutPrefs {
     return l;
 }
 
-auto autopause_to_map(const proto::AutopauseSettings& a) -> QVariantMap {
+auto auto_replay_to_map(const proto::AutoReplayPolicy& p) -> QVariantMap {
     QVariantMap m;
-    m[u"mode"_s]              = static_cast<int>(a.mode());
-    m[u"resumeMs"_s]          = a.resumeMs();
-    m[u"pauseOnLock"_s]       = a.pauseOnLock();
-    m[u"pauseOnUserSwitch"_s] = a.pauseOnUserSwitch();
+    m[u"anyWindow"_s]       = static_cast<int>(p.anyWindow());
+    m[u"focused"_s]         = static_cast<int>(p.focused());
+    m[u"maximized"_s]       = static_cast<int>(p.maximized());
+    m[u"fullscreen"_s]      = static_cast<int>(p.fullscreen());
+    m[u"sessionLocked"_s]   = static_cast<int>(p.sessionLocked());
+    m[u"sessionInactive"_s] = static_cast<int>(p.sessionInactive());
     return m;
-}
-auto map_to_autopause(const QVariantMap& m) -> proto::AutopauseSettings {
-    proto::AutopauseSettings a;
-    a.setMode(static_cast<proto::AutopauseMode>(m.value(u"mode"_s).toInt()));
-    a.setResumeMs(m.value(u"resumeMs"_s).toUInt());
-    a.setPauseOnLock(m.value(u"pauseOnLock"_s, true).toBool());
-    a.setPauseOnUserSwitch(m.value(u"pauseOnUserSwitch"_s, true).toBool());
-    return a;
 }
 
-auto automute_to_map(const proto::AutomuteSettings& a) -> QVariantMap {
-    QVariantMap m;
-    m[u"mode"_s]              = static_cast<int>(a.mode());
-    m[u"resumeMs"_s]          = a.resumeMs();
-    m[u"fadeInMs"_s]          = a.fadeInMs();
-    m[u"fadeOutMs"_s]         = a.fadeOutMs();
-    m[u"pauseOnLock"_s]       = a.pauseOnLock();
-    m[u"pauseOnUserSwitch"_s] = a.pauseOnUserSwitch();
-    return m;
-}
-auto map_to_automute(const QVariantMap& m) -> proto::AutomuteSettings {
-    proto::AutomuteSettings a;
-    a.setMode(static_cast<proto::AutopauseMode>(m.value(u"mode"_s).toInt()));
-    a.setResumeMs(m.value(u"resumeMs"_s).toUInt());
-    a.setFadeInMs(m.value(u"fadeInMs"_s).toUInt());
-    a.setFadeOutMs(m.value(u"fadeOutMs"_s).toUInt());
-    a.setPauseOnLock(m.value(u"pauseOnLock"_s, true).toBool());
-    a.setPauseOnUserSwitch(m.value(u"pauseOnUserSwitch"_s, true).toBool());
-    return a;
+auto map_to_auto_replay(const QVariantMap& m) -> proto::AutoReplayPolicy {
+    proto::AutoReplayPolicy p;
+    p.setAnyWindow(static_cast<proto::AutoAction>(m.value(u"anyWindow"_s).toInt()));
+    p.setFocused(static_cast<proto::AutoAction>(m.value(u"focused"_s).toInt()));
+    p.setMaximized(static_cast<proto::AutoAction>(m.value(u"maximized"_s).toInt()));
+    p.setFullscreen(static_cast<proto::AutoAction>(m.value(u"fullscreen"_s).toInt()));
+    p.setSessionLocked(static_cast<proto::AutoAction>(m.value(u"sessionLocked"_s).toInt()));
+    p.setSessionInactive(static_cast<proto::AutoAction>(m.value(u"sessionInactive"_s).toInt()));
+    return p;
 }
 
 auto global_to_map(const proto::GlobalSettings& g) -> QVariantMap {
@@ -98,11 +81,8 @@ auto global_to_map(const proto::GlobalSettings& g) -> QVariantMap {
     if (g.hasLayoutDefaults()) {
         m[u"layoutDefaults"_s] = layout_to_map(g.layoutDefaults());
     }
-    if (g.hasAutopause()) {
-        m[u"autopause"_s] = autopause_to_map(g.autopause());
-    }
-    if (g.hasAutomute()) {
-        m[u"automute"_s] = automute_to_map(g.automute());
+    if (g.hasAutoReplay()) {
+        m[u"autoReplay"_s] = auto_replay_to_map(g.autoReplay());
     }
     m[u"queueMode"_s]    = g.queueMode();
     m[u"rotationSecs"_s] = g.rotationSecs();
@@ -160,11 +140,8 @@ auto map_to_global(const QVariantMap& m) -> proto::GlobalSettings {
     if (m.contains(u"layoutDefaults"_s)) {
         g.setLayoutDefaults(map_to_layout(m.value(u"layoutDefaults"_s).toMap()));
     }
-    if (m.contains(u"autopause"_s)) {
-        g.setAutopause(map_to_autopause(m.value(u"autopause"_s).toMap()));
-    }
-    if (m.contains(u"automute"_s)) {
-        g.setAutomute(map_to_automute(m.value(u"automute"_s).toMap()));
+    if (m.contains(u"autoReplay"_s)) {
+        g.setAutoReplay(map_to_auto_replay(m.value(u"autoReplay"_s).toMap()));
     }
     if (m.contains(u"queueMode"_s)) {
         g.setQueueMode(m.value(u"queueMode"_s).toString());
