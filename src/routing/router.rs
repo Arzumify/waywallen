@@ -1,8 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-
-use std::collections::HashSet;
 
 use tokio::sync::{broadcast, broadcast::error::RecvError, mpsc, Mutex as TokioMutex, Notify};
 use tokio::task::JoinHandle;
@@ -1887,63 +1885,111 @@ impl Router {
                     .get(&rid)
                     .map(|status| RendererStatus::Paused(*status))
                     .unwrap_or(RendererStatus::Playing);
-                let was_paused =
-                    previous_state == RendererStatus::Paused(PausedRendererStatus::Paused);
-                let was_muted =
-                    previous_state == RendererStatus::Paused(PausedRendererStatus::Muted);
-                if !should_pause && !should_mute && (was_paused || was_muted) {
-                    inner.renderer_states.remove(&rid);
-                    let cause = if has_active_link {
-                        "pause-clear"
-                    } else {
-                        "ref-count"
-                    };
-                    if was_paused {
-                        out.push((rid, ControlMsg::Play, cause));
-                    } else if was_muted {
+                let target_state = if should_pause {
+                    RendererStatus::Paused(PausedRendererStatus::Paused)
+                } else if should_mute {
+                    RendererStatus::Paused(PausedRendererStatus::Muted)
+                } else {
+                    RendererStatus::Playing
+                };
+                if previous_state == target_state {
+                    continue;
+                }
+                let clear_cause = if has_active_link {
+                    "pause-clear"
+                } else {
+                    "ref-count"
+                };
+                let pause_cause = if manual_paused {
+                    "manual"
+                } else if has_active_link {
+                    "auto-action"
+                } else {
+                    "ref-count"
+                };
+                let mute_cause = if manual_muted {
+                    "manual"
+                } else if has_active_link {
+                    "auto-action"
+                } else {
+                    "ref-count"
+                };
+                match (previous_state, target_state) {
+                    (
+                        RendererStatus::Playing,
+                        RendererStatus::Paused(PausedRendererStatus::Paused),
+                    ) => {
+                        inner
+                            .renderer_states
+                            .insert(rid.clone(), PausedRendererStatus::Paused);
+                        out.push((rid, ControlMsg::Pause, pause_cause));
+                    }
+                    (
+                        RendererStatus::Playing,
+                        RendererStatus::Paused(PausedRendererStatus::Muted),
+                    ) => {
+                        inner
+                            .renderer_states
+                            .insert(rid.clone(), PausedRendererStatus::Muted);
+                        out.push((
+                            rid,
+                            ControlMsg::Mute {
+                                fade_ms: audio_fade_ms,
+                            },
+                            mute_cause,
+                        ));
+                    }
+                    (
+                        RendererStatus::Paused(PausedRendererStatus::Paused),
+                        RendererStatus::Playing,
+                    ) => {
+                        inner.renderer_states.remove(&rid);
+                        out.push((rid, ControlMsg::Play, clear_cause));
+                    }
+                    (
+                        RendererStatus::Paused(PausedRendererStatus::Muted),
+                        RendererStatus::Playing,
+                    ) => {
+                        inner.renderer_states.remove(&rid);
                         out.push((
                             rid,
                             ControlMsg::Unmute {
                                 fade_ms: audio_fade_ms,
                             },
-                            cause,
+                            clear_cause,
                         ));
                     }
-                } else if should_pause && !was_paused {
-                    inner
-                        .renderer_states
-                        .insert(rid.clone(), PausedRendererStatus::Paused);
-                    let cause = if manual_paused {
-                        "manual"
-                    } else if has_active_link {
-                        "auto-action"
-                    } else {
-                        "ref-count"
-                    };
-                    out.push((rid, ControlMsg::Pause, cause));
-                } else if should_mute && !was_muted {
-                    inner
-                        .renderer_states
-                        .insert(rid.clone(), PausedRendererStatus::Muted);
-                    let cause = if manual_muted {
-                        "manual"
-                    } else if has_active_link {
-                        "auto-action"
-                    } else {
-                        "ref-count"
-                    };
-                    out.push((
-                        rid,
-                        ControlMsg::Mute {
-                            fade_ms: audio_fade_ms,
-                        },
-                        cause,
-                    ));
+                    (
+                        RendererStatus::Paused(PausedRendererStatus::Paused),
+                        RendererStatus::Paused(PausedRendererStatus::Muted),
+                    ) => {
+                        inner
+                            .renderer_states
+                            .insert(rid.clone(), PausedRendererStatus::Muted);
+                        out.push((rid.clone(), ControlMsg::Mute { fade_ms: 0 }, mute_cause));
+                        out.push((rid, ControlMsg::Play, "state-switch"));
+                    }
+                    (
+                        RendererStatus::Paused(PausedRendererStatus::Muted),
+                        RendererStatus::Paused(PausedRendererStatus::Paused),
+                    ) => {
+                        inner
+                            .renderer_states
+                            .insert(rid.clone(), PausedRendererStatus::Paused);
+                        out.push((rid.clone(), ControlMsg::Pause, pause_cause));
+                        out.push((rid, ControlMsg::Unmute { fade_ms: 0 }, "state-switch"));
+                    }
+                    _ => {}
                 }
             }
             out
         };
-        let changed_ids: Vec<RendererId> = actions.iter().map(|(id, _, _)| id.clone()).collect();
+        let mut changed_ids: Vec<RendererId> = Vec::new();
+        for (id, _, _) in &actions {
+            if !changed_ids.contains(id) {
+                changed_ids.push(id.clone());
+            }
+        }
         for (id, msg, cause) in actions {
             let label = match msg {
                 ControlMsg::Pause => "pause",
@@ -3010,6 +3056,27 @@ mod tests {
         out
     }
 
+    fn drain_renderer_controls(peer: &std::os::unix::net::UnixStream) {
+        peer.set_read_timeout(Some(Duration::from_millis(10)))
+            .unwrap();
+        loop {
+            match crate::ipc::uds::recv_control(peer) {
+                Ok(_) => {}
+                Err(crate::ipc::uds::CodecError::Io(e))
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break;
+                }
+                Err(crate::ipc::uds::CodecError::Nix(nix::errno::Errno::EAGAIN)) => break,
+                Err(e) => panic!("drain renderer control failed: {e}"),
+            }
+        }
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    }
+
     #[tokio::test]
     async fn relink_to_reused_renderer_replays_latest_frame() {
         let mgr = Arc::new(RendererManager::new_default());
@@ -3320,6 +3387,134 @@ mod tests {
 
         let got = reader.join().expect("reader joined");
         assert_eq!(got, vec![("mute", 750), ("unmute", 750)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auto_replay_pause_to_mute_restores_playback() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        let settings = settings_with_auto_replay(auto_replay(&[
+            (AutoCondition::Maximized, AutoAction::Pause),
+            (AutoCondition::Focused, AutoAction::Mute),
+        ]))
+        .await;
+        settings.update(|s| {
+            s.global.audio_fade_ms = 750;
+        });
+        router.attach_settings(settings);
+
+        let (r, peer) = RendererHandle::test_stub_with_peer("r1", "scene");
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        mgr.register_test_handle(r.clone()).await;
+        router.register_renderer(r.clone()).await;
+        let h = router.register_display(reg("HDMI-A-1", 1920, 1080)).await;
+        drain_renderer_controls(&peer);
+
+        let reader = std::thread::spawn(move || {
+            let mut got = Vec::new();
+            while got.len() < 4 {
+                let (msg, _fds) = crate::ipc::uds::recv_control(&peer).expect("recv control");
+                match msg {
+                    ControlMsg::Pause => got.push(("pause", 0)),
+                    ControlMsg::Play => got.push(("play", 0)),
+                    ControlMsg::Mute { fade_ms } => got.push(("mute", fade_ms)),
+                    ControlMsg::Unmute { fade_ms } => got.push(("unmute", fade_ms)),
+                    _ => {}
+                }
+            }
+            got
+        });
+
+        router
+            .update_display_window_state(h.id, ar::FLAG_NON_MINIMIZED | ar::FLAG_MAXIMIZED)
+            .await;
+        assert!(router.is_paused("r1").await);
+
+        router
+            .update_display_window_state(h.id, ar::FLAG_NON_MINIMIZED | ar::FLAG_ACTIVE)
+            .await;
+        assert!(router.is_muted("r1").await);
+
+        router
+            .update_display_window_state(h.id, ar::FLAG_NON_MINIMIZED)
+            .await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(AUTO_REPLAY_RESUME_DELAY + Duration::from_millis(50)).await;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(!router.is_paused("r1").await);
+        assert!(!router.is_muted("r1").await);
+        let got = reader.join().expect("reader joined");
+        assert_eq!(
+            got,
+            vec![("pause", 0), ("mute", 0), ("play", 0), ("unmute", 750)]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn auto_replay_mute_to_pause_clears_mute_before_resume() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr.clone());
+        let settings = settings_with_auto_replay(auto_replay(&[
+            (AutoCondition::Focused, AutoAction::Mute),
+            (AutoCondition::Maximized, AutoAction::Pause),
+        ]))
+        .await;
+        settings.update(|s| {
+            s.global.audio_fade_ms = 640;
+        });
+        router.attach_settings(settings);
+
+        let (r, peer) = RendererHandle::test_stub_with_peer("r1", "scene");
+        peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        mgr.register_test_handle(r.clone()).await;
+        router.register_renderer(r.clone()).await;
+        let h = router.register_display(reg("HDMI-A-1", 1920, 1080)).await;
+        drain_renderer_controls(&peer);
+
+        let reader = std::thread::spawn(move || {
+            let mut got = Vec::new();
+            while got.len() < 4 {
+                let (msg, _fds) = crate::ipc::uds::recv_control(&peer).expect("recv control");
+                match msg {
+                    ControlMsg::Pause => got.push(("pause", 0)),
+                    ControlMsg::Play => got.push(("play", 0)),
+                    ControlMsg::Mute { fade_ms } => got.push(("mute", fade_ms)),
+                    ControlMsg::Unmute { fade_ms } => got.push(("unmute", fade_ms)),
+                    _ => {}
+                }
+            }
+            got
+        });
+
+        router
+            .update_display_window_state(h.id, ar::FLAG_NON_MINIMIZED | ar::FLAG_ACTIVE)
+            .await;
+        assert!(router.is_muted("r1").await);
+
+        router
+            .update_display_window_state(h.id, ar::FLAG_NON_MINIMIZED | ar::FLAG_MAXIMIZED)
+            .await;
+        assert!(router.is_paused("r1").await);
+
+        router
+            .update_display_window_state(h.id, ar::FLAG_NON_MINIMIZED)
+            .await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(AUTO_REPLAY_RESUME_DELAY + Duration::from_millis(50)).await;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(!router.is_paused("r1").await);
+        assert!(!router.is_muted("r1").await);
+        let got = reader.join().expect("reader joined");
+        assert_eq!(
+            got,
+            vec![("mute", 640), ("pause", 0), ("unmute", 0), ("play", 0)]
+        );
     }
 
     #[tokio::test]
