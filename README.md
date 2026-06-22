@@ -40,6 +40,9 @@ It started life as a Wallpaper Engine plugin for KDE.
 | **Sway** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ❌ |
 | **COSMIC** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ❌ |
 
+## Known issue
+- Web wallpapers on nvidia gpu require to set `shared_texture_enabled` OFF in web renderer setting.
+
 ## Wallpaper plugins
 - image plugin
 - video plugin

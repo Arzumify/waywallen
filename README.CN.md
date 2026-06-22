@@ -40,6 +40,9 @@ Waywallen 是一个为 Linux 桌面打造的动态壁纸方案
 | **Sway** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ❌ |
 | **COSMIC** | [waywallen-display/layer_shell](https://github.com/waywallen/waywallen-display/tree/main/src/bin/layer_shell) | ✅ | ❌ |
 
+## Known issue
+- Nvidia gpu 运行网页壁纸需要在 web renderer 的设置中关闭 `shared_texture_enabled`.
+
 ## 壁纸插件
 - 图片插件
 - 视频插件
