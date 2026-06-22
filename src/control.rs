@@ -604,22 +604,38 @@ async fn restore_auto_stopped_display(app: &Arc<AppState>, display_id: DisplayId
 
 pub async fn pause_all(app: &Arc<AppState>) -> Result<()> {
     app.router.set_manual_pause(true).await;
+    crate::tray::dbusmenu::notify_menu_changed(app).await;
     Ok(())
 }
 
 pub async fn resume_all(app: &Arc<AppState>) -> Result<()> {
     app.router.set_manual_pause(false).await;
+    crate::tray::dbusmenu::notify_menu_changed(app).await;
     Ok(())
+}
+
+pub async fn toggle_pause_all(app: &Arc<AppState>) -> Result<bool> {
+    let paused = app.router.toggle_manual_pause().await;
+    crate::tray::dbusmenu::notify_menu_changed(app).await;
+    Ok(paused)
 }
 
 pub async fn mute_all(app: &Arc<AppState>) -> Result<()> {
     app.router.set_manual_mute(true).await;
+    crate::tray::dbusmenu::notify_menu_changed(app).await;
     Ok(())
 }
 
 pub async fn unmute_all(app: &Arc<AppState>) -> Result<()> {
     app.router.set_manual_mute(false).await;
+    crate::tray::dbusmenu::notify_menu_changed(app).await;
     Ok(())
+}
+
+pub async fn toggle_mute_all(app: &Arc<AppState>) -> Result<bool> {
+    let muted = app.router.toggle_manual_mute().await;
+    crate::tray::dbusmenu::notify_menu_changed(app).await;
+    Ok(muted)
 }
 
 pub async fn rescan(app: &Arc<AppState>) -> Result<usize> {

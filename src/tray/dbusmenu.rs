@@ -37,9 +37,7 @@ const ID_ROT_15M: i32 = 25;
 const ID_ROT_1H: i32 = 26;
 const ID_SEP_PL: i32 = 12;
 const ID_PAUSE: i32 = 5;
-const ID_RESUME: i32 = 6;
 const ID_MUTE: i32 = 27;
-const ID_UNMUTE: i32 = 28;
 const ID_SEP2: i32 = 7;
 const ID_RESCAN: i32 = 8;
 const ID_SEP3: i32 = 9;
@@ -159,23 +157,13 @@ impl DBusMenu {
                 }
             }
             ID_PAUSE => {
-                if let Err(e) = control::pause_all(&app).await {
-                    log::warn!("tray pause: {e}");
-                }
-            }
-            ID_RESUME => {
-                if let Err(e) = control::resume_all(&app).await {
-                    log::warn!("tray resume: {e}");
+                if let Err(e) = control::toggle_pause_all(&app).await {
+                    log::warn!("tray toggle pause: {e}");
                 }
             }
             ID_MUTE => {
-                if let Err(e) = control::mute_all(&app).await {
-                    log::warn!("tray mute: {e}");
-                }
-            }
-            ID_UNMUTE => {
-                if let Err(e) = control::unmute_all(&app).await {
-                    log::warn!("tray unmute: {e}");
+                if let Err(e) = control::toggle_mute_all(&app).await {
+                    log::warn!("tray toggle mute: {e}");
                 }
             }
             ID_RESCAN => {
@@ -262,15 +250,20 @@ impl DBusMenu {
 struct MenuState {
     is_shuffle: bool,
     rotation_secs: u32,
+    manual_paused: bool,
+    manual_muted: bool,
 }
 
 async fn snapshot_menu_state(app: &Arc<AppState>) -> MenuState {
     // Read from settings, the canonical source for persisted menu state.
     // Queue memory is kept in sync by control-plane updates.
     let g = app.settings.global();
+    let lifecycle = app.router.manual_lifecycle_state().await;
     MenuState {
         is_shuffle: g.queue_mode == "shuffle",
         rotation_secs: g.rotation_secs,
+        manual_paused: lifecycle.paused,
+        manual_muted: lifecycle.muted,
     }
 }
 
@@ -315,6 +308,14 @@ pub async fn notify_menu_changed(app: &Arc<AppState>) {
         );
         updates.push((id, p));
     }
+    updates.push((
+        ID_PAUSE,
+        menu_action_props(pause_action_label(menu.manual_paused), menu.manual_paused),
+    ));
+    updates.push((
+        ID_MUTE,
+        menu_action_props(mute_action_label(menu.manual_muted), menu.manual_muted),
+    ));
     let _ = DBusMenu::items_properties_updated(iface.signal_context(), updates, Vec::new()).await;
 
     // Bump the revision + emit LayoutUpdated as a fallback for hosts
@@ -335,11 +336,16 @@ fn build_root(menu: &MenuState) -> ItemStruct {
         item_to_value(make_checkmark(ID_SHUFFLE, "Shuffle", menu.is_shuffle)),
         item_to_value(make_submenu_parent(ID_ROTATE, "Rotate")),
         item_to_value(make_leaf(ID_SEP_PL, "", Some("separator"))),
-        item_to_value(make_leaf(ID_PAUSE, "Pause", None)),
-        item_to_value(make_leaf(ID_RESUME, "Resume", None)),
-        item_to_value(make_leaf(ID_SEP2, "", Some("separator"))),
-        item_to_value(make_leaf(ID_MUTE, "Mute", None)),
-        item_to_value(make_leaf(ID_UNMUTE, "Unmute", None)),
+        item_to_value(make_checkmark(
+            ID_PAUSE,
+            pause_action_label(menu.manual_paused),
+            menu.manual_paused,
+        )),
+        item_to_value(make_checkmark(
+            ID_MUTE,
+            mute_action_label(menu.manual_muted),
+            menu.manual_muted,
+        )),
         item_to_value(make_leaf(ID_SEP2, "", Some("separator"))),
         item_to_value(make_leaf(ID_RESCAN, "Rescan wallpapers", None)),
         item_to_value(make_leaf(ID_SEP3, "", Some("separator"))),
@@ -430,6 +436,39 @@ fn make_radio(id: i32, label: &str, on: bool) -> ItemStruct {
     item
 }
 
+fn pause_action_label(paused: bool) -> &'static str {
+    if paused {
+        "Resume"
+    } else {
+        "Pause"
+    }
+}
+
+fn mute_action_label(muted: bool) -> &'static str {
+    if muted {
+        "Unmute"
+    } else {
+        "Mute"
+    }
+}
+
+fn menu_action_props(label: &str, on: bool) -> HashMap<String, OwnedValue> {
+    let mut p = HashMap::new();
+    p.insert(
+        "label".into(),
+        OwnedValue::try_from(Value::from(label)).unwrap(),
+    );
+    p.insert(
+        "toggle-type".into(),
+        OwnedValue::try_from(Value::from("checkmark")).unwrap(),
+    );
+    p.insert(
+        "toggle-state".into(),
+        OwnedValue::try_from(Value::from(if on { 1i32 } else { 0i32 })).unwrap(),
+    );
+    p
+}
+
 fn make_submenu_parent(id: i32, label: &str) -> ItemStruct {
     let mut item = make_leaf(id, label, None);
     item.1.insert(
@@ -455,10 +494,17 @@ fn props_for(id: i32, menu: &MenuState) -> Option<HashMap<String, OwnedValue>> {
                 .find(|(rid, _, _)| *rid == id)?;
             Some(make_radio(id, label, menu.rotation_secs == secs).1)
         }
-        ID_PAUSE => Some(make_leaf(id, "Pause", None).1),
-        ID_RESUME => Some(make_leaf(id, "Resume", None).1),
-        ID_MUTE => Some(make_leaf(id, "Mute", None).1),
-        ID_UNMUTE => Some(make_leaf(id, "Unmute", None).1),
+        ID_PAUSE => Some(
+            make_checkmark(
+                id,
+                pause_action_label(menu.manual_paused),
+                menu.manual_paused,
+            )
+            .1,
+        ),
+        ID_MUTE => {
+            Some(make_checkmark(id, mute_action_label(menu.manual_muted), menu.manual_muted).1)
+        }
         ID_RESCAN => Some(make_leaf(id, "Rescan wallpapers", None).1),
         ID_QUIT => Some(make_leaf(id, "Quit", None).1),
         _ => None,
@@ -486,16 +532,10 @@ async fn dispatch_click(app: &Arc<AppState>, id: i32) -> zbus::fdo::Result<()> {
             let _ = control::step(app, -1).await;
         }
         ID_PAUSE => {
-            let _ = control::pause_all(app).await;
-        }
-        ID_RESUME => {
-            let _ = control::resume_all(app).await;
+            let _ = control::toggle_pause_all(app).await;
         }
         ID_MUTE => {
-            let _ = control::mute_all(app).await;
-        }
-        ID_UNMUTE => {
-            let _ = control::mute_all(app).await;
+            let _ = control::toggle_mute_all(app).await;
         }
         ID_RESCAN => {
             let _ = control::rescan(app).await;

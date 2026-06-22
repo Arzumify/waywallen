@@ -135,6 +135,12 @@ pub enum PausedRendererStatus {
     Paused,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ManualLifecycleState {
+    pub paused: bool,
+    pub muted: bool,
+}
+
 /// Lifecycle state of a renderer as seen by the router.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RendererStatus {
@@ -1161,6 +1167,16 @@ impl Router {
         }
     }
 
+    pub async fn toggle_manual_pause(self: &Arc<Self>) -> bool {
+        let paused = {
+            let mut inner = self.inner.lock().await;
+            inner.manual_paused = !inner.manual_paused;
+            inner.manual_paused
+        };
+        self.reconcile_lifecycle().await;
+        paused
+    }
+
     pub async fn set_manual_mute(self: &Arc<Self>, muted: bool) {
         let changed = {
             let mut inner = self.inner.lock().await;
@@ -1173,6 +1189,24 @@ impl Router {
         };
         if changed {
             self.reconcile_lifecycle().await;
+        }
+    }
+
+    pub async fn toggle_manual_mute(self: &Arc<Self>) -> bool {
+        let muted = {
+            let mut inner = self.inner.lock().await;
+            inner.manual_muted = !inner.manual_muted;
+            inner.manual_muted
+        };
+        self.reconcile_lifecycle().await;
+        muted
+    }
+
+    pub async fn manual_lifecycle_state(self: &Arc<Self>) -> ManualLifecycleState {
+        let inner = self.inner.lock().await;
+        ManualLifecycleState {
+            paused: inner.manual_paused,
+            muted: inner.manual_muted,
         }
     }
 
@@ -3197,6 +3231,38 @@ mod tests {
         assert!(router.is_paused("r1").await);
         router.set_manual_pause(false).await;
         assert!(!router.is_paused("r1").await);
+    }
+
+    #[tokio::test]
+    async fn manual_lifecycle_state_tracks_toggles() {
+        let mgr = Arc::new(RendererManager::new_default());
+        let router = Router::new(mgr);
+
+        assert_eq!(
+            router.manual_lifecycle_state().await,
+            ManualLifecycleState {
+                paused: false,
+                muted: false,
+            }
+        );
+        assert!(router.toggle_manual_pause().await);
+        assert!(router.toggle_manual_mute().await);
+        assert_eq!(
+            router.manual_lifecycle_state().await,
+            ManualLifecycleState {
+                paused: true,
+                muted: true,
+            }
+        );
+        assert!(!router.toggle_manual_pause().await);
+        assert!(!router.toggle_manual_mute().await);
+        assert_eq!(
+            router.manual_lifecycle_state().await,
+            ManualLifecycleState {
+                paused: false,
+                muted: false,
+            }
+        );
     }
 
     #[tokio::test]
