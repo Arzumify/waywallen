@@ -33,7 +33,7 @@ export class WallpaperListQuery
         QStringList filterTags READ filterTags WRITE setFilterTags NOTIFY filterTagsChanged FINAL)
     Q_PROPERTY(QStringList skipContentRatings READ skipContentRatings WRITE setSkipContentRatings
                    NOTIFY skipContentRatingsChanged FINAL)
-    Q_PROPERTY(bool hasActiveFilters READ hasActiveFilters NOTIFY filtersChanged FINAL)
+    Q_PROPERTY(bool hasActiveFilters READ hasActiveFilters NOTIFY hasActiveFiltersChanged FINAL)
     Q_PROPERTY(qint32 total READ total NOTIFY totalChanged FINAL)
 
 public:
@@ -81,6 +81,7 @@ public:
     Q_SIGNAL void skipTypesChanged();
     Q_SIGNAL void filterTagsChanged();
     Q_SIGNAL void skipContentRatingsChanged();
+    Q_SIGNAL void hasActiveFiltersChanged();
     Q_SIGNAL void totalChanged();
 
 private:

@@ -49,10 +49,12 @@ auto WallpaperListQuery::filters() const -> const QList<control::v1::WallpaperFi
 
 void WallpaperListQuery::setFilters(const QList<control::v1::WallpaperFilterRule>& v) {
     if (m_filters == v) return;
+    const bool had_active = hasActiveFilters();
     m_filters = v;
     setOffset(0);
     Q_EMIT filtersChanged();
     Q_EMIT filterStateChanged();
+    if (had_active != hasActiveFilters()) Q_EMIT hasActiveFiltersChanged();
 }
 
 auto WallpaperListQuery::filterLogics() const -> const QList<control::v1::FilterLogic>& {
@@ -73,12 +75,14 @@ bool WallpaperListQuery::replaceFilterState(const QList<control::v1::WallpaperFi
     const bool logics_changed  = m_filter_logics != logics;
     if (! filters_changed && ! logics_changed) return false;
 
+    const bool had_active = hasActiveFilters();
     m_filters       = filters;
     m_filter_logics = logics;
     setOffset(0);
     if (filters_changed) Q_EMIT filtersChanged();
     if (logics_changed) Q_EMIT filterLogicsChanged();
     Q_EMIT filterStateChanged();
+    if (had_active != hasActiveFilters()) Q_EMIT hasActiveFiltersChanged();
     return true;
 }
 
@@ -106,18 +110,22 @@ auto WallpaperListQuery::skipTypes() const -> const QStringList& { return m_skip
 
 void WallpaperListQuery::setSkipTypes(const QStringList& v) {
     if (m_skip_types == v) return;
+    const bool had_active = hasActiveFilters();
     m_skip_types = v;
     setOffset(0);
     Q_EMIT skipTypesChanged();
+    if (had_active != hasActiveFilters()) Q_EMIT hasActiveFiltersChanged();
 }
 
 auto WallpaperListQuery::filterTags() const -> const QStringList& { return m_filter_tags; }
 
 void WallpaperListQuery::setFilterTags(const QStringList& v) {
     if (m_filter_tags == v) return;
+    const bool had_active = hasActiveFilters();
     m_filter_tags = v;
     setOffset(0);
     Q_EMIT filterTagsChanged();
+    if (had_active != hasActiveFilters()) Q_EMIT hasActiveFiltersChanged();
 }
 
 auto WallpaperListQuery::skipContentRatings() const -> const QStringList& {
@@ -126,12 +134,17 @@ auto WallpaperListQuery::skipContentRatings() const -> const QStringList& {
 
 void WallpaperListQuery::setSkipContentRatings(const QStringList& v) {
     if (m_skip_content_ratings == v) return;
+    const bool had_active = hasActiveFilters();
     m_skip_content_ratings = v;
     setOffset(0);
     Q_EMIT skipContentRatingsChanged();
+    if (had_active != hasActiveFilters()) Q_EMIT hasActiveFiltersChanged();
 }
 
-auto WallpaperListQuery::hasActiveFilters() const -> bool { return ! m_filters.isEmpty(); }
+auto WallpaperListQuery::hasActiveFilters() const -> bool {
+    return ! m_filters.isEmpty() || ! m_skip_types.isEmpty() || ! m_filter_tags.isEmpty() ||
+           ! m_skip_content_ratings.isEmpty();
+}
 
 auto WallpaperListQuery::total() const -> qint32 { return m_total; }
 

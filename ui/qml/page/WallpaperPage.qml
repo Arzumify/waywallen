@@ -18,20 +18,13 @@ MD.Page {
     W.WallpaperSelectStorage {
         id: userWallpaperSelect
         model: wallpaperQuery.data
-        property list<MD.Action> actions: [
-            createPlaylistFromSelectionAction,
-            addToPlaylistAction
-        ]
+        property list<MD.Action> actions: [createPlaylistFromSelectionAction, addToPlaylistAction]
     }
 
     W.WallpaperSelectStorage {
         id: playlistWallpaperSelect
         model: wallpaperQuery.data
-        property list<MD.Action> actions: [
-            applyPlaylistSelectionAction,
-            createPlaylistFromSelectionAction,
-            addToPlaylistAction
-        ]
+        property list<MD.Action> actions: [applyPlaylistSelectionAction, createPlaylistFromSelectionAction, addToPlaylistAction]
     }
 
     W.WallpaperScanQuery {
@@ -68,9 +61,7 @@ MD.Page {
                 W.Action.toast(qsTr("Playlist update failed"));
                 return;
             }
-            root.playlistMutationPendingMessage = root.playlistMutationSuccessMessage.length > 0
-                ? root.playlistMutationSuccessMessage
-                : qsTr("Playlist updated");
+            root.playlistMutationPendingMessage = root.playlistMutationSuccessMessage.length > 0 ? root.playlistMutationSuccessMessage : qsTr("Playlist updated");
             root.playlistMutationSuccessMessage = "";
             playlistMutationCleanupTimer.restart();
         }
@@ -134,8 +125,8 @@ MD.Page {
         property Component defaultComponent: null
         readonly property Component currentComponent: activeComponent ? activeComponent : defaultComponent
 
-        signal newPlaylistRequested()
-        signal addToPlaylistRequested()
+        signal newPlaylistRequested
+        signal addToPlaylistRequested
 
         function reset() {
             activeAction = null;
@@ -220,9 +211,7 @@ MD.Page {
         text: "Add to playlist"
         icon.name: MD.Token.icon.playlist_add
         checked: wallpaperSelectSheetRelay.activeAction === addToPlaylistAction
-        enabled: root.selectedWallpaperCount > 0
-              && (playlistListQuery.playlists || []).length > 0
-              && !playlistMutation.querying
+        enabled: root.selectedWallpaperCount > 0 && (playlistListQuery.playlists || []).length > 0 && !playlistMutation.querying
         onTriggered: wallpaperSelectSheetRelay.requestAddToPlaylist()
     }
 
@@ -231,8 +220,7 @@ MD.Page {
         text: "Apply"
         icon.name: MD.Token.icon.check
         busy: playlistMutation.querying
-        enabled: playlistWallpaperSelect.playlistEditTargetId > 0
-              && !playlistMutation.querying
+        enabled: playlistWallpaperSelect.playlistEditTargetId > 0 && !playlistMutation.querying
         onTriggered: root.applyPlaylistSelection()
     }
 
@@ -318,21 +306,6 @@ MD.Page {
         id: filterSettingsSet
     }
 
-    // QAbstractItemModel doesn't auto-expose `count` as a Q_PROPERTY —
-    // mirror it here so visibility bindings re-evaluate on row changes.
-    property int filterRuleCount: 0
-    function _recomputeFilterRuleCount() {
-        root.filterRuleCount = wallpaperFilterModel.rowCount();
-    }
-
-    Connections {
-        target: wallpaperFilterModel
-        function onRowsInserted()   { root._recomputeFilterRuleCount(); }
-        function onRowsRemoved()    { root._recomputeFilterRuleCount(); }
-        function onModelReset()     { root._recomputeFilterRuleCount(); }
-        function onLayoutChanged()  { root._recomputeFilterRuleCount(); }
-    }
-
     W.WallpaperFilterRuleModel {
         id: wallpaperFilterModel
 
@@ -350,9 +323,7 @@ MD.Page {
         }
 
         onReset: {
-            replaceState(
-                        filterSettingsGet.global.wallpaperFilters || [],
-                        filterSettingsGet.global.wallpaperFilterLogics || []);
+            replaceState(filterSettingsGet.global.wallpaperFilters || [], filterSettingsGet.global.wallpaperFilterLogics || []);
             doQuery();
         }
     }
@@ -374,12 +345,16 @@ MD.Page {
                 else
                     next.push(ty);
                 wallpaperQuery.skipTypes = next;
-                root._persistGlobalChange(g => { g.wallpaperSkipTypes = next; });
+                root._persistGlobalChange(g => {
+                    g.wallpaperSkipTypes = next;
+                });
             }
             filterTags: wallpaperQuery.filterTags
             onApplyFilterTags: function (tags) {
                 wallpaperQuery.filterTags = tags;
-                root._persistGlobalChange(g => { g.wallpaperFilterTags = tags; });
+                root._persistGlobalChange(g => {
+                    g.wallpaperFilterTags = tags;
+                });
             }
             skipContentRatings: wallpaperQuery.skipContentRatings
             onToggleSkipRating: function (rating) {
@@ -390,7 +365,9 @@ MD.Page {
                 else
                     next.push(rating);
                 wallpaperQuery.skipContentRatings = next;
-                root._persistGlobalChange(g => { g.wallpaperSkipContentRatings = next; });
+                root._persistGlobalChange(g => {
+                    g.wallpaperSkipContentRatings = next;
+                });
             }
         }
     }
@@ -403,9 +380,18 @@ MD.Page {
     }
 
     readonly property var sortOptions: [
-        { name: qsTr("Name"),          key: WC.WallpaperSortKey.WALLPAPER_SORT_KEY_NAME },
-        { name: qsTr("Size"),          key: WC.WallpaperSortKey.WALLPAPER_SORT_KEY_SIZE },
-        { name: qsTr("Last modified"), key: WC.WallpaperSortKey.WALLPAPER_SORT_KEY_LAST_MODIFIED }
+        {
+            name: qsTr("Name"),
+            key: WC.WallpaperSortKey.WALLPAPER_SORT_KEY_NAME
+        },
+        {
+            name: qsTr("Size"),
+            key: WC.WallpaperSortKey.WALLPAPER_SORT_KEY_SIZE
+        },
+        {
+            name: qsTr("Last modified"),
+            key: WC.WallpaperSortKey.WALLPAPER_SORT_KEY_LAST_MODIFIED
+        }
     ]
     property int sortIndex: 0
     property bool sortAsc: true
@@ -413,16 +399,21 @@ MD.Page {
 
     Connections {
         target: wallpaperTweakState
-        function onItemSizeChanged() { root.forceWallpaperGridLayout(); }
-        function onItemAspectRatioChanged() { root.forceWallpaperGridLayout(); }
-        function onLayoutModeChanged() { root.forceWallpaperGridLayout(); }
+        function onItemSizeChanged() {
+            root.forceWallpaperGridLayout();
+        }
+        function onItemAspectRatioChanged() {
+            root.forceWallpaperGridLayout();
+        }
+        function onLayoutModeChanged() {
+            root.forceWallpaperGridLayout();
+        }
     }
 
     function _buildSortRule() {
         const rule = emptySortRule;
         rule.key = sortOptions[sortIndex].key;
-        rule.direction = sortAsc ? WC.SortDirection.SORT_DIRECTION_ASC
-                                 : WC.SortDirection.SORT_DIRECTION_DESC;
+        rule.direction = sortAsc ? WC.SortDirection.SORT_DIRECTION_ASC : WC.SortDirection.SORT_DIRECTION_DESC;
         return rule;
     }
     function applySort() {
@@ -450,7 +441,9 @@ MD.Page {
             sortIndex = idx;
         }
         applySort();
-        _persistGlobalChange(g => { g.wallpaperSorts = [_buildSortRule()]; });
+        _persistGlobalChange(g => {
+            g.wallpaperSorts = [_buildSortRule()];
+        });
     }
     function restoreSortFromSettings(rules) {
         if (!rules || rules.length === 0) {
@@ -461,7 +454,8 @@ MD.Page {
         }
         const r = rules[0];
         const idx = sortOptions.findIndex(o => o.key === r.key);
-        if (idx >= 0) sortIndex = idx;
+        if (idx >= 0)
+            sortIndex = idx;
         sortAsc = r.direction !== WC.SortDirection.SORT_DIRECTION_DESC;
         applySort();
     }
@@ -477,15 +471,9 @@ MD.Page {
     property var wallpaperTweakSheet: null
     property var playlistListSheet: null
     readonly property int selectionSheetReserve: wallpaperSelectSheetRelay.currentComponent ? 360 : 160
-    readonly property int selectedWallpaperCount: root.currentWallpaperSelect
-        ? root.currentWallpaperSelect.selectedCount
-        : 0
-    readonly property bool selectionActive: root.currentWallpaperSelect
-        ? root.currentWallpaperSelect.active
-        : false
-    readonly property bool selectionActionSheetActive: root.selectionActive
-        && root.currentWallpaperSelect
-        && (root.currentWallpaperSelect.actions || []).length > 0
+    readonly property int selectedWallpaperCount: root.currentWallpaperSelect ? root.currentWallpaperSelect.selectedCount : 0
+    readonly property bool selectionActive: root.currentWallpaperSelect ? root.currentWallpaperSelect.active : false
+    readonly property bool selectionActionSheetActive: root.selectionActive && root.currentWallpaperSelect && (root.currentWallpaperSelect.actions || []).length > 0
 
     onSelectionActiveChanged: {
         if (selectionActive) {
@@ -533,7 +521,7 @@ MD.Page {
     function destroyWallpaperSelectSheet(sheet) {
         const target = sheet || root.wallpaperSelectSheet;
         root.releaseWallpaperSelectSheet(target);
-        Qt.callLater(function() {
+        Qt.callLater(function () {
             target.destroy();
         });
     }
@@ -582,8 +570,7 @@ MD.Page {
             return;
         }
 
-        if (root.wallpaperSelectSheet
-                && (root.wallpaperSelectSheet.opened || root.wallpaperSelectSheet.entering)) {
+        if (root.wallpaperSelectSheet && (root.wallpaperSelectSheet.opened || root.wallpaperSelectSheet.entering)) {
             root.wallpaperSelectSheet.close();
             return;
         }
@@ -606,10 +593,7 @@ MD.Page {
     }
 
     function configureWallpaperSelectSheetDefault() {
-        wallpaperSelectSheetRelay.defaultComponent =
-            root.currentWallpaperSelect === playlistWallpaperSelect
-                ? playlistSelectDetailComponent
-                : null;
+        wallpaperSelectSheetRelay.defaultComponent = root.currentWallpaperSelect === playlistWallpaperSelect ? playlistSelectDetailComponent : null;
     }
 
     function enterWallpaperSelect(storage) {
@@ -620,9 +604,7 @@ MD.Page {
     }
 
     function interactionWallpaperSelect() {
-        return root.currentWallpaperSelect && root.currentWallpaperSelect.active
-            ? root.currentWallpaperSelect
-            : userWallpaperSelect;
+        return root.currentWallpaperSelect && root.currentWallpaperSelect.active ? root.currentWallpaperSelect : userWallpaperSelect;
     }
 
     function beginWallpaperSelection(index) {
@@ -648,9 +630,7 @@ MD.Page {
     }
 
     function selectedWallpaperIds() {
-        return root.currentWallpaperSelect
-            ? root.currentWallpaperSelect.selectedWallpaperIds()
-            : [];
+        return root.currentWallpaperSelect ? root.currentWallpaperSelect.selectedWallpaperIds() : [];
     }
 
     property var playlistPlayDisplayId: null
@@ -728,8 +708,7 @@ MD.Page {
         const displayKey = String(displayId);
         const statuses = root.playlistPlayDisplays || [];
         for (let i = 0; i < statuses.length; ++i) {
-            if (String(statuses[i].id) === displayKey
-                    && String(statuses[i].activePlaylistId) === playlistId)
+            if (String(statuses[i].id) === displayKey && String(statuses[i].activePlaylistId) === playlistId)
                 return true;
         }
         return false;
@@ -809,9 +788,7 @@ MD.Page {
         if ((modifiers & Qt.ShiftModifier) !== 0) {
             const select = root.interactionWallpaperSelect();
             root.enterWallpaperSelect(select);
-            const anchor = select.anchorIndex >= 0
-                ? select.anchorIndex
-                : (m_grid_view.currentIndex >= 0 ? m_grid_view.currentIndex : index);
+            const anchor = select.anchorIndex >= 0 ? select.anchorIndex : (m_grid_view.currentIndex >= 0 ? m_grid_view.currentIndex : index);
             select.selectRange(anchor, index, true);
             select.selectionMode = true;
             select.anchorIndex = anchor;
@@ -907,8 +884,7 @@ MD.Page {
                     MD.EmbedChip {
                         id: sortChip
                         text: root.sortOptions[root.sortIndex].name
-                        trailingIconName: root.sortAsc ? MD.Token.icon.arrow_downward
-                                                       : MD.Token.icon.arrow_upward
+                        trailingIconName: root.sortAsc ? MD.Token.icon.arrow_downward : MD.Token.icon.arrow_upward
                         mdState.borderWidth: 1
                         onClicked: sortMenu.open()
 
@@ -921,10 +897,7 @@ MD.Page {
                                 required property var modelData
                                 required property int index
                                 text: modelData.name
-                                icon.name: index === root.sortIndex
-                                    ? (root.sortAsc ? MD.Token.icon.arrow_downward
-                                                    : MD.Token.icon.arrow_upward)
-                                    : ' '
+                                icon.name: index === root.sortIndex ? (root.sortAsc ? MD.Token.icon.arrow_downward : MD.Token.icon.arrow_upward) : ' '
                                 onClicked: {
                                     root.pickSort(index);
                                     sortMenu.close();
@@ -948,13 +921,7 @@ MD.Page {
                     MD.ActionToolBar {
                         id: wallpaperActionToolBar
                         Layout.fillWidth: true
-                        actions: [
-                            playlistListAction,
-                            tweakAction,
-                            filterAction,
-                            sourcesAction,
-                            refreshAction
-                        ]
+                        actions: [playlistListAction, tweakAction, filterAction, sourcesAction, refreshAction]
                     }
                 }
 
@@ -994,19 +961,12 @@ MD.Page {
                         rightMargin: 8
                         visible: m_grid_view.count > 0
 
-                        readonly property real _availableWidth:
-                            Math.max(0, width - leftMargin - rightMargin)
-                        readonly property int _cols:
-                            Math.max(1, Math.floor(_availableWidth / wallpaperTweakState.itemSize))
-                        readonly property real _stretchedItemWidth:
-                            _availableWidth / _cols
-                        readonly property bool _fillCell:
-                            wallpaperTweakState.layoutMode === wallpaperTweakState.layoutFillCell
-                        readonly property real _displayItemWidth: _fillCell
-                            ? _stretchedItemWidth
-                            : Math.min(wallpaperTweakState.itemSize, _stretchedItemWidth)
-                        readonly property real _displayItemHeight: _displayItemWidth
-                            / Math.max(wallpaperTweakState.itemAspectRatio, 0.1)
+                        readonly property real _availableWidth: Math.max(0, width - leftMargin - rightMargin)
+                        readonly property int _cols: Math.max(1, Math.floor(_availableWidth / wallpaperTweakState.itemSize))
+                        readonly property real _stretchedItemWidth: _availableWidth / _cols
+                        readonly property bool _fillCell: wallpaperTweakState.layoutMode === wallpaperTweakState.layoutFillCell
+                        readonly property real _displayItemWidth: _fillCell ? _stretchedItemWidth : Math.min(wallpaperTweakState.itemSize, _stretchedItemWidth)
+                        readonly property real _displayItemHeight: _displayItemWidth / Math.max(wallpaperTweakState.itemAspectRatio, 0.1)
                         cellWidth: _stretchedItemWidth
                         cellHeight: _fillCell ? _displayItemHeight : wallpaperTweakState.itemHeight
 
@@ -1062,51 +1022,47 @@ MD.Page {
                         onClicked: root.clearWallpaperSelection()
                     }
 
-                    ColumnLayout {
+                    MD.Loader {
                         anchors.centerIn: parent
-                        spacing: 16
-                        // Wait for the initial list query to settle before
-                        // committing to the empty state — otherwise a
-                        // brand-new user (empty DB, no libraries) sees a
-                        // BusyIndicator flash from the in-flight fetch
-                        // even though the daemon isn't scanning anything.
-                        visible: m_grid_view.count === 0
+                        active: m_grid_view.count === 0
+                        sourceComponent: m_load_comp
+                    }
 
-                        // Daemon-side scan activity only. The list-fetch
-                        // round-trip is a different concern and is gated
-                        // by `visible` above.
-                        readonly property bool scanning: W.Notify.scanInProgress
+                    Component {
+                        id: m_load_comp
 
-                        MD.BusyIndicator {
-                            Layout.alignment: Qt.AlignHCenter
-                            visible: parent.scanning
-                            running: visible
-                        }
+                        ColumnLayout {
+                            spacing: 16
 
-                        MD.Text {
-                            Layout.alignment: Qt.AlignHCenter
-                            visible: !parent.scanning
-                            text: "No wallpapers found"
-                            typescale: MD.Token.typescale.body_large
-                            color: MD.Token.color.on_surface_variant
-                        }
+                            MD.BusyIndicator {
+                                Layout.alignment: Qt.AlignHCenter
+                                running: wallpaperQuery.querying
+                            }
 
-                        MD.BusyButton {
-                            Layout.alignment: Qt.AlignHCenter
-                            // Only offer auto-detect when the empty grid is
-                            // genuinely "fresh user, nothing configured" —
-                            // not when filters are excluding existing rows
-                            // and not when libraries are already registered
-                            // (in that case the user wants Refresh, not a
-                            // second round of auto-detection).
-                            visible: !parent.scanning
-                                  && root.filterRuleCount === 0
-                                  && W.App.libraryManager.count === 0
-                            text: "Auto detect libraries"
-                            busy: autoDetectQuery.querying
-                            mdState.type: MD.Enum.BtFilledTonal
-                            onClicked: {
-                                if (!busy) autoDetectQuery.reload();
+                            MD.Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                visible: !wallpaperQuery.querying
+                                text: "No wallpapers found"
+                                typescale: MD.Token.typescale.body_large
+                                color: MD.Token.color.on_surface_variant
+                            }
+
+                            MD.BusyButton {
+                                Layout.alignment: Qt.AlignHCenter
+                                // Only offer auto-detect when the empty grid is
+                                // genuinely "fresh user, nothing configured" —
+                                // not when filters are excluding existing rows
+                                // and not when libraries are already registered
+                                // (in that case the user wants Refresh, not a
+                                // second round of auto-detection).
+                                visible: !wallpaperQuery.querying && !wallpaperQuery.hasActiveFilters && wallpaperQuery.searchText.trim().length === 0 && W.App.libraryManager.count === 0
+                                text: "Auto detect libraries"
+                                busy: autoDetectQuery.querying
+                                mdState.type: MD.Enum.BtFilledTonal
+                                onClicked: {
+                                    if (!busy)
+                                        autoDetectQuery.reload();
+                                }
                             }
                         }
                     }
@@ -1140,7 +1096,9 @@ MD.Page {
             popupParent: root
             relay: wallpaperSelectSheetRelay
             currentWallpaperSelect: root.currentWallpaperSelect
-            onReleased: function(sheet) { root.releaseWallpaperSelectSheet(sheet); }
+            onReleased: function (sheet) {
+                root.releaseWallpaperSelectSheet(sheet);
+            }
         }
     }
 
@@ -1150,7 +1108,9 @@ MD.Page {
         W.TweakSheet {
             popupParent: root
             tweak: wallpaperTweakState
-            onReleased: function(sheet) { root.releaseWallpaperTweakSheet(sheet); }
+            onReleased: function (sheet) {
+                root.releaseWallpaperTweakSheet(sheet);
+            }
         }
     }
 
@@ -1160,7 +1120,9 @@ MD.Page {
         W.PlaylistListSheet {
             popupParent: root
             sheetState: playlistListSheetState
-            onReleased: function(sheet) { root.releasePlaylistListSheet(sheet); }
+            onReleased: function (sheet) {
+                root.releasePlaylistListSheet(sheet);
+            }
         }
     }
 
@@ -1189,5 +1151,4 @@ MD.Page {
             sheetState: selectSheetContentState
         }
     }
-
 }
