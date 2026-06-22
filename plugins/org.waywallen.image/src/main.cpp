@@ -44,9 +44,9 @@ struct Options {
     uint32_t width { 0 };
     uint32_t height { 0 };
     /* Short-edge cap from the user's `resolution` setting. 0 = ORIGIN. */
-    uint32_t resolution { 0 };
-    bool     decode_only { false };
-    bool     vulkan_probe { false };
+    int32_t resolution { 0 };
+    bool    decode_only { false };
+    bool    vulkan_probe { false };
     // Test hook
     bool        print_caps { false };
     std::string render_node;
@@ -704,10 +704,10 @@ int main(int argc, char** argv) {
         if (opt.render_node.empty() && std::strcmp(kv.key, "render_node") == 0 && *kv.value) {
             opt.render_node = kv.value;
         } else if (std::strcmp(kv.key, "resolution") == 0 && *kv.value) {
-            char*         end = nullptr;
-            unsigned long n   = std::strtoul(kv.value, &end, 10);
-            opt.resolution    = (end != kv.value) ? ww_resolution_sanitize(static_cast<uint32_t>(n))
-                                                  : static_cast<uint32_t>(WW_RESOLUTION_1080P);
+            char* end      = nullptr;
+            long  n        = std::strtol(kv.value, &end, 10);
+            opt.resolution = (end != kv.value) ? ww_resolution_sanitize(static_cast<int32_t>(n))
+                                               : static_cast<int32_t>(WW_RESOLUTION_1080P);
         }
     }
     apply_user_properties(host, init.user_properties);

@@ -17,7 +17,8 @@ extern "C" {
 
 typedef enum ww_resolution
 {
-    WW_RESOLUTION_ORIGIN = 0, /* no cap — use renderer's native size */
+    WW_RESOLUTION_CUSTOM = -1, /* renderer-specific custom short-edge extent */
+    WW_RESOLUTION_ORIGIN = 0,  /* no cap — use renderer's native size */
     WW_RESOLUTION_720P   = 1,
     WW_RESOLUTION_1080P  = 2,
     WW_RESOLUTION_1440P  = 3,
@@ -36,8 +37,9 @@ typedef enum ww_resolution_cap_option
 } ww_resolution_cap_option_t;
 
 /* Short-edge cap (in pixels) implied by the enum.
- * `WW_RESOLUTION_ORIGIN` and out-of-range values return 0 (= no cap). */
-static inline uint32_t ww_resolution_short_edge(uint32_t r) {
+ * `WW_RESOLUTION_CUSTOM`, `WW_RESOLUTION_ORIGIN`, and out-of-range
+ * values return 0 (= no cap). */
+static inline uint32_t ww_resolution_short_edge(int32_t r) {
     switch (r) {
     case WW_RESOLUTION_720P: return 720u;
     case WW_RESOLUTION_1080P: return 1080u;
@@ -47,8 +49,8 @@ static inline uint32_t ww_resolution_short_edge(uint32_t r) {
     }
 }
 
-/* Apply the short-edge cap to an already-resolved (w, h). Aspect ratio
- * preserved. ORIGIN / unknown resolutions are no-ops.
+/* Apply an explicit short-edge cap to an already-resolved (w, h).
+ * Aspect ratio is preserved. A zero cap is a no-op.
  *
  * `option == WW_RESOLUTION_CAP_DEFAULT` only shrinks: when the shorter
  *   input edge already fits within the cap, the extent is left
@@ -58,9 +60,8 @@ static inline uint32_t ww_resolution_short_edge(uint32_t r) {
  *   short edge matches the cap exactly — upward when the input is
  *   smaller, downward when larger. Use for renderers whose content
  *   has no fixed native (wescene). */
-static inline void ww_resolution_apply_cap(uint32_t resolution, uint32_t option, uint32_t* w,
-                                           uint32_t* h) {
-    uint32_t cap = ww_resolution_short_edge(resolution);
+static inline void ww_resolution_apply_short_edge(uint32_t cap, uint32_t option, uint32_t* w,
+                                                  uint32_t* h) {
     if (cap == 0 || w == 0 || h == 0 || *w == 0 || *h == 0) return;
     uint32_t short_edge = (*w < *h) ? *w : *h;
     if (short_edge == cap) return;
@@ -78,12 +79,23 @@ static inline void ww_resolution_apply_cap(uint32_t resolution, uint32_t option,
     if (*h == 0) *h = 1u;
 }
 
+/* Apply the enum's short-edge cap to an already-resolved (w, h).
+ * Aspect ratio is preserved. CUSTOM / ORIGIN / unknown resolutions are
+ * no-ops; CUSTOM callers should pass their explicit extent through
+ * `ww_resolution_apply_short_edge`. */
+static inline void ww_resolution_apply_cap(int32_t resolution, uint32_t option, uint32_t* w,
+                                           uint32_t* h) {
+    ww_resolution_apply_short_edge(ww_resolution_short_edge(resolution), option, w, h);
+}
+
 /* Coerce a raw wire value into a usable resolution. Anything outside
- * `[ORIGIN .. 2160P]` falls back to `WW_RESOLUTION_1080P`. ORIGIN
- * stays ORIGIN — callers that disallow it (web, no native size) must
- * filter it themselves. */
-static inline uint32_t ww_resolution_sanitize(uint32_t raw) {
-    if (raw > (uint32_t)WW_RESOLUTION_2160P) return (uint32_t)WW_RESOLUTION_1080P;
+ * `{CUSTOM, ORIGIN .. 2160P}` falls back to `WW_RESOLUTION_1080P`.
+ * CUSTOM and ORIGIN stay unchanged — callers that disallow them must
+ * filter them themselves. */
+static inline int32_t ww_resolution_sanitize(int32_t raw) {
+    if (raw == (int32_t)WW_RESOLUTION_CUSTOM) return raw;
+    if (raw < (int32_t)WW_RESOLUTION_ORIGIN || raw > (int32_t)WW_RESOLUTION_2160P)
+        return (int32_t)WW_RESOLUTION_1080P;
     return raw;
 }
 

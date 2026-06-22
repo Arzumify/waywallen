@@ -19,6 +19,7 @@ fn toml_value_to_wire(v: &toml::Value) -> String {
 fn setting_type_to_proto(ty: SettingType) -> i32 {
     match ty {
         SettingType::U32 => SettingValueType::U32 as i32,
+        SettingType::I32 => SettingValueType::I32 as i32,
         SettingType::F32 => SettingValueType::F32 as i32,
         SettingType::String => SettingValueType::String as i32,
         SettingType::Bool => SettingValueType::Bool as i32,

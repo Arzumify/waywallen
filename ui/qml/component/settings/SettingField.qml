@@ -27,6 +27,7 @@ ColumnLayout {
     readonly property int kF32: 2
     readonly property int kString: 3
     readonly property int kBool: 4
+    readonly property int kI32: 5
 
     readonly property string label: {
         const sk = schema.label_key || "";
@@ -50,6 +51,7 @@ ColumnLayout {
     // Wire enum value → display label. Kept in sync with
     // <waywallen-bridge/resolution.h> WW_RESOLUTION_*.
     readonly property var resolutionPresets: [
+        { value: "-1", label: "Custom" },
         { value: "0", label: "Origin" },
         { value: "1", label: "720p" },
         { value: "2", label: "1080p" },
@@ -65,9 +67,9 @@ ColumnLayout {
             return false;
         if (t === kString)
             return !(schema.choices && schema.choices.length > 0);
-        // u32 falls back to a (dense) textfield when the range is too
+        // Integer settings fall back to a dense textfield when the range is too
         // wide to be useful on a slider.
-        if (t === kU32)
+        if (root._isIntegerType(t))
             return !(_hasNumericRange() && (_intRangeFitsSlider() || root.isFadeMs));
         return !_hasNumericRange();
     }
@@ -78,7 +80,7 @@ ColumnLayout {
         return lo.length > 0 && hi.length > 0;
     }
 
-    // u32 sliders feel right up to a ~1000-unit span; beyond that the
+    // Integer sliders feel right up to a ~1000-unit span; beyond that the
     // step granularity gets coarse and a textfield is friendlier.
     function _intRangeFitsSlider() {
         const lo = root._toFloat(root.schema.min, 0);
@@ -91,12 +93,16 @@ ColumnLayout {
         return isNaN(n) ? fallback : n;
     }
 
+    function _isIntegerType(t) {
+        return t === root.kU32 || t === root.kI32;
+    }
+
     function _stepFor() {
         const s = schema.step || "";
         if (s.length > 0) {
-            return root._toFloat(s, schema.type === root.kU32 ? 1 : 0.01);
+            return root._toFloat(s, root._isIntegerType(schema.type) ? 1 : 0.01);
         }
-        return schema.type === root.kU32 ? 1 : 0.01;
+        return root._isIntegerType(schema.type) ? 1 : 0.01;
     }
 
     // Forward the user's edit but never write `root.value` ourselves —
@@ -162,6 +168,7 @@ ColumnLayout {
             case root.kBool:
                 return boolField;
             case root.kU32:
+            case root.kI32:
                 return (root._hasNumericRange() && (root._intRangeFitsSlider() || root.isFadeMs))
                     ? sliderField : numericField;
             case root.kF32:
@@ -215,10 +222,10 @@ ColumnLayout {
                 return minText.length > maxText.length ? minText : maxText;
             }
             function displayValue(v) {
-                return root.schema.type === root.kU32 ? Math.round(v).toString() : Number(v).toFixed(2);
+                return root._isIntegerType(root.schema.type) ? Math.round(v).toString() : Number(v).toFixed(2);
             }
             onMoved: {
-                if (root.schema.type === root.kU32) {
+                if (root._isIntegerType(root.schema.type)) {
                     root._emit(Math.round(value).toString());
                 } else {
                     root._emit(value.toString());
@@ -242,12 +249,12 @@ ColumnLayout {
             placeholderText: root.label
             mdState.dense: true
             inputMethodHints: root.schema.type === root.kU32 ? Qt.ImhDigitsOnly : Qt.ImhFormattedNumbersOnly
-            validator: root.schema.type === root.kU32 ? intValidator : doubleValidator
+            validator: root._isIntegerType(root.schema.type) ? intValidator : doubleValidator
             onEditingFinished: root._emit(text)
 
             IntValidator {
                 id: intValidator
-                bottom: 0
+                bottom: root.schema.type === root.kU32 ? 0 : -2147483648
             }
             DoubleValidator {
                 id: doubleValidator
@@ -297,19 +304,17 @@ ColumnLayout {
     }
 
     // Resolution chip list. Wire value is the WW_RESOLUTION_* enum
-    // (string-encoded), filtered against the schema's [min, max] range
-    // so manifests that disallow Origin (e.g. weweb — no native size)
-    // simply omit it.
+    // (string-encoded), filtered against the schema's [min, max] range.
     Component {
         id: resolutionField
         Flow {
             spacing: 6
 
-            readonly property int loIdx: {
+            readonly property int loValue: {
                 const n = parseInt(root.schema.min || "0", 10);
                 return isNaN(n) ? 0 : n;
             }
-            readonly property int hiIdx: {
+            readonly property int hiValue: {
                 const n = parseInt(root.schema.max || "4", 10);
                 return isNaN(n) ? 4 : n;
             }
@@ -319,8 +324,8 @@ ColumnLayout {
                 delegate: MD.FilterChip {
                     id: resChip
                     required property var modelData
-                    required property int index
-                    visible: index >= parent.loIdx && index <= parent.hiIdx
+                    readonly property int modelValue: parseInt(modelData.value, 10)
+                    visible: modelValue >= parent.loValue && modelValue <= parent.hiValue
                     text: modelData.label
                     checked: root.value === modelData.value
                     onClicked: root._emit(modelData.value)

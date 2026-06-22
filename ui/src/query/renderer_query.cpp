@@ -117,7 +117,7 @@ void RendererPluginListQuery::reload() {
                 // build a typed form without touching protobuf objects. The
                 // `type` enum is exposed as an integer (matches the proto
                 // `SettingValueType` numeric values: U32=1, F32=2, STRING=3,
-                // BOOL=4) so QML compares with plain integer literals.
+                // BOOL=4, I32=5) so QML compares with plain integer literals.
                 QVariantList settings;
                 for (const auto& s : r.settings()) {
                     QVariantMap sm;

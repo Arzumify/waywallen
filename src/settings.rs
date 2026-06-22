@@ -864,6 +864,11 @@ impl SettingsStore {
                             toml::Value::String(s) => s.clone(),
                             other => other.to_string(),
                         },
+                        SettingType::I32 => match &def.default {
+                            toml::Value::Integer(i) => i.to_string(),
+                            toml::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        },
                         SettingType::F32 => match &def.default {
                             toml::Value::Float(f) => f.to_string(),
                             toml::Value::Integer(i) => (*i as f32).to_string(),

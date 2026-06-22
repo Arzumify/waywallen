@@ -312,6 +312,7 @@ enum SettingValueType {
   SETTING_VALUE_TYPE_F32 = 2;
   SETTING_VALUE_TYPE_STRING = 3;
   SETTING_VALUE_TYPE_BOOL = 4;
+  SETTING_VALUE_TYPE_I32 = 5;
 }
 
 // ---------------------------------------------------------------------------

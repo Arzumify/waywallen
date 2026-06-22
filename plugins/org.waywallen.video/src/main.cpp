@@ -722,12 +722,12 @@ int main(int argc, char** argv) {
     host.pending_enable_audio.store(enable_audio, std::memory_order_release);
     host.pending_fade_in_ms.store(fade_in_ms, std::memory_order_release);
     host.pending_fade_out_ms.store(fade_out_ms, std::memory_order_release);
-    uint32_t resolution = static_cast<uint32_t>(WW_RESOLUTION_ORIGIN);
+    int32_t resolution = static_cast<int32_t>(WW_RESOLUTION_ORIGIN);
     if (const char* v = kv_get(init.settings, "resolution"); v && *v) {
-        char*         end = nullptr;
-        unsigned long n   = std::strtoul(v, &end, 10);
-        resolution        = (end != v) ? ww_resolution_sanitize(static_cast<uint32_t>(n))
-                                       : static_cast<uint32_t>(WW_RESOLUTION_1080P);
+        char* end  = nullptr;
+        long  n    = std::strtol(v, &end, 10);
+        resolution = (end != v) ? ww_resolution_sanitize(static_cast<int32_t>(n))
+                                : static_cast<int32_t>(WW_RESOLUTION_1080P);
     }
     apply_user_properties(host, init.user_properties);
     ww_bridge_init_free(&init);

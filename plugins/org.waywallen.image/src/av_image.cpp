@@ -63,7 +63,7 @@ std::string av_err_str(int rc) {
 
 } // namespace
 
-RgbaBuf decode_to_rgba(const std::string& path, uint32_t resolution, DecodeError* err) {
+RgbaBuf decode_to_rgba(const std::string& path, int32_t resolution, DecodeError* err) {
     RgbaBuf out;
 
     AVFormatContext* raw_fmt = nullptr;

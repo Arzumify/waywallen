@@ -159,7 +159,7 @@ pub struct SettingDef {
     /// Optional i18n key for a short helper / tooltip line.
     #[serde(default)]
     pub description_key: Option<String>,
-    /// Numeric lower bound (inclusive) for `U32`/`F32` settings.
+    /// Numeric lower bound (inclusive) for `U32`/`I32`/`F32` settings.
     /// Ignored on string/bool; `SettingsSet` rejects out-of-range values.
     #[serde(default)]
     pub min: Option<toml::Value>,
@@ -207,6 +207,7 @@ impl SettingDef {
 #[serde(rename_all = "lowercase")]
 pub enum SettingType {
     U32,
+    I32,
     F32,
     String,
     Bool,
@@ -302,6 +303,26 @@ pub fn check_setting_bounds(
             }
             Ok(())
         }
+        SettingType::I32 => {
+            let v: i32 = coerced
+                .parse()
+                .map_err(|_| ValidationError::BadSettingType {
+                    key: key.to_string(),
+                    expected: SettingType::I32,
+                    got: coerced.to_string(),
+                })?;
+            if let Some(min_v) = schema.min.as_ref().and_then(toml_to_i32) {
+                if v < min_v {
+                    return Err(out_of_range(key, coerced, schema));
+                }
+            }
+            if let Some(max_v) = schema.max.as_ref().and_then(toml_to_i32) {
+                if v > max_v {
+                    return Err(out_of_range(key, coerced, schema));
+                }
+            }
+            Ok(())
+        }
         SettingType::F32 => {
             let v: f32 = coerced
                 .parse()
@@ -381,6 +402,14 @@ fn toml_to_u32(v: &toml::Value) -> Option<u32> {
     }
 }
 
+fn toml_to_i32(v: &toml::Value) -> Option<i32> {
+    match v {
+        toml::Value::Integer(i) => i32::try_from(*i).ok(),
+        toml::Value::String(s) => s.parse().ok(),
+        _ => None,
+    }
+}
+
 fn toml_to_f32(v: &toml::Value) -> Option<f32> {
     match v {
         toml::Value::Integer(i) => Some(*i as f32),
@@ -395,6 +424,7 @@ fn toml_to_f32(v: &toml::Value) -> Option<f32> {
 fn coerce_setting(raw: &str, ty: SettingType) -> Option<String> {
     match ty {
         SettingType::U32 => raw.parse::<u32>().ok().map(|v| v.to_string()),
+        SettingType::I32 => raw.parse::<i32>().ok().map(|v| v.to_string()),
         SettingType::F32 => raw.parse::<f32>().ok().map(|v| v.to_string()),
         SettingType::Bool => match raw {
             "true" | "false" => Some(raw.to_string()),
@@ -414,6 +444,9 @@ fn toml_default_to_string(value: &toml::Value, ty: SettingType) -> Option<String
             } else {
                 None
             }
+        }
+        (toml::Value::Integer(i), SettingType::I32) => {
+            i32::try_from(*i).ok().map(|v| v.to_string())
         }
         (toml::Value::Integer(i), SettingType::F32) => Some((*i as f32).to_string()),
         (toml::Value::Float(f), SettingType::F32) => Some(f.to_string()),
@@ -758,6 +791,21 @@ mod schema_tests {
         };
         let err = coerce_and_validate("volume", "500", &s).expect_err("must error");
         assert!(matches!(err, ValidationError::OutOfRange { ref key, .. } if key == "volume"));
+    }
+
+    #[test]
+    fn coerce_and_validate_i32_in_range() {
+        let s = SettingDef {
+            min: Some(toml::Value::Integer(-1)),
+            max: Some(toml::Value::Integer(4)),
+            ..test_setting(SettingType::I32, toml::Value::Integer(2), false)
+        };
+        assert_eq!(coerce_and_validate("resolution", "-1", &s).unwrap(), "-1");
+        assert_eq!(coerce_and_validate("resolution", "4", &s).unwrap(), "4");
+        assert!(matches!(
+            coerce_and_validate("resolution", "-2", &s),
+            Err(ValidationError::OutOfRange { .. })
+        ));
     }
 
     #[test]
