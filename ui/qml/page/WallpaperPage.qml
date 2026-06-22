@@ -257,7 +257,7 @@ MD.Page {
         icon.name: MD.Token.icon.filter_list
         text: "Filters"
         checked: wallpaperQuery.hasActiveFilters
-        onTriggered: filterDialog.open()
+        onTriggered: MD.Util.showPopup(filterDialogComponent, {}, root.Window.window)
     }
 
     MD.Action {
@@ -266,7 +266,7 @@ MD.Page {
         text: "Sources"
         onTriggered: MD.Util.showPopup('waywallen.ui/PagePopup', {
             source: 'waywallen.ui/SourceManagePage'
-        }, root)
+        }, root.Window.window)
     }
 
     MD.Action {
@@ -357,37 +357,41 @@ MD.Page {
         }
     }
 
-    W.WallpaperFilterDialog {
-        id: filterDialog
-        parent: T.Overlay.overlay
-        model: wallpaperFilterModel
-        supportedTypes: pluginQuery.supportedTypes || []
-        skipTypes: wallpaperQuery.skipTypes
-        onToggleSkip: function (ty) {
-            const next = (wallpaperQuery.skipTypes || []).slice();
-            const i = next.indexOf(ty);
-            if (i >= 0)
-                next.splice(i, 1);
-            else
-                next.push(ty);
-            wallpaperQuery.skipTypes = next;
-            root._persistGlobalChange(g => { g.wallpaperSkipTypes = next; });
-        }
-        filterTags: wallpaperQuery.filterTags
-        onApplyFilterTags: function (tags) {
-            wallpaperQuery.filterTags = tags;
-            root._persistGlobalChange(g => { g.wallpaperFilterTags = tags; });
-        }
-        skipContentRatings: wallpaperQuery.skipContentRatings
-        onToggleSkipRating: function (rating) {
-            const next = (wallpaperQuery.skipContentRatings || []).slice();
-            const i = next.indexOf(rating);
-            if (i >= 0)
-                next.splice(i, 1);
-            else
-                next.push(rating);
-            wallpaperQuery.skipContentRatings = next;
-            root._persistGlobalChange(g => { g.wallpaperSkipContentRatings = next; });
+    Component {
+        id: filterDialogComponent
+
+        W.WallpaperFilterDialog {
+            id: dynamicFilterDialog
+            parent: T.Overlay.overlay
+            model: wallpaperFilterModel
+            supportedTypes: pluginQuery.supportedTypes || []
+            skipTypes: wallpaperQuery.skipTypes
+            onToggleSkip: function (ty) {
+                const next = (wallpaperQuery.skipTypes || []).slice();
+                const i = next.indexOf(ty);
+                if (i >= 0)
+                    next.splice(i, 1);
+                else
+                    next.push(ty);
+                wallpaperQuery.skipTypes = next;
+                root._persistGlobalChange(g => { g.wallpaperSkipTypes = next; });
+            }
+            filterTags: wallpaperQuery.filterTags
+            onApplyFilterTags: function (tags) {
+                wallpaperQuery.filterTags = tags;
+                root._persistGlobalChange(g => { g.wallpaperFilterTags = tags; });
+            }
+            skipContentRatings: wallpaperQuery.skipContentRatings
+            onToggleSkipRating: function (rating) {
+                const next = (wallpaperQuery.skipContentRatings || []).slice();
+                const i = next.indexOf(rating);
+                if (i >= 0)
+                    next.splice(i, 1);
+                else
+                    next.push(rating);
+                wallpaperQuery.skipContentRatings = next;
+                root._persistGlobalChange(g => { g.wallpaperSkipContentRatings = next; });
+            }
         }
     }
 
@@ -512,7 +516,7 @@ MD.Page {
         if (root.wallpaperSelectSheet)
             return root.wallpaperSelectSheet;
 
-        const sheet = MD.Util.showPopup(wallpaperSelectSheetComponent, {}, root);
+        const sheet = MD.Util.showPopup(wallpaperSelectSheetComponent, {}, root.Window.window);
         if (sheet)
             root.wallpaperSelectSheet = sheet;
         return sheet;
@@ -542,7 +546,7 @@ MD.Page {
         if (root.wallpaperTweakSheet)
             return root.wallpaperTweakSheet;
 
-        const sheet = MD.Util.showPopup(wallpaperTweakSheetComponent, {}, root);
+        const sheet = MD.Util.showPopup(wallpaperTweakSheetComponent, {}, root.Window.window);
         if (sheet)
             root.wallpaperTweakSheet = sheet;
         return sheet;
@@ -557,7 +561,7 @@ MD.Page {
         if (root.playlistListSheet)
             return root.playlistListSheet;
 
-        const sheet = MD.Util.showPopup(playlistListSheetComponent, {}, root);
+        const sheet = MD.Util.showPopup(playlistListSheetComponent, {}, root.Window.window);
         if (sheet)
             root.playlistListSheet = sheet;
         return sheet;

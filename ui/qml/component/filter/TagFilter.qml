@@ -53,15 +53,19 @@ QtObject {
 
             MD.SmallIconButton {
                 icon.name: MD.Token.icon.edit
-                onClicked: tagDialog.open()
+                onClicked: MD.Util.showPopup(tagDialogComponent, {}, valueFlow)
             }
 
-            W.TagPickerDialog {
-                id: tagDialog
-                allTags: root.allTags
-                selected: root.values
-                onCommit: function (tags) {
-                    root.values = tags;
+            Component {
+                id: tagDialogComponent
+
+                W.TagPickerDialog {
+                    id: dynamicTagDialog
+                    allTags: root.allTags
+                    selected: root.values
+                    onCommit: function (tags) {
+                        root.values = tags;
+                    }
                 }
             }
         }

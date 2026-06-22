@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 pragma ValueTypeBehavior: Assertable
 import QtQuick
 import QtQuick.Layouts
@@ -18,14 +19,14 @@ MD.Page {
             text: qsTr("Plugins")
             onTriggered: MD.Util.showPopup('waywallen.ui/PagePopup', {
                 source: 'waywallen.ui/PluginManagePage'
-            }, root)
+            }, root.Window.window)
         },
         MD.Action {
             icon.name: MD.Token.icon.settings
             text: qsTr("Settings")
             onTriggered: MD.Util.showPopup('waywallen.ui/PagePopup', {
                 source: 'waywallen.ui/SettingsPage'
-            }, root)
+            }, root.Window.window)
         }
     ]
 
@@ -313,7 +314,7 @@ MD.Page {
                                                 currentGlobal: settingsQuery.global || ({}),
                                                 currentValues: p || ({})
                                             }
-                                        }, root);
+                                        }, root.Window.window);
                                     }
                                 }
                             }

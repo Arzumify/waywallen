@@ -28,6 +28,7 @@ MD.Dialog {
     horizontalPadding: 16
     implicitWidth: Math.min(440, parent ? parent.width - 48 : 440)
     standardButtons: T.Dialog.Close
+    property var filterTagDialog: null
 
     // Tag names for the tag-filter picker; refreshed each time the
     // dialog opens so newly-scanned tags show up.
@@ -40,6 +41,12 @@ MD.Dialog {
     onAboutToShow: {
         tagListQuery.reload();
         ratingListQuery.reload();
+    }
+
+    function openFilterTagDialog() {
+        if (filterTagDialog && (filterTagDialog.opened || filterTagDialog.entering || filterTagDialog.closing))
+            return;
+        filterTagDialog = MD.Util.showPopup(filterTagDialogComponent, {}, root);
     }
 
     contentItem: MD.VerticalListView {
@@ -96,7 +103,7 @@ MD.Dialog {
                     }
                     MD.IconButton {
                         icon.name: MD.Token.icon.edit
-                        onClicked: filterTagDialog.open()
+                        onClicked: root.openFilterTagDialog()
                     }
                 }
 
@@ -114,12 +121,20 @@ MD.Dialog {
                     }
                 }
 
-                W.TagPickerDialog {
-                    id: filterTagDialog
-                    allTags: tagListQuery.tags
-                    selected: root.filterTags
-                    onCommit: function (tags) {
-                        root.applyFilterTags(tags);
+                Component {
+                    id: filterTagDialogComponent
+
+                    W.TagPickerDialog {
+                        id: dynamicFilterTagDialog
+                        allTags: tagListQuery.tags
+                        selected: root.filterTags
+                        onCommit: function (tags) {
+                            root.applyFilterTags(tags);
+                        }
+                        onClosed: {
+                            if (root.filterTagDialog === dynamicFilterTagDialog)
+                                root.filterTagDialog = null;
+                        }
                     }
                 }
             }

@@ -74,7 +74,7 @@ Item {
                 wallpaper: root.wp,
                 sizeBytes: root.infoSizeOf(root.wp)
             }
-        }, root);
+        }, root.Window.window);
     }
     function containerFolderUrl(resource) {
         let path = String(resource || "");
