@@ -58,6 +58,7 @@ public:
     asio::thread_pool          m_pool;
     Box<QtExecutionContext>    m_gui_context;
     QPointer<QQuickWindow>     m_main_win;
+    QmlNetworkDiskCache        m_qml_network_cache;
     Box<QQmlApplicationEngine> m_qml_engine;
     Box<Backend>               m_backend;
     Box<DisplayManager>        m_display_mgr;
@@ -88,6 +89,7 @@ App::~App() { QAsyncResult::dropEx(); }
 void App::init() {
     Q_D(App);
     auto engine = this->engine();
+    d->m_qml_network_cache.install(*engine);
 
     // Initialize async executors.
     {

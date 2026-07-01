@@ -92,7 +92,7 @@
     }
   },
   {
-    "commit": "f20b70eef08eef573be03954db3a455bbefe2637",
+    "commit": "d02d9a7bfed546dfb7f87a5627b1c9e8f6fcc95a",
     "dest": "build/_flatpak_deps/QExtra-src",
     "disable-shallow-clone": true,
     "type": "git",
