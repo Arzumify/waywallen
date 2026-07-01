@@ -1,4 +1,5 @@
 local discover = import("wallhaven.discover")
+local api = import("wallhaven.api")
 local wallpaper = import("wallhaven.wallpaper")
 
 local M = {}
@@ -16,7 +17,7 @@ function M.info()
                     { key = "recent", label = "Recent" },
                     { key = "popular", label = "Popular" },
                 },
-                tags = {},
+                tags = api.tags,
             },
             wallpaper = {
                 extras = true,

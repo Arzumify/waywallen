@@ -16,6 +16,11 @@ MD.Page {
     property string sourceId: ""
     property var sortOptions: []
     property int sortIndex: 0
+    property var discoverTweakSheet: null
+
+    W.TweakState {
+        id: discoverTweakState
+    }
 
     function sourceInfo(id) {
         for (const s of availabilityQuery.sources) {
@@ -30,6 +35,36 @@ MD.Page {
         return s ? s.name : "";
     }
 
+    function sourceTags(id) {
+        const s = sourceInfo(id);
+        return s && s.tags ? s.tags : [];
+    }
+
+    function sameList(a, b) {
+        const left = a ?? [];
+        const right = b ?? [];
+        if (left.length !== right.length)
+            return false;
+        for (let i = 0; i < left.length; ++i) {
+            if (left[i] !== right[i])
+                return false;
+        }
+        return true;
+    }
+
+    function pruneTags(tags, allowedTags) {
+        const allowed = {};
+        for (const tag of allowedTags ?? [])
+            allowed[String(tag)] = true;
+        let out = [];
+        for (const tag of tags ?? []) {
+            const value = String(tag);
+            if (allowed[value] === true)
+                out.push(value);
+        }
+        return out;
+    }
+
     function sortLabel() {
         if (sortOptions.length === 0)
             return qsTr("Sort");
@@ -40,14 +75,30 @@ MD.Page {
         const s = sourceInfo(id);
         if (!s)
             return;
+        const sourceChanged = sourceId !== id;
+        const currentSortKey = searchQuery.sortKey;
         sourceId = id;
         sortOptions = s.sorts ?? [];
         sortIndex = 0;
+        if (!sourceChanged && currentSortKey.length > 0) {
+            for (let i = 0; i < sortOptions.length; ++i) {
+                if (sortOptions[i].key === currentSortKey) {
+                    sortIndex = i;
+                    break;
+                }
+            }
+        }
+        const nextTags = sourceChanged ? [] : pruneTags(searchQuery.tags, s.tags ?? []);
+        if (!sameList(searchQuery.tags, nextTags))
+            searchQuery.tags = nextTags;
         searchQuery.sourceId = id;
         detailsQuery.sourceId = id;
-        searchQuery.sortKey = sortOptions.length > 0 ? sortOptions[0].key : "";
-        detailRow = null;
-        detailState = 0;
+        searchQuery.sortKey = sortOptions.length > 0 ? sortOptions[sortIndex].key : "";
+        if (sourceChanged) {
+            detailRow = null;
+            detailState = 0;
+            detailsQuery.itemId = "";
+        }
     }
 
     function pickSort(idx) {
@@ -64,15 +115,124 @@ MD.Page {
         detailsQuery.itemId = detailRow.itemId;
     }
 
-    function fmtSize(s) {
-        const m = String(s).match(/^([\d.,]+)\s*([KMGT]?B)$/i);
+    function closeDetail() {
+        detailRow = null;
+        detailState = 0;
+        detailsQuery.itemId = "";
+        m_grid.currentIndex = -1;
+    }
+
+    function openInfo() {
+        if (!root.detailRow)
+            return;
+        MD.Util.showPopup('waywallen.ui/PagePopup', {
+            source: 'waywallen.ui/RemoteInfoPage',
+            props: {
+                item: root.detailRow,
+                details: detailsQuery,
+                sourceName: root.sourceName(root.detailRow.sourceId)
+            }
+        }, root.Window.window);
+    }
+
+    function formatBytes(bytes) {
+        let v = Number(bytes ?? 0);
+        if (!(v > 0))
+            return "";
+        const u = ["B", "KB", "MB", "GB", "TB"];
+        let i = 0;
+        while (v >= 1024 && i < u.length - 1) {
+            v /= 1024;
+            ++i;
+        }
+        return v.toFixed(i === 0 ? 0 : 1) + " " + u[i];
+    }
+
+    function formatSize(s) {
+        const text = String(s ?? "").trim();
+        if (text.length === 0)
+            return "";
+        if (/^\d+$/.test(text))
+            return formatBytes(Number(text));
+        const m = text.match(/^([\d.,]+)\s*([KMGT]?B)$/i);
         if (!m)
-            return s;
+            return text;
         const num = parseFloat(m[1].replace(/,/g, ""));
         if (isNaN(num))
-            return s;
+            return text;
         const unit = m[2].toUpperCase();
+        if (unit === "B")
+            return formatBytes(num);
         return num.toFixed(unit === "B" ? 0 : 1) + " " + unit;
+    }
+
+    function isSheetActive(sheet) {
+        return !!sheet && (sheet.opened || sheet.entering);
+    }
+
+    function ensureDiscoverTweakSheet() {
+        if (root.discoverTweakSheet)
+            return root.discoverTweakSheet;
+
+        const sheet = MD.Util.showPopup(discoverTweakSheetComponent, {}, root.Window.window);
+        if (sheet)
+            root.discoverTweakSheet = sheet;
+        return sheet;
+    }
+
+    function releaseDiscoverTweakSheet(sheet) {
+        if (root.discoverTweakSheet === sheet)
+            root.discoverTweakSheet = null;
+    }
+
+    function toggleDiscoverTweakSheet() {
+        if (root.isSheetActive(root.discoverTweakSheet)) {
+            root.discoverTweakSheet.close();
+            return;
+        }
+        const sheet = root.ensureDiscoverTweakSheet();
+        if (sheet && !sheet.opened && !sheet.entering)
+            sheet.open();
+    }
+
+    MD.Action {
+        id: tweakAction
+        text: "Tweak"
+        icon.name: MD.Token.icon.tune
+        checked: root.isSheetActive(root.discoverTweakSheet)
+        onTriggered: root.toggleDiscoverTweakSheet()
+    }
+
+    MD.Action {
+        id: filterAction
+        icon.name: MD.Token.icon.filter_list
+        text: "Filters"
+        enabled: m_filter_dialog.availableTags.length > 0
+        checked: searchQuery.tags.length > 0
+        onTriggered: m_filter_dialog.open()
+    }
+
+    MD.Action {
+        id: refreshAction
+        icon.name: MD.Token.icon.refresh
+        text: "Refresh"
+        enabled: !searchQuery.querying
+        onTriggered: searchQuery.reload()
+    }
+
+    MD.Action {
+        id: closeDetailAction
+        text: "Close"
+        icon.name: MD.Token.icon.close
+        onTriggered: root.closeDetail()
+    }
+
+    MD.Action {
+        id: infoAction
+        text: "Info"
+        icon.name: MD.Token.icon.info
+        enabled: root.detailRow !== null
+        onTriggered: root.openInfo()
     }
 
     W.RemoteAvailabilityQuery {
@@ -99,6 +259,8 @@ MD.Page {
         id: m_filter_dialog
         parent: T.Overlay.overlay
         anchors.centerIn: parent
+        availableTags: root.sourceTags(root.sourceId)
+        selectedTags: searchQuery.tags
         onApply: function(tags) {
             searchQuery.tags = tags;
         }
@@ -144,7 +306,6 @@ MD.Page {
     }
 
     function reloadAll() {
-        searchQuery.tags = m_filter_dialog.collect();
         availabilityQuery.reload();
         if (root.sourceId.length > 0)
             searchQuery.reload();
@@ -242,20 +403,7 @@ MD.Page {
 
                     MD.ActionToolBar {
                         Layout.fillWidth: true
-                        actions: [
-                            MD.Action {
-                                icon.name: MD.Token.icon.filter_list
-                                text: 'Filters'
-                                checked: searchQuery.tags.length > 0
-                                onTriggered: m_filter_dialog.open()
-                            },
-                            MD.Action {
-                                icon.name: MD.Token.icon.refresh
-                                text: 'Refresh'
-                                enabled: !searchQuery.querying
-                                onTriggered: searchQuery.reload()
-                            }
-                        ]
+                        actions: [tweakAction, filterAction, refreshAction]
                     }
                 }
 
@@ -285,13 +433,20 @@ MD.Page {
                         rightMargin: 8
                         visible: count > 0
 
-                        readonly property int _cols: Math.max(1, Math.floor(width / 162))
-                        cellWidth: (width - leftMargin - rightMargin) / _cols
-                        cellHeight: cellWidth
+                        readonly property real _availableWidth: Math.max(0, width - leftMargin - rightMargin)
+                        readonly property int _cols: Math.max(1, Math.floor(_availableWidth / discoverTweakState.itemSize))
+                        readonly property real _stretchedItemWidth: _availableWidth / _cols
+                        readonly property bool _fillCell: discoverTweakState.layoutMode === discoverTweakState.layoutFillCell
+                        readonly property real _displayItemWidth: _fillCell ? _stretchedItemWidth : Math.min(discoverTweakState.itemSize, _stretchedItemWidth)
+                        readonly property real _displayItemHeight: _displayItemWidth / Math.max(discoverTweakState.itemAspectRatio, 0.1)
+                        cellWidth: _stretchedItemWidth
+                        cellHeight: _fillCell ? _displayItemHeight : discoverTweakState.itemHeight
 
                         model: searchQuery.model
 
                         delegate: RemoteCard {
+                            itemWidth: m_grid._displayItemWidth
+                            itemHeight: m_grid._displayItemHeight
                             onClicked: {
                                 m_grid.currentIndex = index;
                                 root.selectItem(index);
@@ -356,22 +511,9 @@ MD.Page {
             contentItem: ColumnLayout {
                 spacing: 12
 
-                RowLayout {
-                    Layout.fillWidth: true
-                    Layout.topMargin: 8
-                    Layout.leftMargin: 8
-                    Layout.rightMargin: 8
-                    Item { Layout.fillWidth: true }
-                    MD.IconButton {
-                        action: MD.Action {
-                            icon.name: MD.Token.icon.close
-                            onTriggered: { root.detailRow = null; m_grid.currentIndex = -1; }
-                        }
-                    }
-                }
-
                 Rectangle {
                     Layout.fillWidth: true
+                    Layout.topMargin: 16
                     Layout.leftMargin: 16
                     Layout.rightMargin: 16
                     Layout.preferredHeight: width * 0.56
@@ -383,10 +525,11 @@ MD.Page {
                         anchors.fill: parent
                         source: root.detailRow ? root.detailRow.previewUrl : ""
                         fillMode: Image.PreserveAspectCrop
+                        horizontalAlignment: Image.AlignHCenter
+                        verticalAlignment: Image.AlignVCenter
+                        smooth: true
                         cache: true
                         playing: true
-                        sourceSize.width: 640
-                        sourceSize.height: 640
                     }
                 }
 
@@ -412,6 +555,27 @@ MD.Page {
                             wrapMode: Text.WordWrap
                         }
 
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            MD.Label {
+                                Layout.fillWidth: true
+                                text: root.detailRow ? root.detailRow.wpType : ""
+                                typescale: MD.Token.typescale.label_large
+                                color: MD.Token.color.on_surface_variant
+                                maximumLineCount: 1
+                                elide: Text.ElideRight
+                            }
+
+                            MD.ActionToolBar {
+                                actions: [infoAction, closeDetailAction]
+                                iconDelegate: MD.SmallIconButton {
+                                    action: MD.ToolBarLayout.action
+                                }
+                            }
+                        }
+
                         MD.Label {
                             Layout.fillWidth: true
                             text: root.detailRow ? qsTr("by ") + root.detailRow.author : ""
@@ -421,18 +585,44 @@ MD.Page {
                             wrapMode: Text.WordWrap
                         }
 
-                        MD.Text {
+                        GridLayout {
+                            id: m_meta
+                            Layout.fillWidth: true
                             Layout.topMargin: 4
-                            visible: detailsQuery.size.length > 0
-                            text: "Size"
-                            typescale: MD.Token.typescale.label_medium
-                            color: MD.Token.color.on_surface_variant
-                        }
-                        MD.Text {
-                            visible: detailsQuery.size.length > 0
-                            text: root.fmtSize(detailsQuery.size)
-                            typescale: MD.Token.typescale.body_medium
-                            color: MD.Token.color.on_surface
+                            columns: 2
+                            columnSpacing: 12
+                            rowSpacing: 4
+                            visible: hasResolution || hasSize
+
+                            readonly property bool hasResolution: detailsQuery.width > 0 && detailsQuery.height > 0
+                            readonly property string formattedSize: root.formatSize(detailsQuery.size)
+                            readonly property bool hasSize: formattedSize.length > 0
+
+                            MD.Text {
+                                visible: m_meta.hasResolution
+                                text: "Resolution"
+                                typescale: MD.Token.typescale.label_medium
+                                color: MD.Token.color.on_surface_variant
+                            }
+                            MD.Text {
+                                visible: m_meta.hasResolution
+                                text: detailsQuery.width + "×" + detailsQuery.height
+                                typescale: MD.Token.typescale.body_medium
+                                color: MD.Token.color.on_surface
+                            }
+
+                            MD.Text {
+                                visible: m_meta.hasSize
+                                text: "Size"
+                                typescale: MD.Token.typescale.label_medium
+                                color: MD.Token.color.on_surface_variant
+                            }
+                            MD.Text {
+                                visible: m_meta.hasSize
+                                text: m_meta.formattedSize
+                                typescale: MD.Token.typescale.body_medium
+                                color: MD.Token.color.on_surface
+                            }
                         }
 
                         Flow {
@@ -500,6 +690,18 @@ MD.Page {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    Component {
+        id: discoverTweakSheetComponent
+
+        W.TweakSheet {
+            popupParent: root
+            tweak: discoverTweakState
+            onReleased: function (sheet) {
+                root.releaseDiscoverTweakSheet(sheet);
             }
         }
     }

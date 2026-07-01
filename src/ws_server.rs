@@ -1758,6 +1758,7 @@ async fn dispatch_inner(
                             author: item.author,
                             installed,
                             source_id: source_id.clone(),
+                            wp_type: item.wp_type,
                         });
                     }
                     Res::RemoteSearch(pb::RemoteSearchResponse {
@@ -1871,6 +1872,8 @@ async fn dispatch_inner(
                         size: String::new(),
                         tags: Vec::new(),
                         error: e.to_string(),
+                        width: 0,
+                        height: 0,
                     }));
                 }
             };
@@ -1884,12 +1887,16 @@ async fn dispatch_inner(
                     size: details.size,
                     tags: details.tags,
                     error: String::new(),
+                    width: details.width.unwrap_or(0),
+                    height: details.height.unwrap_or(0),
                 }),
                 Err(e) => Res::RemoteDetails(pb::RemoteDetailsResponse {
                     description: String::new(),
                     size: String::new(),
                     tags: Vec::new(),
                     error: e.to_string(),
+                    width: 0,
+                    height: 0,
                 }),
             }
         }

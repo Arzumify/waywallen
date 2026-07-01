@@ -169,6 +169,7 @@ set(QML_FILES
   qml/page/wallpaper/PlaylistListSheet.qml
   qml/page/wallpaper/PlaylistListSheetState.qml
   qml/page/DiscoverPage.qml
+  qml/page/RemoteInfoPage.qml
   qml/page/RemoteCard.qml
   qml/page/StatusPage.qml
   qml/page/PluginManagePage.qml

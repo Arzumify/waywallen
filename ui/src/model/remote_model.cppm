@@ -18,6 +18,7 @@ export struct RemoteRow {
     QString title;
     QString previewUrl;
     QString author;
+    QString wpType;
     bool    installed { false };
 };
 
@@ -35,6 +36,7 @@ public:
         TitleRole,
         PreviewUrlRole,
         AuthorRole,
+        WpTypeRole,
         InstalledRole,
     };
 

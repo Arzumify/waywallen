@@ -25,6 +25,7 @@ QVariant RemoteListModel::data(const QModelIndex& index, int role) const {
     case TitleRole: return r.title;
     case PreviewUrlRole: return r.previewUrl;
     case AuthorRole: return r.author;
+    case WpTypeRole: return r.wpType;
     case InstalledRole: return r.installed;
     default: return {};
     }
@@ -34,7 +35,8 @@ QHash<int, QByteArray> RemoteListModel::roleNames() const {
     return {
         { ItemIdRole, "itemId"_ba }, { SourceIdRole, "sourceId"_ba },
         { TitleRole, "title"_ba },   { PreviewUrlRole, "previewUrl"_ba },
-        { AuthorRole, "author"_ba }, { InstalledRole, "installed"_ba },
+        { AuthorRole, "author"_ba }, { WpTypeRole, "wpType"_ba },
+        { InstalledRole, "installed"_ba },
     };
 }
 
@@ -76,6 +78,7 @@ QVariantMap RemoteListModel::get(int row) const {
     m["title"_L1]      = r.title;
     m["previewUrl"_L1] = r.previewUrl;
     m["author"_L1]     = r.author;
+    m["wpType"_L1]     = r.wpType;
     m["installed"_L1]  = r.installed;
     return m;
 }

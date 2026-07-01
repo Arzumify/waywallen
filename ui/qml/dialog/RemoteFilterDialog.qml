@@ -11,34 +11,48 @@ MD.Dialog {
     implicitWidth: Math.min(760, parent ? parent.width - 48 : 760)
     standardButtons: T.Dialog.Cancel | T.Dialog.Reset | T.Dialog.Apply
 
+    property var availableTags: []
+    property var selectedTags: []
+    property var working: ({})
+
     signal apply(var tags)
 
-    readonly property var defaults: ({ "Scene": true, "Video": true, "Web": true, "Application": true })
-    property var working: cloneDefaults()
+    readonly property var filterTags: sanitizeTags(availableTags).filter(t => t !== "Mature")
+    readonly property bool hasMatureFilter: sanitizeTags(availableTags).indexOf("Mature") >= 0
 
-    readonly property var groups: [
-        { name: qsTr("Type"), tags: ["Scene", "Video", "Web", "Application"] },
-        { name: qsTr("Genre"), tags: ["Abstract", "Animal", "Anime", "Cartoon", "CG",
-            "Cyberpunk", "Fantasy", "Game", "Girls", "Guys", "Landscape", "Medieval",
-            "Memes", "MMD", "Music", "Nature", "Pixel art", "Relaxing", "Retro",
-            "Sci-Fi", "Sports", "Technology", "Vehicle", "Unspecified"] },
-        { name: qsTr("Resolution"), tags: ["1280 x 720", "1920 x 1080", "2560 x 1440",
-            "3840 x 2160", "2560 x 1080", "3440 x 1440", "5120 x 1440", "3840 x 1080",
-            "7680 x 2160", "1080 x 1920", "720 x 1280", "1440 x 2560"] },
-        { name: qsTr("Misc"), tags: ["Audio Responsive", "Customizable", "Come with Music"] }
-    ]
-
-    function cloneDefaults() {
-        let w = {};
-        for (const k in defaults)
-            w[k] = defaults[k];
-        return w;
+    function sanitizeTags(tags) {
+        let out = [];
+        let seen = {};
+        for (const value of tags ?? []) {
+            const tag = String(value);
+            if (tag.length === 0 || seen[tag] === true)
+                continue;
+            seen[tag] = true;
+            out.push(tag);
+        }
+        return out;
+    }
+    function selectedMap(tags) {
+        const allowed = {};
+        for (const tag of sanitizeTags(availableTags))
+            allowed[tag] = true;
+        let out = {};
+        for (const tag of sanitizeTags(tags)) {
+            if (allowed[tag] === true)
+                out[tag] = true;
+        }
+        return out;
+    }
+    function setSelectedTags(tags) {
+        working = selectedMap(tags);
     }
     function has(tag) {
         return working[tag] === true;
     }
     function toggle(tag, on) {
-        let w = working;
+        let w = {};
+        for (const k in working)
+            w[k] = working[k];
         if (on)
             w[tag] = true;
         else
@@ -47,60 +61,58 @@ MD.Dialog {
     }
     function collect() {
         let out = [];
-        for (const g of groups) {
-            let checkedIn = g.tags.filter(t => working[t] === true);
-            if (checkedIn.length > 0 && checkedIn.length < g.tags.length)
-                out = out.concat(checkedIn);
+        for (const tag of sanitizeTags(availableTags)) {
+            if (working[tag] === true)
+                out.push(tag);
         }
-        if (working["Mature"] !== true)
-            out.push("Everyone");
         return out;
     }
 
+    onAboutToShow: setSelectedTags(selectedTags)
     onApplied: {
         root.apply(collect());
         accept();
     }
-    onReset: working = cloneDefaults()
+    onReset: setSelectedTags([])
 
     contentItem: ColumnLayout {
         spacing: 16
 
-        Repeater {
-            model: root.groups
-            delegate: ColumnLayout {
-                id: groupCol
-                required property var modelData
+        ColumnLayout {
+            Layout.fillWidth: true
+            spacing: 6
+            visible: root.filterTags.length > 0
+
+            MD.Label {
+                text: qsTr("Tags")
+                typescale: MD.Token.typescale.title_small
+            }
+
+            Flow {
                 Layout.fillWidth: true
                 spacing: 6
 
-                MD.Label {
-                    text: groupCol.modelData.name
-                    typescale: MD.Token.typescale.title_small
-                }
-
-                Flow {
-                    Layout.fillWidth: true
-                    spacing: 6
-
-                    Repeater {
-                        model: groupCol.modelData.tags
-                        delegate: MD.FilterChip {
-                            required property string modelData
-                            text: modelData
-                            checked: root.has(modelData)
-                            onClicked: root.toggle(modelData, checked)
-                        }
+                Repeater {
+                    model: root.filterTags
+                    delegate: MD.FilterChip {
+                        required property string modelData
+                        text: modelData
+                        checked: root.has(modelData)
+                        onClicked: root.toggle(modelData, checked)
                     }
                 }
             }
         }
 
-        MD.Divider { Layout.fillWidth: true }
+        MD.Divider {
+            Layout.fillWidth: true
+            visible: root.hasMatureFilter
+        }
 
         RowLayout {
             Layout.fillWidth: true
             spacing: 12
+            visible: root.hasMatureFilter
 
             ColumnLayout {
                 Layout.fillWidth: true

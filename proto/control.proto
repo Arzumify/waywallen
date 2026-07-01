@@ -652,6 +652,7 @@ message RemoteItem {
   string author = 4;
   bool   installed = 5;
   string source_id = 6;
+  string wp_type = 7;
 }
 
 message RemoteSearchRequest {
@@ -694,6 +695,8 @@ message RemoteDetailsResponse {
   string size = 2;
   repeated string tags = 3;
   string error = 4;
+  uint32 width = 5;
+  uint32 height = 6;
 }
 
 enum RemoteDownloadState {

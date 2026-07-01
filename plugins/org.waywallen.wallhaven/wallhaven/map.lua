@@ -50,6 +50,8 @@ function M.details(detail)
     return {
         description = description,
         size = tostring(detail.file_size or ""),
+        width = detail.dimension_x,
+        height = detail.dimension_y,
         tags = tags_from_detail(detail),
         extra = {
             url = detail.url or "",

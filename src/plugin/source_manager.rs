@@ -98,6 +98,7 @@ pub struct DiscoverItem {
     pub title: String,
     pub preview_url: String,
     pub author: String,
+    pub wp_type: String,
     pub extra: HashMap<String, String>,
 }
 
@@ -106,6 +107,8 @@ pub struct DiscoverItem {
 pub struct DiscoverDetails {
     pub description: String,
     pub size: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
     pub tags: Vec<String>,
     pub extra: HashMap<String, String>,
 }
@@ -1114,6 +1117,13 @@ impl SourceManager {
         if info.capabilities.discover.is_none() {
             return Err(Error::DiscoverUnsupported(plugin_name.to_string()));
         }
+        let default_wp_type = info
+            .capabilities
+            .source
+            .as_ref()
+            .and_then(|source| source.types.first())
+            .cloned()
+            .unwrap_or_default();
         let module: LuaTable = self.lua.registry_value(key)?;
         let discover_api: LuaTable = module.get("discover")?;
         let discover_fn: LuaFunction = discover_api
@@ -1159,6 +1169,14 @@ impl SourceManager {
                 title: Self::require_string(&row, "title", &context)?,
                 preview_url: Self::require_string(&row, "preview_url", &context)?,
                 author: Self::require_string(&row, "author", &context)?,
+                wp_type: {
+                    let value = Self::optional_string(&row, "wp_type", &context)?;
+                    if value.is_empty() {
+                        default_wp_type.clone()
+                    } else {
+                        value
+                    }
+                },
                 extra: parse_lua_string_map(&row, "extra", &context)?,
             });
         }
@@ -1208,6 +1226,8 @@ impl SourceManager {
                 "module.discover.details result",
             )?,
             size: Self::require_string(&result, "size", "module.discover.details result")?,
+            width: result.get::<u32>("width").ok(),
+            height: result.get::<u32>("height").ok(),
             tags: Self::require_string_sequence(&result, "tags", "module.discover.details result")?,
             extra: parse_lua_string_map(&result, "extra", "module.discover.details result")?,
         })
@@ -1584,7 +1604,7 @@ function M.info()
         name = "imported",
         capabilities = {
             source = { types = {"image"}, scan = true },
-            discover = { search = true, download = true },
+            discover = { search = true, details = true, download = true },
         },
     }
 end
@@ -1596,7 +1616,21 @@ function M.source.scan(ctx)
 end
 M.discover = {}
 function M.discover.search(ctx, params)
-    return { items = {}, has_more = false }
+    return {
+        items = {
+            { id = "abc", title = names.name(), preview_url = "", author = "" },
+        },
+        has_more = false,
+    }
+end
+function M.discover.details(ctx, id)
+    return {
+        description = names.name(),
+        size = "42",
+        width = 10,
+        height = 20,
+        tags = {"tag"},
+    }
 end
 function M.discover.download(ctx, id)
     return {
@@ -1625,6 +1659,13 @@ return M
         block(async { mgr.scan_all(&HashMap::new()).await.unwrap() });
         assert_eq!(mgr.list()[0].name, "Imported");
 
+        let search = block_value(async {
+            mgr.call_discover("imported", "", "", 1, &[])
+                .await
+                .unwrap()
+        });
+        assert_eq!(search.items[0].wp_type, "image");
+
         let dl = block_value(async { mgr.call_download("imported", "abc").await.unwrap() });
         assert_eq!(dl.wp_type, "image");
         assert_eq!(dl.filename, "abc.jpg");
@@ -1632,6 +1673,9 @@ return M
         assert_eq!(dl.tags, vec!["tag"]);
         assert_eq!(dl.external_id, "abc");
         assert_eq!(dl.size, Some(42));
+        let detail = block_value(async { mgr.call_details("imported", "abc").await.unwrap() });
+        assert_eq!(detail.width, Some(10));
+        assert_eq!(detail.height, Some(20));
     }
 
     #[test]
@@ -1700,6 +1744,7 @@ return M
         assert_eq!(sources.len(), 1);
         assert_eq!(sources[0].plugin_id, "wallhaven");
         assert!(sources[0].supports_search);
+        assert!(sources[0].tags.iter().any(|tag| tag == "Anime"));
     }
 
     #[test]

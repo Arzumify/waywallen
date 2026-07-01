@@ -100,6 +100,8 @@ export class RemoteDetailsQuery : public Query,
     Q_PROPERTY(QString itemId READ itemId WRITE setItemId NOTIFY itemIdChanged FINAL)
     Q_PROPERTY(QString description READ description NOTIFY loaded FINAL)
     Q_PROPERTY(QString size READ size NOTIFY loaded FINAL)
+    Q_PROPERTY(int width READ width NOTIFY loaded FINAL)
+    Q_PROPERTY(int height READ height NOTIFY loaded FINAL)
     Q_PROPERTY(QStringList tags READ tags NOTIFY loaded FINAL)
 
 public:
@@ -112,6 +114,8 @@ public:
     void setItemId(const QString&);
     auto description() const -> const QString&;
     auto size() const -> const QString&;
+    auto width() const -> int;
+    auto height() const -> int;
     auto tags() const -> const QStringList&;
 
     void reload() override;
@@ -125,6 +129,8 @@ private:
     QString     m_item_id;
     QString     m_description;
     QString     m_size;
+    int         m_width { 0 };
+    int         m_height { 0 };
     QStringList m_tags;
 };
 

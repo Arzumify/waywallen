@@ -152,6 +152,7 @@ void RemoteSearchQuery::fetchPage(quint32 page, bool append) {
                     it.title(),
                     it.previewUrl(),
                     it.author(),
+                    it.wpType(),
                     it.installed(),
                 });
             }
@@ -190,11 +191,15 @@ void RemoteDetailsQuery::setItemId(const QString& v) {
 }
 auto RemoteDetailsQuery::description() const -> const QString& { return m_description; }
 auto RemoteDetailsQuery::size() const -> const QString& { return m_size; }
+auto RemoteDetailsQuery::width() const -> int { return m_width; }
+auto RemoteDetailsQuery::height() const -> int { return m_height; }
 auto RemoteDetailsQuery::tags() const -> const QStringList& { return m_tags; }
 
 void RemoteDetailsQuery::reload() {
     m_description.clear();
     m_size.clear();
+    m_width = 0;
+    m_height = 0;
     m_tags.clear();
     Q_EMIT loaded();
     if (m_item_id.isEmpty()) return;
@@ -217,6 +222,8 @@ void RemoteDetailsQuery::reload() {
             const auto& dr      = rsp.remoteDetails();
             self->m_description = dr.description();
             self->m_size        = dr.size();
+            self->m_width       = static_cast<int>(dr.width());
+            self->m_height      = static_cast<int>(dr.height());
             self->m_tags.clear();
             for (const auto& t : dr.tags()) self->m_tags.push_back(t);
             Q_EMIT self->loaded();
