@@ -2,23 +2,25 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Templates as T
+import waywallen.ui as W
 import Qcm.Material as MD
 
 MD.Dialog {
     id: root
     title: qsTr("Filters")
     horizontalPadding: 16
-    implicitWidth: Math.min(760, parent ? parent.width - 48 : 760)
-    standardButtons: T.Dialog.Cancel | T.Dialog.Reset | T.Dialog.Apply
+    implicitWidth: Math.min(440, parent ? parent.width - 48 : 440)
+    standardButtons: T.Dialog.Close
 
     property var availableTags: []
     property var selectedTags: []
-    property var working: ({})
+    property var filterTagDialog: null
 
     signal apply(var tags)
 
     readonly property var filterTags: sanitizeTags(availableTags).filter(t => t !== "Mature")
     readonly property bool hasMatureFilter: sanitizeTags(availableTags).indexOf("Mature") >= 0
+    readonly property var selectedFilterTags: collectSelected(filterTags)
 
     function sanitizeTags(tags) {
         let out = [];
@@ -43,62 +45,93 @@ MD.Dialog {
         }
         return out;
     }
-    function setSelectedTags(tags) {
-        working = selectedMap(tags);
-    }
     function has(tag) {
-        return working[tag] === true;
+        return selectedMap(selectedTags)[tag] === true;
     }
-    function toggle(tag, on) {
-        let w = {};
-        for (const k in working)
-            w[k] = working[k];
-        if (on)
-            w[tag] = true;
-        else
-            delete w[tag];
-        working = w;
-    }
-    function collect() {
+    function collectSelected(tags) {
+        const selected = selectedMap(selectedTags);
         let out = [];
-        for (const tag of sanitizeTags(availableTags)) {
-            if (working[tag] === true)
+        for (const tag of sanitizeTags(tags)) {
+            if (selected[tag] === true)
                 out.push(tag);
         }
         return out;
     }
-
-    onAboutToShow: setSelectedTags(selectedTags)
-    onApplied: {
-        root.apply(collect());
-        accept();
+    function collect(filterTags, mature) {
+        const selected = {};
+        for (const tag of sanitizeTags(filterTags))
+            selected[tag] = true;
+        let out = [];
+        for (const tag of sanitizeTags(availableTags)) {
+            if (tag === "Mature") {
+                if (mature)
+                    out.push(tag);
+            } else if (selected[tag] === true) {
+                out.push(tag);
+            }
+        }
+        return out;
     }
-    onReset: setSelectedTags([])
+    function openFilterTagDialog() {
+        if (filterTagDialog && (filterTagDialog.opened || filterTagDialog.entering || filterTagDialog.closing))
+            return;
+        filterTagDialog = MD.Util.showPopup(filterTagDialogComponent, {}, root);
+    }
+    function applyFilterTags(tags) {
+        root.apply(collect(tags, has("Mature")));
+    }
+    function setMature(on) {
+        root.apply(collect(selectedFilterTags, on));
+    }
 
     contentItem: ColumnLayout {
         spacing: 16
 
         ColumnLayout {
             Layout.fillWidth: true
-            spacing: 6
+            spacing: 4
             visible: root.filterTags.length > 0
 
-            MD.Label {
-                text: qsTr("Tags")
-                typescale: MD.Token.typescale.title_small
+            RowLayout {
+                Layout.fillWidth: true
+                MD.Label {
+                    Layout.fillWidth: true
+                    text: qsTr("Tags")
+                    typescale: MD.Token.typescale.title_medium
+                }
+                MD.IconButton {
+                    icon.name: MD.Token.icon.edit
+                    onClicked: root.openFilterTagDialog()
+                }
             }
 
             Flow {
                 Layout.fillWidth: true
+                visible: root.selectedFilterTags && root.selectedFilterTags.length > 0
                 spacing: 6
 
                 Repeater {
-                    model: root.filterTags
-                    delegate: MD.FilterChip {
-                        required property string modelData
+                    model: root.selectedFilterTags
+                    delegate: W.Tag {
+                        required property var modelData
                         text: modelData
-                        checked: root.has(modelData)
-                        onClicked: root.toggle(modelData, checked)
+                    }
+                }
+            }
+
+            Component {
+                id: filterTagDialogComponent
+
+                W.TagPickerDialog {
+                    id: dynamicFilterTagDialog
+                    allTags: root.filterTags
+                    selected: root.selectedFilterTags
+                    onCommit: function (tags) {
+                        root.applyFilterTags(tags);
+                    }
+                    onClosed: {
+                        if (root.filterTagDialog === dynamicFilterTagDialog)
+                            root.filterTagDialog = null;
                     }
                 }
             }
@@ -132,10 +165,13 @@ MD.Dialog {
                 id: m_nsfw
                 checked: root.has("Mature")
                 onClicked: {
-                    if (!root.has("Mature"))
+                    if (!root.has("Mature")) {
+                        m_nsfw.checked = Qt.binding(() => root.has("Mature"));
                         m_confirm.open();
-                    else
-                        root.toggle("Mature", false);
+                    } else {
+                        root.setMature(false);
+                        m_nsfw.checked = Qt.binding(() => root.has("Mature"));
+                    }
                 }
             }
         }
@@ -147,7 +183,10 @@ MD.Dialog {
         modal: true
         anchors.centerIn: T.Overlay.overlay
         standardButtons: T.Dialog.Cancel | T.Dialog.Ok
-        onAccepted: root.toggle("Mature", true)
+        onAccepted: {
+            root.setMature(true);
+            m_nsfw.checked = Qt.binding(() => root.has("Mature"));
+        }
         onRejected: m_nsfw.checked = Qt.binding(() => root.has("Mature"))
 
         contentItem: MD.Label {
