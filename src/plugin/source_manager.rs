@@ -1742,6 +1742,15 @@ return M
         assert_eq!(sources[0].plugin_id, "wallhaven");
         assert!(sources[0].supports_search);
         assert!(sources[0].tags.iter().any(|tag| tag == "Anime"));
+
+        let env = mgr.plugin_lua_env(plugin_path.parent().unwrap()).unwrap();
+        let import: LuaFunction = env.get("import").unwrap();
+        let map: LuaTable = import.call("wallhaven.map").unwrap();
+        let search_item: LuaFunction = map.get("search_item").unwrap();
+        let item = mgr.lua.create_table().unwrap();
+        item.set("id", "abc").unwrap();
+        let mapped: LuaTable = search_item.call(item).unwrap();
+        assert_eq!(mapped.get::<String>("wp_type").unwrap(), "image");
     }
 
     #[test]

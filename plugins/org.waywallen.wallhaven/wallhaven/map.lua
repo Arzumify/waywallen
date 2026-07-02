@@ -38,6 +38,7 @@ function M.search_item(item)
         title = title(item),
         preview_url = thumbs.large or thumbs.original or thumbs.small or item.path or "",
         author = "",
+        wp_type = "image",
         extra = {
             resolution = item.resolution or "",
             purity = item.purity or "",
