@@ -128,7 +128,7 @@ pub struct RendererDef {
     #[serde(default)]
     pub settings: HashMap<String, SettingDef>,
     /// Opt-in inbound-event subscriptions.
-    /// Recognized values include "pointer".
+    /// Recognized values include "pointer" and "mpris".
     #[serde(default)]
     pub events: Vec<String>,
 }
@@ -136,11 +136,12 @@ pub struct RendererDef {
 /// Inbound-event family subscribed via the manifest `events` array.
 /// Recognized values are listed here for validation.
 pub const EVENT_KIND_POINTER: &str = "pointer";
+pub const EVENT_KIND_MPRIS: &str = "mpris";
 
 /// Returns `true` when `name` matches one of the recognised
 /// inbound-event family strings.
 pub fn is_known_event_kind(name: &str) -> bool {
-    matches!(name, EVENT_KIND_POINTER)
+    matches!(name, EVENT_KIND_POINTER | EVENT_KIND_MPRIS)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -716,11 +717,11 @@ mod schema_tests {
             [renderers.wescene-renderer]
             bin = "bin/waywallen-wescene-renderer"
             types = ["scene"]
-            events = ["pointer"]
+            events = ["pointer", "mpris"]
         "#;
         let m: PluginManifest = toml::from_str(src).expect("parses");
         let r = &m.renderers["wescene-renderer"];
-        assert_eq!(r.events, vec!["pointer".to_string()]);
+        assert_eq!(r.events, vec!["pointer".to_string(), "mpris".to_string()]);
     }
 
     #[test]

@@ -827,6 +827,56 @@ uint32_t ww_evt_in_pointer_axis_expected_fds(const ww_evt_in_pointer_axis_t *m) 
     return 0;
 }
 
+int ww_evt_in_mpris_encode(const ww_evt_in_mpris_t *m, ww_buf_t *out) {
+    int rc;
+    (void)m;
+    if ((rc = w_u32(out, m->state))) return rc;
+    if ((rc = w_string(out, m->title))) return rc;
+    if ((rc = w_string(out, m->artist))) return rc;
+    if ((rc = w_string(out, m->album))) return rc;
+    if ((rc = w_string(out, m->album_artist))) return rc;
+    if ((rc = w_string(out, m->art_url))) return rc;
+    if ((rc = w_string(out, m->previous_art_url))) return rc;
+    return WW_OK;
+}
+
+int ww_evt_in_mpris_decode(const uint8_t *buf, size_t len, ww_evt_in_mpris_t *out) {
+    memset(out, 0, sizeof(*out));
+    ww_rd_t r = { buf, 0, len };
+    int rc;
+    if ((rc = rd_u32(&r, &out->state))) goto fail;
+    if ((rc = rd_string(&r, &out->title))) goto fail;
+    if ((rc = rd_string(&r, &out->artist))) goto fail;
+    if ((rc = rd_string(&r, &out->album))) goto fail;
+    if ((rc = rd_string(&r, &out->album_artist))) goto fail;
+    if ((rc = rd_string(&r, &out->art_url))) goto fail;
+    if ((rc = rd_string(&r, &out->previous_art_url))) goto fail;
+    if (r.pos != r.len) {
+        int rc2 = WW_ERR_TRAILING;
+        (void)rc2;
+        ww_evt_in_mpris_free(out);
+        return WW_ERR_TRAILING;
+    }
+    return WW_OK;
+fail:
+    ww_evt_in_mpris_free(out);
+    return rc;
+}
+
+void ww_evt_in_mpris_free(ww_evt_in_mpris_t *m) {
+    free(m->title); m->title = NULL;
+    free(m->artist); m->artist = NULL;
+    free(m->album); m->album = NULL;
+    free(m->album_artist); m->album_artist = NULL;
+    free(m->art_url); m->art_url = NULL;
+    free(m->previous_art_url); m->previous_art_url = NULL;
+}
+
+uint32_t ww_evt_in_mpris_expected_fds(const ww_evt_in_mpris_t *m) {
+    (void)m;
+    return 0;
+}
+
 int ww_evt_ready_encode(const ww_evt_ready_t *m, ww_buf_t *out) {
     int rc;
     (void)m;

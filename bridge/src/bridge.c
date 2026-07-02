@@ -505,6 +505,9 @@ int ww_bridge_recv_control(int sock, ww_bridge_control_t* out) {
     case WW_EVT_IN_POINTER_AXIS:
         rc = ww_evt_in_pointer_axis_decode(body, body_len, &out->u.pointer_axis);
         break;
+    case WW_EVT_IN_MPRIS:
+        rc = ww_evt_in_mpris_decode(body, body_len, &out->u.mpris);
+        break;
     case WW_EVT_IN_SET_FPS: rc = ww_evt_in_set_fps_decode(body, body_len, &out->u.set_fps); break;
     case WW_EVT_IN_SHUTDOWN:
         rc = ww_evt_in_shutdown_decode(body, body_len, &out->u.shutdown);
@@ -531,6 +534,7 @@ void ww_bridge_control_free(ww_bridge_control_t* msg) {
     case WW_EVT_IN_POINTER_MOTION: ww_evt_in_pointer_motion_free(&msg->u.pointer_motion); break;
     case WW_EVT_IN_POINTER_BUTTON: ww_evt_in_pointer_button_free(&msg->u.pointer_button); break;
     case WW_EVT_IN_POINTER_AXIS: ww_evt_in_pointer_axis_free(&msg->u.pointer_axis); break;
+    case WW_EVT_IN_MPRIS: ww_evt_in_mpris_free(&msg->u.mpris); break;
     case WW_EVT_IN_SET_FPS: ww_evt_in_set_fps_free(&msg->u.set_fps); break;
     case WW_EVT_IN_SHUTDOWN: ww_evt_in_shutdown_free(&msg->u.shutdown); break;
     case WW_EVT_IN_NEGOTIATE_BUFFERS:
@@ -726,4 +730,34 @@ int ww_bridge_pointer_axis_from_control(ww_bridge_control_t* ctrl, ww_bridge_poi
     out->timestamp_us = ctrl->u.pointer_axis.timestamp_us;
     out->modifiers    = ctrl->u.pointer_axis.modifiers;
     return 0;
+}
+
+/* -----------------------------------------------------------------------
+ * MPRIS media events
+ * ----------------------------------------------------------------------- */
+
+int ww_bridge_mpris_from_control(ww_bridge_control_t* ctrl, ww_bridge_mpris_t* out) {
+    if (! ctrl || ! out) return -EINVAL;
+    if (ctrl->op != WW_EVT_IN_MPRIS) return -EINVAL;
+    memset(out, 0, sizeof(*out));
+    out->state            = ctrl->u.mpris.state;
+    out->title            = ctrl->u.mpris.title;
+    out->artist           = ctrl->u.mpris.artist;
+    out->album            = ctrl->u.mpris.album;
+    out->album_artist     = ctrl->u.mpris.album_artist;
+    out->art_url          = ctrl->u.mpris.art_url;
+    out->previous_art_url = ctrl->u.mpris.previous_art_url;
+    memset(&ctrl->u.mpris, 0, sizeof(ctrl->u.mpris));
+    return 0;
+}
+
+void ww_bridge_mpris_free(ww_bridge_mpris_t* out) {
+    if (! out) return;
+    free(out->title);
+    free(out->artist);
+    free(out->album);
+    free(out->album_artist);
+    free(out->art_url);
+    free(out->previous_art_url);
+    memset(out, 0, sizeof(*out));
 }

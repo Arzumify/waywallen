@@ -16,6 +16,7 @@ mod events;
 mod gpu;
 mod ipc;
 mod model;
+mod mpris;
 pub mod playlist;
 mod plugin;
 mod probe;
@@ -367,6 +368,8 @@ async fn async_main() -> anyhow::Result<()> {
     // Session state monitor. Watches D-Bus for lock-screen and
     // user-switch events, then forwards them to the router.
     session_monitor::spawn(router.clone(), state.shutdown_subscribe());
+
+    mpris::spawn(state.clone());
 
     // Start display infrastructure before work that may need a display.
     // This covers both UDS endpoint and daemon-managed backends.

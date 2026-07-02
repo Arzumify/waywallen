@@ -17,7 +17,9 @@ use crate::ipc::uds::{recv_event, send_control, CodecError};
 /// Renderer IPC compatibility version the daemon currently emits. Bump
 /// this when the daemon/renderer wire contract changes.
 pub const SPAWN_VERSION: u32 = 6;
-use crate::plugin::renderer_registry::{RendererDef, RendererRegistry};
+use crate::plugin::renderer_registry::{
+    RendererDef, RendererRegistry, EVENT_KIND_MPRIS, EVENT_KIND_POINTER,
+};
 use crate::routing::Router;
 use crate::wallpaper::types::WallpaperType;
 
@@ -25,6 +27,31 @@ use crate::wallpaper::types::WallpaperType;
 // Public types
 
 pub type RendererId = String;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MprisSnapshot {
+    pub state: u32,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub album_artist: String,
+    pub art_url: String,
+    pub previous_art_url: String,
+}
+
+impl Default for MprisSnapshot {
+    fn default() -> Self {
+        Self {
+            state: 0,
+            title: String::new(),
+            artist: String::new(),
+            album: String::new(),
+            album_artist: String::new(),
+            art_url: String::new(),
+            previous_art_url: String::new(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct SpawnRequest {
@@ -843,7 +870,7 @@ impl RendererManager {
         timestamp_us: u64,
         modifiers: u32,
     ) -> Result<()> {
-        if !self.subscribed_to(id, "pointer").await {
+        if !self.subscribed_to(id, EVENT_KIND_POINTER).await {
             return Ok(());
         }
         self.send_control(
@@ -870,7 +897,7 @@ impl RendererManager {
         timestamp_us: u64,
         modifiers: u32,
     ) -> Result<()> {
-        if !self.subscribed_to(id, "pointer").await {
+        if !self.subscribed_to(id, EVENT_KIND_POINTER).await {
             return Ok(());
         }
         self.send_control(
@@ -900,7 +927,7 @@ impl RendererManager {
         timestamp_us: u64,
         modifiers: u32,
     ) -> Result<()> {
-        if !self.subscribed_to(id, "pointer").await {
+        if !self.subscribed_to(id, EVENT_KIND_POINTER).await {
             return Ok(());
         }
         self.send_control(
@@ -913,6 +940,27 @@ impl RendererManager {
                 source,
                 timestamp_us,
                 modifiers,
+            },
+        )
+        .await
+    }
+
+    /// Forward an MPRIS media snapshot to a live renderer. Silently
+    /// drops when the renderer did not subscribe to MPRIS events.
+    pub async fn send_mpris(&self, id: &str, snapshot: MprisSnapshot) -> Result<()> {
+        if !self.subscribed_to(id, EVENT_KIND_MPRIS).await {
+            return Ok(());
+        }
+        self.send_control(
+            id,
+            ControlMsg::Mpris {
+                state: snapshot.state,
+                title: snapshot.title,
+                artist: snapshot.artist,
+                album: snapshot.album,
+                album_artist: snapshot.album_artist,
+                art_url: snapshot.art_url,
+                previous_art_url: snapshot.previous_art_url,
             },
         )
         .await

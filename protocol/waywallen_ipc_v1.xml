@@ -15,7 +15,7 @@
     <event_in> — daemon → subprocess (inbound to the renderer). All
                  control-plane notifications: init, setting_changed,
                  play, pause, set_fps, shutdown, pointer_*,
-                 negotiate_buffers.
+                 mpris, negotiate_buffers.
     <event>    — subprocess → daemon (outbound from the renderer):
                  ready, bind_buffers, frame_ready, error,
                  release_syncobj, format_caps, bind_failed, init_nack.
@@ -93,6 +93,11 @@
     ["pointer"]`. Renderers that don't subscribe never see them.
     Field shapes mirror waywallen-display-v1's pointer events; the
     daemon is a pure passthrough that strips its display id.
+
+    Optional MPRIS events. `mpris` snapshots are forwarded only when
+    the renderer's manifest opts in via `[renderer] events =
+    ["mpris"]`. The daemon owns D-Bus/MPRIS parsing and renderer
+    selection; subprocesses receive the already-normalized metadata.
 
     Modifier negotiation. The renderer ships `format_caps` after
     `ready` and before any `bind_buffers`, advertising
@@ -317,6 +322,23 @@
     <arg name="source" type="u32"/>
     <arg name="timestamp_us" type="u64"/>
     <arg name="modifiers" type="u32"/>
+  </event_in>
+
+  <!--
+    MPRIS media snapshot. Optional; gated by manifest `events =
+    ["mpris"]`. `state` matches Wallpaper Engine's MediaPlaybackEvent
+    enum: 0=stopped, 1=playing, 2=paused. String fields are empty when
+    unavailable. `art_url` is the current cover URL/path, and
+    `previous_art_url` is the last non-empty cover before it changed.
+  -->
+  <event_in name="mpris" opcode="14">
+    <arg name="state" type="u32"/>
+    <arg name="title" type="string"/>
+    <arg name="artist" type="string"/>
+    <arg name="album" type="string"/>
+    <arg name="album_artist" type="string"/>
+    <arg name="art_url" type="string"/>
+    <arg name="previous_art_url" type="string"/>
   </event_in>
 
 

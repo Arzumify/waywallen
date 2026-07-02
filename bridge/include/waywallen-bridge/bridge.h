@@ -379,6 +379,7 @@ typedef struct ww_bridge_control {
         ww_evt_in_pointer_motion_t    pointer_motion;
         ww_evt_in_pointer_button_t    pointer_button;
         ww_evt_in_pointer_axis_t      pointer_axis;
+        ww_evt_in_mpris_t             mpris;
         ww_evt_in_set_fps_t           set_fps;
         ww_evt_in_shutdown_t          shutdown;
         ww_evt_in_negotiate_buffers_t negotiate_buffers;
@@ -544,6 +545,16 @@ typedef struct ww_bridge_pointer_axis {
     uint32_t modifiers;
 } ww_bridge_pointer_axis_t;
 
+typedef struct ww_bridge_mpris {
+    uint32_t state;
+    char*    title;
+    char*    artist;
+    char*    album;
+    char*    album_artist;
+    char*    art_url;
+    char*    previous_art_url;
+} ww_bridge_mpris_t;
+
 /* Peel a pointer-event view out of a generic control message. POD
  * copies — `ctrl` keeps no resources, so a trailing
  * `ww_bridge_control_free(ctrl)` is still safe (and a no-op for the
@@ -553,6 +564,17 @@ int ww_bridge_pointer_motion_from_control(ww_bridge_control_t*        ctrl,
 int ww_bridge_pointer_button_from_control(ww_bridge_control_t*        ctrl,
                                           ww_bridge_pointer_button_t* out);
 int ww_bridge_pointer_axis_from_control(ww_bridge_control_t* ctrl, ww_bridge_pointer_axis_t* out);
+
+/* -----------------------------------------------------------------------
+ * MPRIS media events — optional, gated by manifest `events = ["mpris"]`
+ *
+ * The daemon sends already-normalized media snapshots. String storage is
+ * heap-owned; `_from_control` transfers it from `ctrl` into `out`, and
+ * the caller MUST release it with `ww_bridge_mpris_free`.
+ * ----------------------------------------------------------------------- */
+
+int  ww_bridge_mpris_from_control(ww_bridge_control_t* ctrl, ww_bridge_mpris_t* out);
+void ww_bridge_mpris_free(ww_bridge_mpris_t* out);
 
 #ifdef __cplusplus
 } /* extern "C" */

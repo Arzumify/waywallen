@@ -312,6 +312,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn roundtrip_mpris() {
+        let (a, b) = pair();
+        let sent = EventIn::Mpris {
+            state: 1,
+            title: "Song".into(),
+            artist: "Artist".into(),
+            album: "Album".into(),
+            album_artist: "Album Artist".into(),
+            art_url: "/tmp/cover.png".into(),
+            previous_art_url: "/tmp/previous.png".into(),
+        };
+        send_control(&a, &sent, &[]).unwrap();
+        let (got, _) = recv_control(&b).unwrap();
+        assert_eq!(sent, got);
+    }
+
     fn make_memfd() -> OwnedFd {
         let name = CString::new("waywallen-ipc-test").unwrap();
         memfd_create(&name, MemFdCreateFlag::MFD_CLOEXEC).expect("memfd_create")
