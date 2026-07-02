@@ -2,11 +2,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
+use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use prost::Message as _;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::tungstenite::protocol::Message;
+use tokio::sync::{broadcast::error::RecvError, mpsc};
+use tokio::task::JoinHandle;
+use tokio_tungstenite::{tungstenite::protocol::Message, WebSocketStream};
+use tokio_util::sync::CancellationToken;
 
 use crate::control;
 use crate::control_proto as pb;
@@ -53,6 +57,261 @@ pub async fn serve(state: Arc<AppState>, addr: &str) -> Result<()> {
 // Filter state ↔ pb conversion lives on `WallpaperFilterState` itself
 // so ws_server and control share one round-trip implementation.
 
+const WS_FRAME_QUEUE_CAP: usize = 512;
+
+type WsStream = WebSocketStream<TcpStream>;
+type WsSink = SplitSink<WsStream, Message>;
+type WsSource = SplitStream<WsStream>;
+type WsWriterTask = JoinHandle<Result<()>>;
+
+#[derive(Clone)]
+struct ServerFrameSink {
+    tx: mpsc::Sender<pb::ServerFrame>,
+}
+
+impl ServerFrameSink {
+    fn response(&self, response: pb::Response) -> Result<()> {
+        self.frame(wrap_response(response))
+    }
+
+    fn event(&self, event: pb::Event) -> Result<()> {
+        self.frame(wrap_event(event))
+    }
+
+    fn frame(&self, frame: pb::ServerFrame) -> Result<()> {
+        self.tx.try_send(frame).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => anyhow!("ws frame queue full"),
+            mpsc::error::TrySendError::Closed(_) => anyhow!("ws frame queue closed"),
+        })
+    }
+}
+
+fn spawn_response_task<F>(
+    peer: std::net::SocketAddr,
+    request_id: u64,
+    frames: ServerFrameSink,
+    cancel: CancellationToken,
+    fut: F,
+) where
+    F: std::future::Future<Output = pb::Response> + Send + 'static,
+{
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                log::debug!("ws {peer}: request {request_id} cancelled");
+            }
+            response = fut => {
+                if cancel.is_cancelled() {
+                    log::debug!("ws {peer}: request {request_id} completed after cancellation");
+                    return;
+                }
+                if let Err(e) = frames.response(response) {
+                    log::warn!("ws {peer}: dropping response {request_id}: {e}");
+                }
+            }
+        }
+    });
+}
+
+enum ClientFrame {
+    Request(pb::Request),
+    DecodeError(pb::Response),
+    Ignore,
+    Close,
+}
+
+fn decode_client_frame(msg: Message) -> ClientFrame {
+    let bytes = match msg {
+        Message::Binary(b) => b,
+        Message::Text(t) => t.into_bytes(),
+        Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => return ClientFrame::Ignore,
+        Message::Close(_) => return ClientFrame::Close,
+    };
+
+    match pb::Request::decode(&bytes[..]) {
+        Ok(req) => ClientFrame::Request(req),
+        Err(e) => ClientFrame::DecodeError(Error::Decode(e).to_response(0)),
+    }
+}
+
+struct WsSession {
+    state: Arc<AppState>,
+    peer: std::net::SocketAddr,
+    frames: ServerFrameSink,
+    cancel: CancellationToken,
+    src: WsSource,
+    writer_task: WsWriterTask,
+    writer_completed: bool,
+    events_rx: tokio::sync::broadcast::Receiver<RouterEvent>,
+    global_rx: tokio::sync::broadcast::Receiver<GlobalEvent>,
+    task_rx: tokio::sync::broadcast::Receiver<tasks::TaskEvent>,
+}
+
+impl WsSession {
+    fn new(
+        state: Arc<AppState>,
+        peer: std::net::SocketAddr,
+        frames: ServerFrameSink,
+        cancel: CancellationToken,
+        src: WsSource,
+        writer_task: WsWriterTask,
+    ) -> Self {
+        // Subscribe to router events before snapshotting so no updates get
+        // dropped between the snapshot and the live stream starting.
+        let events_rx = state.router.subscribe_events();
+        let global_rx = state.events.subscribe();
+        let task_rx = state.tasks.subscribe();
+        Self {
+            state,
+            peer,
+            frames,
+            cancel,
+            src,
+            writer_task,
+            writer_completed: false,
+            events_rx,
+            global_rx,
+            task_rx,
+        }
+    }
+
+    async fn run(&mut self) -> Result<()> {
+        self.send_initial_events().await?;
+
+        let mut global_events_open = true;
+        let mut task_events_open = true;
+        let mut router_events_open = true;
+        loop {
+            tokio::select! {
+                writer = &mut self.writer_task => {
+                    self.writer_completed = true;
+                    return match writer {
+                        Ok(result) => result,
+                        Err(e) => Err(e.into()),
+                    };
+                }
+                msg = self.src.next() => {
+                    let Some(msg) = msg else { return Ok(()) };
+                    if !self.handle_client_frame(msg?)? {
+                        return Ok(());
+                    }
+                }
+                gevt = self.global_rx.recv(), if global_events_open => {
+                    match gevt {
+                        Ok(e) => self.handle_global_event(e).await?,
+                        Err(RecvError::Lagged(n)) => self.handle_global_lag(n).await?,
+                        Err(RecvError::Closed) => global_events_open = false,
+                    }
+                }
+                tevt = self.task_rx.recv(), if task_events_open => {
+                    match tevt {
+                        Ok(_) => self.frames.event(status_sync_event(&self.state))?,
+                        Err(RecvError::Lagged(n)) => {
+                            log::warn!("ws {}: task event lag {n}", self.peer);
+                            self.frames.event(status_sync_event(&self.state))?;
+                        }
+                        Err(RecvError::Closed) => task_events_open = false,
+                    }
+                }
+                evt = self.events_rx.recv(), if router_events_open => {
+                    match evt {
+                        Ok(e) => {
+                            let pe = router_event_to_pb(e, &self.state.settings);
+                            self.frames.event(pe)?;
+                        }
+                        Err(RecvError::Lagged(n)) => self.handle_router_lag(n).await?,
+                        Err(RecvError::Closed) => {
+                            log::info!("ws {}: router event channel closed", self.peer);
+                            router_events_open = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn shutdown(self) {
+        self.cancel.cancel();
+        drop(self.frames);
+        if !self.writer_completed {
+            self.writer_task.abort();
+            let _ = self.writer_task.await;
+        }
+    }
+
+    async fn send_initial_events(&self) -> Result<()> {
+        let snap = self.state.router.snapshot_displays().await;
+        self.frames
+            .event(displays_replace_event(snap, &self.state.settings))?;
+
+        let snap = self.state.router.snapshot_renderers().await;
+        self.frames
+            .event(renderers_replace_event(snap, &self.state.settings))?;
+
+        let snap = control::list_library_snapshots(&self.state.db).await;
+        self.frames.event(libraries_replace_event(snap))?;
+
+        self.frames.event(status_sync_event(&self.state))?;
+        self.frames
+            .event(playlist_changed_event(&self.state).await)?;
+        Ok(())
+    }
+
+    fn handle_client_frame(&self, msg: Message) -> Result<bool> {
+        match decode_client_frame(msg) {
+            ClientFrame::Request(req) => {
+                let request_id = req.request_id;
+                let state = self.state.clone();
+                spawn_response_task(
+                    self.peer,
+                    request_id,
+                    self.frames.clone(),
+                    self.cancel.clone(),
+                    async move { dispatch(&state, req).await },
+                );
+            }
+            ClientFrame::DecodeError(resp) => self.frames.response(resp)?,
+            ClientFrame::Ignore => {}
+            ClientFrame::Close => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    async fn handle_global_event(&self, e: GlobalEvent) -> Result<()> {
+        if matches!(e, GlobalEvent::PlaylistChanged) {
+            self.frames
+                .event(playlist_changed_event(&self.state).await)?;
+        } else if let Some(pe) = global_event_to_pb(&e, &self.state) {
+            self.frames.event(pe)?;
+        }
+        if matches!(e, GlobalEvent::StatusChanged) {
+            self.frames.event(status_sync_event(&self.state))?;
+        }
+        Ok(())
+    }
+
+    async fn handle_global_lag(&self, n: u64) -> Result<()> {
+        log::warn!("ws {}: global event lag {n}", self.peer);
+        // Resync after lag; snapshots are authoritative, while transient
+        // events are allowed to drop.
+        self.frames.event(status_sync_event(&self.state))?;
+        self.frames
+            .event(playlist_changed_event(&self.state).await)?;
+        Ok(())
+    }
+
+    async fn handle_router_lag(&self, n: u64) -> Result<()> {
+        log::warn!("ws {}: event lag {n}; resending full snapshot", self.peer);
+        let snap = self.state.router.snapshot_displays().await;
+        self.frames
+            .event(displays_replace_event(snap, &self.state.settings))?;
+        let rsnap = self.state.router.snapshot_renderers().await;
+        self.frames
+            .event(renderers_replace_event(rsnap, &self.state.settings))?;
+        Ok(())
+    }
+}
+
 async fn accept_loop(state: Arc<AppState>, listener: TcpListener) -> Result<()> {
     loop {
         let (stream, peer) = listener.accept().await?;
@@ -72,158 +331,29 @@ async fn handle_conn(
 ) -> Result<()> {
     let ws = tokio_tungstenite::accept_async(stream).await?;
     log::debug!("ws conn {peer} open");
-    let (mut sink, mut src) = ws.split();
-
-    // Subscribe to router events *before* snapshotting so no updates
-    // get dropped between the snapshot and the live stream starting.
-    let mut events_rx = state.router.subscribe_events();
-    // Subscribe to process-wide events (scan lifecycle etc.). Lag here
-    // is non-fatal — UI re-fetches on the next event.
-    let mut global_rx = state.events.subscribe();
-    // Task-lifecycle events feed into `StatusSync` (active task count
-    // is one of its fields). Lag is non-fatal; the next push corrects.
-    let mut task_rx = state.tasks.subscribe();
-    {
-        let snap = state.router.snapshot_displays().await;
-        let evt = displays_replace_event(snap, &state.settings);
-        sink.send(Message::Binary(wrap_event(evt).encode_to_vec()))
-            .await?;
-    }
-    {
-        let snap = state.router.snapshot_renderers().await;
-        let evt = renderers_replace_event(snap, &state.settings);
-        sink.send(Message::Binary(wrap_event(evt).encode_to_vec()))
-            .await?;
-    }
-
-    {
-        let snap = control::list_library_snapshots(&state.db).await;
-        let evt = libraries_replace_event(snap);
-        sink.send(Message::Binary(wrap_event(evt).encode_to_vec()))
-            .await?;
-    }
-    // Initial daemon-status snapshot. Same wire shape as subsequent
-    // pushes so the UI handler is uniform.
-    sink.send(Message::Binary(
-        wrap_event(status_sync_event(&state)).encode_to_vec(),
-    ))
-    .await?;
-    sink.send(Message::Binary(
-        wrap_event(playlist_changed_event(&state).await).encode_to_vec(),
-    ))
-    .await?;
-
-    loop {
-        tokio::select! {
-            msg = src.next() => {
-                let Some(msg) = msg else { break };
-                let msg = msg?;
-                let bytes = match msg {
-                    Message::Binary(b) => b,
-                    Message::Text(t) => t.into_bytes(),
-                    Message::Ping(_) | Message::Pong(_) => continue,
-                    Message::Close(_) => break,
-                    Message::Frame(_) => continue,
-                };
-
-                let req = match pb::Request::decode(&bytes[..]) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        let resp = Error::Decode(e).to_response(0);
-                        sink.send(Message::Binary(wrap_response(resp).encode_to_vec())).await?;
-                        continue;
-                    }
-                };
-
-                let resp = dispatch(&state, req).await;
-                sink.send(Message::Binary(wrap_response(resp).encode_to_vec())).await?;
-            }
-            gevt = global_rx.recv() => {
-                match gevt {
-                    Ok(e) => {
-                        if matches!(e, GlobalEvent::PlaylistChanged) {
-                            sink.send(Message::Binary(wrap_event(playlist_changed_event(&state).await).encode_to_vec())).await?;
-                        } else if let Some(pe) = global_event_to_pb(&e, &state) {
-                            sink.send(Message::Binary(wrap_event(pe).encode_to_vec())).await?;
-                        }
-                        if matches!(e, GlobalEvent::StatusChanged) {
-                            sink.send(Message::Binary(wrap_event(status_sync_event(&state)).encode_to_vec())).await?;
-                        }
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        log::warn!("ws {peer}: global event lag {n}");
-                        // Resync after lag; snapshots are authoritative,
-                        // while transient events are allowed to drop.
-                        sink.send(Message::Binary(wrap_event(status_sync_event(&state)).encode_to_vec())).await?;
-                        sink.send(Message::Binary(wrap_event(playlist_changed_event(&state).await).encode_to_vec())).await?;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        // Daemon shutting down — let the router-event
-                        // arm or the request arm break us out cleanly.
-                    }
-                }
-            }
-            tevt = task_rx.recv() => {
-                match tevt {
-                    Ok(_) => {
-                        sink.send(Message::Binary(wrap_event(status_sync_event(&state)).encode_to_vec())).await?;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        log::warn!("ws {peer}: task event lag {n}");
-                        sink.send(Message::Binary(wrap_event(status_sync_event(&state)).encode_to_vec())).await?;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
-                }
-            }
-            evt = events_rx.recv() => {
-                match evt {
-                    Ok(e) => {
-                        let pe = router_event_to_pb(e, &state.settings);
-                        sink.send(Message::Binary(wrap_event(pe).encode_to_vec())).await?;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                        log::warn!("ws {peer}: event lag {n}; resending full snapshot");
-                        let snap = state.router.snapshot_displays().await;
-                        let evt = displays_replace_event(snap, &state.settings);
-                        sink.send(Message::Binary(wrap_event(evt).encode_to_vec())).await?;
-                        let rsnap = state.router.snapshot_renderers().await;
-                        let revt = renderers_replace_event(rsnap, &state.settings);
-                        sink.send(Message::Binary(wrap_event(revt).encode_to_vec())).await?;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        // Router shut down; stop emitting but keep the
-                        // request path alive until the client closes.
-                        log::info!("ws {peer}: router event channel closed");
-                        // Drain remaining requests without event select.
-                        while let Some(msg) = src.next().await {
-                            let msg = msg?;
-                            let bytes = match msg {
-                                Message::Binary(b) => b,
-                                Message::Text(t) => t.into_bytes(),
-                                Message::Ping(_) | Message::Pong(_) => continue,
-                                Message::Close(_) => break,
-                                Message::Frame(_) => continue,
-                            };
-                            let req = match pb::Request::decode(&bytes[..]) {
-                                Ok(r) => r,
-                                Err(e) => {
-                                    let resp = Error::Decode(e).to_response(0);
-                                    sink.send(Message::Binary(wrap_response(resp).encode_to_vec())).await?;
-                                    continue;
-                                }
-                            };
-                            let resp = dispatch(&state, req).await;
-                            sink.send(Message::Binary(wrap_response(resp).encode_to_vec())).await?;
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
+    let (sink, src) = ws.split();
+    let (frame_tx, frame_rx) = mpsc::channel::<pb::ServerFrame>(WS_FRAME_QUEUE_CAP);
+    let frames = ServerFrameSink { tx: frame_tx };
+    let writer_task = spawn_ws_writer(sink, frame_rx);
+    let cancel = CancellationToken::new();
+    let mut session = WsSession::new(state, peer, frames, cancel, src, writer_task);
+    let result = session.run().await;
+    session.shutdown().await;
+    result?;
     log::debug!("ws conn {peer} closed");
     Ok(())
+}
+
+fn spawn_ws_writer(
+    mut sink: WsSink,
+    mut frame_rx: mpsc::Receiver<pb::ServerFrame>,
+) -> WsWriterTask {
+    tokio::spawn(async move {
+        while let Some(frame) = frame_rx.recv().await {
+            sink.send(Message::Binary(frame.encode_to_vec())).await?;
+        }
+        Ok::<(), anyhow::Error>(())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2581,5 +2711,128 @@ fn entry_to_pb(
 
 #[cfg(test)]
 mod tests {
-    // Wallpaper filter SQL tests live in `model::filter`.
+    use super::*;
+
+    fn health_response(request_id: u64) -> pb::Response {
+        ok_response(
+            request_id,
+            pb::response::Payload::Health(pb::HealthResponse {
+                service: "waywallen".to_string(),
+                state: "ok".to_string(),
+            }),
+        )
+    }
+
+    fn health_request(request_id: u64) -> pb::Request {
+        pb::Request {
+            request_id,
+            payload: Some(pb::request::Payload::Health(pb::HealthRequest {})),
+        }
+    }
+
+    fn response_request_id(frame: pb::ServerFrame) -> Option<u64> {
+        match frame.kind {
+            Some(pb::server_frame::Kind::Response(response)) => Some(response.request_id),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn decode_client_frame_extracts_request() {
+        let bytes = health_request(7).encode_to_vec();
+
+        match decode_client_frame(Message::Binary(bytes)) {
+            ClientFrame::Request(req) => {
+                assert_eq!(req.request_id, 7);
+                assert!(matches!(req.payload, Some(pb::request::Payload::Health(_))));
+            }
+            _ => panic!("expected decoded request"),
+        }
+    }
+
+    #[test]
+    fn decode_client_frame_reports_decode_error() {
+        match decode_client_frame(Message::Binary(vec![0x80])) {
+            ClientFrame::DecodeError(response) => {
+                assert_eq!(response.request_id, 0);
+                assert_eq!(response.error_code, pb::ErrorCode::Decode as i32);
+            }
+            _ => panic!("expected decode error response"),
+        }
+    }
+
+    #[test]
+    fn decode_client_frame_ignores_ping_and_tracks_close() {
+        assert!(matches!(
+            decode_client_frame(Message::Ping(Vec::new())),
+            ClientFrame::Ignore
+        ));
+        assert!(matches!(
+            decode_client_frame(Message::Close(None)),
+            ClientFrame::Close
+        ));
+    }
+
+    #[tokio::test]
+    async fn response_tasks_complete_independently() {
+        let (tx, mut rx) = mpsc::channel::<pb::ServerFrame>(WS_FRAME_QUEUE_CAP);
+        let frames = ServerFrameSink { tx };
+        let cancel = CancellationToken::new();
+        let peer = "127.0.0.1:0".parse().unwrap();
+        let (release_slow, slow_released) = tokio::sync::oneshot::channel::<()>();
+
+        spawn_response_task(peer, 1, frames.clone(), cancel.clone(), async move {
+            let _ = slow_released.await;
+            health_response(1)
+        });
+        spawn_response_task(peer, 2, frames, cancel, async move { health_response(2) });
+
+        let first = rx.recv().await.expect("fast response");
+        assert_eq!(response_request_id(first), Some(2));
+
+        release_slow.send(()).expect("release slow response");
+        let second = rx.recv().await.expect("slow response");
+        assert_eq!(response_request_id(second), Some(1));
+    }
+
+    #[test]
+    fn server_frame_sink_reports_full_queue() {
+        let (tx, mut rx) = mpsc::channel::<pb::ServerFrame>(1);
+        let frames = ServerFrameSink { tx };
+
+        frames.response(health_response(1)).expect("first response");
+        let err = frames.response(health_response(2)).unwrap_err();
+        assert!(err.to_string().contains("queue full"));
+
+        let first = rx.try_recv().expect("queued response");
+        assert_eq!(response_request_id(first), Some(1));
+    }
+
+    #[tokio::test]
+    async fn response_task_cancels_pending_dispatch() {
+        let (tx, mut rx) = mpsc::channel::<pb::ServerFrame>(WS_FRAME_QUEUE_CAP);
+        let frames = ServerFrameSink { tx };
+        let cancel = CancellationToken::new();
+        let peer = "127.0.0.1:0".parse().unwrap();
+        let (release_slow, slow_released) = tokio::sync::oneshot::channel::<()>();
+
+        spawn_response_task(peer, 1, frames, cancel.clone(), async move {
+            let _ = slow_released.await;
+            health_response(1)
+        });
+
+        cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !release_slow.is_closed() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled response task");
+
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected)
+        ));
+    }
 }
