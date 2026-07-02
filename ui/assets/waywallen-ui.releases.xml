@@ -1,3 +1,23 @@
+<release version="0.2.3" date="2026-07-02">
+  <description>
+    <p>Added:</p>
+    <ul>
+      <li>Discover filters and wallpaper detail controls.</li>
+      <li>MPRIS media event forwarding.</li>
+      <li>Network cache.</li>
+    </ul>
+    <p>Fixes:</p>
+    <ul>
+      <li>Discover and wallpaper detail tag/type display.</li>
+      <li>Last-modified sorting now falls back to create_at.</li>
+      <li>WebSocket protobuf requests no longer block each other.</li>
+    </ul>
+    <p>Security:</p>
+    <ul>
+      <li>Bind the WebSocket control plane to localhost.</li>
+    </ul>
+  </description>
+</release>
 <release version="0.2.2" date="2026-06-21">
   <description>
     <p>Added:</p>
