@@ -198,7 +198,7 @@ auto RemoteDetailsQuery::tags() const -> const QStringList& { return m_tags; }
 void RemoteDetailsQuery::reload() {
     m_description.clear();
     m_size.clear();
-    m_width = 0;
+    m_width  = 0;
     m_height = 0;
     m_tags.clear();
     Q_EMIT loaded();

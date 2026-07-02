@@ -1659,11 +1659,8 @@ return M
         block(async { mgr.scan_all(&HashMap::new()).await.unwrap() });
         assert_eq!(mgr.list()[0].name, "Imported");
 
-        let search = block_value(async {
-            mgr.call_discover("imported", "", "", 1, &[])
-                .await
-                .unwrap()
-        });
+        let search =
+            block_value(async { mgr.call_discover("imported", "", "", 1, &[]).await.unwrap() });
         assert_eq!(search.items[0].wp_type, "image");
 
         let dl = block_value(async { mgr.call_download("imported", "abc").await.unwrap() });

@@ -505,9 +505,7 @@ int ww_bridge_recv_control(int sock, ww_bridge_control_t* out) {
     case WW_EVT_IN_POINTER_AXIS:
         rc = ww_evt_in_pointer_axis_decode(body, body_len, &out->u.pointer_axis);
         break;
-    case WW_EVT_IN_MPRIS:
-        rc = ww_evt_in_mpris_decode(body, body_len, &out->u.mpris);
-        break;
+    case WW_EVT_IN_MPRIS: rc = ww_evt_in_mpris_decode(body, body_len, &out->u.mpris); break;
     case WW_EVT_IN_SET_FPS: rc = ww_evt_in_set_fps_decode(body, body_len, &out->u.set_fps); break;
     case WW_EVT_IN_SHUTDOWN:
         rc = ww_evt_in_shutdown_decode(body, body_len, &out->u.shutdown);
