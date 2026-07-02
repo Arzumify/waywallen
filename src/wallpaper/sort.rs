@@ -26,7 +26,7 @@ pub fn apply_wallpaper_sorts(entries: &mut [&WallpaperEntry], sorts: &[pb::Wallp
                 pb::WallpaperSortKey::WpType => a.wp_type.cmp(&b.wp_type),
                 pb::WallpaperSortKey::Size => a.size.unwrap_or(0).cmp(&b.size.unwrap_or(0)),
                 pb::WallpaperSortKey::LastModified => {
-                    a.modified_at.unwrap_or(0).cmp(&b.modified_at.unwrap_or(0))
+                    last_modified_key(a).cmp(&last_modified_key(b))
                 }
                 pb::WallpaperSortKey::Unspecified => Ordering::Equal,
             };
@@ -37,6 +37,10 @@ pub fn apply_wallpaper_sorts(entries: &mut [&WallpaperEntry], sorts: &[pb::Wallp
             }
         });
     }
+}
+
+fn last_modified_key(entry: &WallpaperEntry) -> i64 {
+    entry.modified_at.unwrap_or(entry.create_at)
 }
 
 /// Resolve the user-visible ordered list of entry ids: DB entries →
@@ -80,4 +84,52 @@ pub async fn ordered_entry_ids(
         .into_iter()
         .map(|e| e.item_id.to_string())
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str, modified_at: Option<i64>, create_at: i64) -> WallpaperEntry {
+        WallpaperEntry {
+            item_id: 0,
+            name: name.to_string(),
+            wp_type: "image".to_string(),
+            resource: name.to_string(),
+            preview: None,
+            description: None,
+            tags: Vec::new(),
+            external_id: None,
+            size: None,
+            width: None,
+            height: None,
+            content_rating: None,
+            modified_at,
+            create_at,
+            plugin_name: String::new(),
+            library_root: String::new(),
+        }
+    }
+
+    #[test]
+    fn last_modified_sort_falls_back_to_create_at() {
+        let newer_created = entry("created-newer", None, 30);
+        let older_modified = entry("modified-older", Some(20), 40);
+        let older_created = entry("created-older", None, 10);
+        let mut entries = vec![&newer_created, &older_modified, &older_created];
+
+        apply_wallpaper_sorts(
+            &mut entries,
+            &[pb::WallpaperSortRule {
+                key: pb::WallpaperSortKey::LastModified as i32,
+                direction: pb::SortDirection::Asc as i32,
+            }],
+        );
+
+        let names: Vec<_> = entries.iter().map(|entry| entry.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["created-older", "modified-older", "created-newer"]
+        );
+    }
 }

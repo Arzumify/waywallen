@@ -650,6 +650,7 @@ impl SourceManager {
                 content_rating: tbl.get::<String>("content_rating").ok(),
                 // Daemon-only (filled from DB on read); scan leaves it None.
                 modified_at: None,
+                create_at: 0,
             };
             let idx = self.entries.len();
             self.by_type

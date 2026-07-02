@@ -390,6 +390,7 @@ fn entry_from_item(
         height: it.height.map(|v| v as u32),
         content_rating: it.content_rating,
         modified_at: it.modified_at,
+        create_at: it.create_at,
         plugin_name: plugin_name.to_string(),
         library_root: library_path.to_string(),
     }

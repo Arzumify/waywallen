@@ -188,6 +188,7 @@ mod tests {
             height: None,
             content_rating: None,
             modified_at: None,
+            create_at: 0,
         }
     }
 
@@ -347,6 +348,7 @@ mod tests {
             height: None,
             content_rating: None,
             modified_at: None,
+            create_at: 0,
         };
         let _ = sync_plugin_entries(
             &db,
