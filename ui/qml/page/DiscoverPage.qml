@@ -633,7 +633,7 @@ MD.Page {
 
                             Repeater {
                                 model: detailsQuery.tags
-                                delegate: MD.AssistChip {
+                                delegate: W.Tag {
                                     required property string modelData
                                     text: modelData
                                 }
