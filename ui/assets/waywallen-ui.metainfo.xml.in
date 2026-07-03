@@ -9,14 +9,14 @@
 
   <description>
     <p>
-      Waywallen is a dynamic wallpaper solution for Linux desktops.  
+      Waywallen is a dynamic wallpaper solution for Linux desktops with local media libraries, plugin-based discovery, and per-display controls.
     </p>
   </description>
 
   <screenshots>
       <screenshot type="default">
         <caption>main window</caption>
-        <image type="source">https://github.com/waywallen/waywallen/blob/main/ui/assets/main_page.png?raw=true</image>
+        <image type="source">https://github.com/waywallen/waywallen/raw/refs/heads/main/ui/assets/main_page.webp</image>
       </screenshot>
   </screenshots>
 
