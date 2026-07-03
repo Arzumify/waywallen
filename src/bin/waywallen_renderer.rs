@@ -1,3 +1,4 @@
+use std::ffi::{c_char, CStr};
 use std::os::fd::RawFd;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -363,11 +364,11 @@ fn run(instance: &Instance, args: &Args) -> Result<()> {
             .unwrap_or_default()
     };
     let drm_ext_avail = avail_dev_exts.iter().any(|p| {
-        let c = unsafe { std::ffi::CStr::from_ptr(p.extension_name.as_ptr()) };
+        let c = unsafe { CStr::from_ptr(p.extension_name.as_ptr()) };
         c.to_bytes() == b"VK_EXT_physical_device_drm"
     });
 
-    let mut ext_names: Vec<*const i8> = vec![
+    let mut ext_names: Vec<*const c_char> = vec![
         vk::KHR_EXTERNAL_MEMORY_NAME.as_ptr(),
         vk::KHR_EXTERNAL_MEMORY_FD_NAME.as_ptr(),
         vk::EXT_EXTERNAL_MEMORY_DMA_BUF_NAME.as_ptr(),
